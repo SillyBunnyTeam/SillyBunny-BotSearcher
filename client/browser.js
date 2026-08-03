@@ -11,13 +11,24 @@
  */
 
 import { EXTENSION_PATH, LOG_TAG } from './constants.js';
-import { AVAILABILITY, getAvailability, invalidateAvailability, post, postRouted, thumbSrc } from './api.js';
+import {
+    AVAILABILITY,
+    UPDATE_CAPABILITY,
+    getAvailability,
+    getServerPluginUpdateCapabilities,
+    invalidateAvailability,
+    post,
+    postRouted,
+    thumbSrc,
+    updateServerPlugin,
+} from './api.js';
 import { el, setText, setImgSafe } from './render.js';
 import { getSettings, updateSettings, isSourceEnabled, rememberQuery } from './settings.js';
 import { createResultCache } from './cache.js';
 import { showDetail } from './detail.js';
 import {
     availabilityCopy,
+    compareReleaseVersions,
     directRoutingNotice,
     emptyResultMessage,
     formatCount,
@@ -25,6 +36,7 @@ import {
     searchErrorMessage,
     sortLabel,
     sourceStatLine,
+    serverPluginUpdateErrorMessage,
     unreachableReason,
 } from './copy.js';
 import { buildFilters } from './filters.js';
@@ -110,11 +122,12 @@ async function openBrowserOnce(options) {
     // Popup assigns a string body itself (public/scripts/popup.js:529), which is
     // how this extension stays free of HTML parsing in its own code.
     let dispose = () => {};
+    let reopenAfterClose = false;
     const popup = new ctx.Popup(html, ctx.POPUP_TYPE.DISPLAY, '', {
         large: true,
         wide: true,
         leftAlign: true,
-        allowVerticalScrolling: false,
+        allowVerticalScrolling: !connected,
         okButton: false,
         cancelButton: 'Close',
         onClose: () => {
@@ -128,10 +141,17 @@ async function openBrowserOnce(options) {
     if (connected) {
         dispose = wireBrowser(popup, availability.health, options);
     } else {
-        wireInstallPanel(popup, availability);
+        dispose = wireInstallPanel(popup, availability, () => {
+            reopenAfterClose = true;
+        });
     }
 
     await closed;
+    if (reopenAfterClose) {
+        setTimeout(() => {
+            openBrowser().catch((error) => console.error(`[${LOG_TAG}]`, error));
+        }, 0);
+    }
 }
 
 /**
@@ -963,29 +983,122 @@ function initialOf(name) {
 /**
  * @param {any} popup
  * @param {{ status: string, health: any }} availability
+ * @param {() => void} requestReopen
  */
-function wireInstallPanel(popup, availability) {
+function wireInstallPanel(popup, availability, requestReopen) {
     const root = popup.content;
-    const copy = availabilityCopy(
-        availability.status,
-        availability.health,
-        PROTOCOL_VERSION,
-        VERSION,
-    );
     const instructions = root.querySelector('.sbbs-install-instructions');
+    const manualUpdate = root.querySelector('.sbbs-update-instructions');
     const guidance = root.querySelector('.sbbs-install-guidance');
+    const update = root.querySelector('#sbbs_update_plugin');
+    const recheck = root.querySelector('#sbbs_recheck');
+    const status = root.querySelector('.sbbs-install-update-status');
+    const capabilityController = new AbortController();
+    let closed = false;
 
-    setText(root.querySelector('.sbbs-install-title'), copy.title);
-    setText(root.querySelector('.sbbs-install-lead'), copy.lead);
-    instructions.hidden = !copy.showInstall;
-    setText(guidance, copy.guidance);
-    guidance.hidden = copy.guidance === '';
+    for (const tag of root.querySelectorAll('.sbbs-release-tag')) {
+        setText(tag, `v${VERSION}`);
+    }
 
-    root.querySelector('#sbbs_recheck')?.addEventListener('click', () => {
-        invalidateAvailability();
-        popup.complete(context().POPUP_RESULT.CANCELLED);
-        setTimeout(() => {
-            openBrowser().catch((error) => console.error(`[${LOG_TAG}]`, error));
-        }, 250);
+    const render = (capabilityStatus = '') => {
+        const copy = availabilityCopy(
+            availability.status,
+            availability.health,
+            PROTOCOL_VERSION,
+            VERSION,
+            capabilityStatus,
+        );
+        setText(root.querySelector('.sbbs-install-title'), copy.title);
+        setText(root.querySelector('.sbbs-install-lead'), copy.lead);
+        instructions.hidden = !copy.showInstall;
+        manualUpdate.hidden = !copy.showManualUpdate;
+        update.hidden = !copy.showUpdate;
+        setText(guidance, copy.guidance);
+        guidance.hidden = copy.guidance === '';
+    };
+    render();
+
+    const serverIsOlder = compareReleaseVersions(availability.health?.version, VERSION) === -1;
+    if (availability.status === AVAILABILITY.PROTOCOL_MISMATCH && serverIsOlder) {
+        getServerPluginUpdateCapabilities({ signal: capabilityController.signal }).then((capability) => {
+            if (closed) {
+                return;
+            }
+            const toolingMissing = capability.capabilities
+                && (capability.capabilities.tooling?.git === false || capability.capabilities.tooling?.npm === false);
+            const effectiveStatus = toolingMissing ? UPDATE_CAPABILITY.UNAVAILABLE : capability.status;
+            render(effectiveStatus);
+            const messages = {
+                [UPDATE_CAPABILITY.FORBIDDEN]: 'Automatic updates require a SillyBunny administrator. Stop SillyBunny completely before using the manual commands below.',
+                [UPDATE_CAPABILITY.DISABLED]: 'Server plugins are disabled in config.yaml. Enable them, then stop SillyBunny completely before using the manual commands.',
+                [UPDATE_CAPABILITY.LEGACY]: 'This legacy SillyBunny host has no automatic updater. Stop it completely before using the manual commands below.',
+                [UPDATE_CAPABILITY.UNSUPPORTED]: 'This host updater does not provide the required exact-release and safe-restart guarantees. Manual replacement is not offered.',
+                [UPDATE_CAPABILITY.UNAVAILABLE]: toolingMissing
+                    ? 'Automatic and manual updates require both Git and npm on the SillyBunny host.'
+                    : 'Automatic updating is unavailable on this host. Check the SillyBunny logs before updating manually.',
+            };
+            if (messages[effectiveStatus]) {
+                setText(status, messages[effectiveStatus]);
+                status.hidden = false;
+            }
+        }).catch((error) => {
+            if (closed) {
+                return;
+            }
+            if (error?.name !== 'AbortError') {
+                console.debug(`[${LOG_TAG}] update capability check failed:`, error);
+                render(UPDATE_CAPABILITY.UNAVAILABLE);
+                setText(status, 'Automatic updating could not be verified. Check the SillyBunny logs before updating manually.');
+                status.hidden = false;
+            }
+        });
+    }
+
+    update?.addEventListener('click', async () => {
+        if (closed) {
+            return;
+        }
+        update.disabled = true;
+        recheck.disabled = true;
+        status.hidden = false;
+        try {
+            const phases = {
+                staging: `Installing server plugin v${VERSION}...`,
+                restarting: 'Release installed. Waiting for SillyBunny to restart...',
+                verifying: 'SillyBunny is back. Verifying the server plugin...',
+                complete: `Server plugin v${VERSION} is ready.`,
+            };
+            await updateServerPlugin({
+                onPhase: (phase) => {
+                    if (!closed) {
+                        setText(status, phases[phase] ?? 'Updating server plugin...');
+                    }
+                },
+            });
+            if (closed) {
+                return;
+            }
+            requestReopen();
+            popup.complete(context().POPUP_RESULT.CANCELLED);
+        } catch (error) {
+            if (closed || error?.name === 'AbortError') {
+                return;
+            }
+            setText(status, serverPluginUpdateErrorMessage(error));
+            manualUpdate.hidden = true;
+            update.disabled = false;
+            recheck.disabled = false;
+        }
     });
+
+    recheck?.addEventListener('click', () => {
+        invalidateAvailability();
+        requestReopen();
+        popup.complete(context().POPUP_RESULT.CANCELLED);
+    });
+
+    return () => {
+        closed = true;
+        capabilityController.abort();
+    };
 }
