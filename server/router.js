@@ -11,12 +11,18 @@
  * There is no route on this router that will fetch a URL supplied by the caller.
  */
 
-import { PROTOCOL_VERSION, VERSION, FIELD_LIMITS } from '../shared/schema.js';
+import { PROTOCOL_VERSION, VERSION, FIELD_LIMITS, THUMB_SIZES } from '../shared/schema.js';
 import { describeSources, getSource } from './registry.js';
 import { wrap, jsonGuard, fail } from './guards.js';
 import { clampInt, pick, own, readSourceId, isPlainObject } from './validate.js';
-import { contextFor } from './http.js';
+import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, callerKey } from './limits.js';
+import { verifyRef } from './refs.js';
+import { detectImageType } from './imagetype.js';
+import { markSuccess, markFailure, isDown, stateOf, reset } from './health.js';
+
+/** A 320px preview is 20-60 KB; anything near this cap is not a thumbnail. */
+const MAX_THUMB_BYTES = 512 * 1024;
 
 /**
  * @param {import('express').Router} router
@@ -29,8 +35,96 @@ export function createRouter(router, state) {
             protocol: PROTOCOL_VERSION,
             version: VERSION,
             uptimeMs: Date.now() - state.startedAt,
-            sources: describeSources(() => 'unknown'),
+            sources: describeSources(stateOf),
         });
+    }));
+
+    // Clears one source's cooldown so the next request retries immediately.
+    router.post('/retry', jsonGuard, wrap(async (request, response) => {
+        const resolved = resolveSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        reset(resolved.adapter.id);
+        response.json({ ok: true, state: stateOf(resolved.adapter.id) });
+    }));
+
+    /**
+     * Thumbnail proxy.
+     *
+     * A GET because it is an <img> src, which cannot carry a CSRF header —
+     * and csrf-sync skips GET anyway. It takes a signed ref, never a URL: see
+     * refs.js for why that distinction is the whole design.
+     */
+    router.get('/thumb', wrap(async (request, response) => {
+        const sourceId = own(request.query, 'source');
+        const adapter = typeof sourceId === 'string' ? getSource(sourceId) : null;
+        if (!adapter || typeof adapter.thumbUrlFromRef !== 'function') {
+            fail(response, 404, 'unknown_source');
+            return;
+        }
+
+        // Verified before parsing: a ref we did not mint is never JSON.parse'd.
+        const payload = verifyRef(adapter.id, own(request.query, 'ref'));
+        if (!payload) {
+            fail(response, 400, 'bad_ref');
+            return;
+        }
+
+        const size = pick(own(request.query, 'size'), THUMB_SIZES, 'grid');
+        const caller = callerKey(request);
+
+        const limited = await consume('thumb', caller);
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited');
+            return;
+        }
+
+        // One grid render fires a whole page of these at once.
+        const release = acquire('thumb', caller);
+        if (!release) {
+            fail(response, 503, 'busy');
+            return;
+        }
+
+        try {
+            let url;
+            try {
+                url = adapter.thumbUrlFromRef(payload, size);
+            } catch {
+                fail(response, 400, 'bad_ref');
+                return;
+            }
+
+            const result = await fetchBytes(adapter, url, {
+                accept: 'image/webp,image/png,image/jpeg,image/avif,image/gif;q=0.8,*/*;q=0.5',
+                maxBytes: MAX_THUMB_BYTES,
+                timeoutMs: 10000,
+            });
+
+            // Magic bytes decide, not the upstream header. SVG is not in the
+            // whitelist, so an SVG labelled image/png is refused here.
+            const contentType = detectImageType(result.buffer);
+            if (!contentType) {
+                fail(response, 415, 'not_an_image');
+                return;
+            }
+
+            response.set({
+                'Content-Type': contentType,
+                'Content-Length': String(result.buffer.length),
+                'X-Content-Type-Options': 'nosniff',
+                // Per-response CSP works even though the app sets none globally.
+                'Content-Security-Policy': "default-src 'none'; sandbox",
+                'Cross-Origin-Resource-Policy': 'same-origin',
+                // The browser cache absorbs repeats, which is where the savings are.
+                'Cache-Control': 'private, max-age=86400, immutable',
+            });
+            response.send(result.buffer);
+        } finally {
+            release();
+        }
     }));
 
     router.post('/search', jsonGuard, wrap(async (request, response) => {
@@ -63,7 +157,7 @@ export function createRouter(router, state) {
         };
 
         try {
-            const result = await adapter.search(contextFor(adapter), args);
+            const result = await callAdapter(adapter, () => adapter.search(contextFor(adapter), args));
             response.json({
                 total: typeof result.total === 'number' ? result.total : null,
                 hasMore: result.hasMore === true,
@@ -98,7 +192,7 @@ export function createRouter(router, state) {
         }
 
         try {
-            response.json(await adapter.getDetail(contextFor(adapter), id));
+            response.json(await callAdapter(adapter, () => adapter.getDetail(contextFor(adapter), id)));
         } finally {
             gate.release();
         }
@@ -139,10 +233,33 @@ function readId(adapter, body) {
 }
 
 /**
- * Applies the per-user limit, the per-source limit and the in-flight cap.
+ * Runs an adapter call and records the outcome with the circuit breaker, so a
+ * source that has gone away stops being retried on every keystroke.
+ */
+async function callAdapter(adapter, fn) {
+    try {
+        const result = await fn();
+        markSuccess(adapter.id);
+        return result;
+    } catch (error) {
+        markFailure(adapter.id, error);
+        throw error;
+    }
+}
+
+/**
+ * Applies the breaker, the per-user limit, the per-source limit and the
+ * in-flight cap.
  * @returns {Promise<{ release: () => void } | null>}
  */
 async function gateRequest(request, response, sourceId, limiterName) {
+    // While a source is in cooldown, answer immediately and make no outbound
+    // request at all.
+    if (isDown(sourceId)) {
+        fail(response, 503, 'source_down');
+        return null;
+    }
+
     const caller = callerKey(request);
 
     const perUser = await consume(limiterName, caller);

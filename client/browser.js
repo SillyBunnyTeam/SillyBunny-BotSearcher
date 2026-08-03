@@ -11,7 +11,7 @@
  */
 
 import { EXTENSION_PATH, LOG_TAG } from './constants.js';
-import { AVAILABILITY, getAvailability, invalidateAvailability, post } from './api.js';
+import { AVAILABILITY, getAvailability, invalidateAvailability, post, thumbSrc } from './api.js';
 import { el, setText, setImgSafe } from './render.js';
 import { getSettings, updateSettings } from './settings.js';
 import { showDetail } from './detail.js';
@@ -231,11 +231,79 @@ function wireBrowser(popup, health, options) {
             dom.more.hidden = result.hasMore !== true || items.length === 0;
         } catch (error) {
             clearSkeletons();
-            setText(dom.state, describeError(error, state.source.label));
             setText(dom.count, '');
+
+            if (error?.code === 'source_down') {
+                retireSource(state.source);
+                return;
+            }
+
+            setText(dom.state, describeError(error, state.source.label));
         } finally {
             state.loading = false;
         }
+    }
+
+    /**
+     * A source that has gone away is removed from the picker rather than left
+     * to spin. The Retry clears its server-side cooldown, so a site that comes
+     * back does not require a restart.
+     */
+    function retireSource(dead) {
+        const index = usable.findIndex((entry) => entry.id === dead.id);
+        if (index >= 0) {
+            usable.splice(index, 1);
+        }
+        dom.source.querySelector(`option[value="${CSS.escape(dead.id)}"]`)?.remove();
+
+        toastr.info(`${dead.label} isn’t responding — hidden for now.`, 'BotSearcher');
+
+        dom.grid.replaceChildren();
+        records.clear();
+        state.items = [];
+
+        if (usable.length === 0) {
+            dom.bar.hidden = true;
+            setText(dom.state, 'No sources are available right now.');
+        } else {
+            state.source = usable[0];
+            dom.source.value = state.source.id;
+            applySourceCapabilities();
+            setText(dom.state, `Switched to ${state.source.label}.`);
+        }
+
+        const retry = el('button', 'menu_button sbbs-retry-source', `Retry ${dead.label}`);
+        retry.type = 'button';
+        retry.addEventListener('click', async () => {
+            retry.disabled = true;
+            try {
+                await post('/retry', { source: dead.id });
+                invalidateAvailability();
+                toastr.success(`${dead.label} will be tried again.`, 'BotSearcher');
+                restoreSource(dead, retry);
+            } catch {
+                retry.disabled = false;
+                toastr.error(`${dead.label} is still unavailable.`, 'BotSearcher');
+            }
+        });
+        dom.state.after(retry);
+    }
+
+    function restoreSource(revived, retryButton) {
+        retryButton.remove();
+        if (usable.some((entry) => entry.id === revived.id)) {
+            return;
+        }
+        usable.push(revived);
+        const option = document.createElement('option');
+        option.value = revived.id;
+        setText(option, revived.label ?? revived.id);
+        dom.source.append(option);
+        dom.bar.hidden = false;
+        dom.source.value = revived.id;
+        state.source = revived;
+        applySourceCapabilities();
+        runSearch({ append: false });
     }
 
     function appendCards(items) {
@@ -282,10 +350,11 @@ function buildCard(item, source, settings) {
     card.type = 'button';
 
     const figure = el('div', 'sbbs-card-img');
-    if (settings.imageMode !== 'off' && item.thumbUrl) {
+    const src = thumbSrc(item, source, 'grid', settings.imageMode);
+    if (src) {
         const img = document.createElement('img');
         img.alt = '';
-        if (setImgSafe(img, item.thumbUrl, source.allowedHosts)) {
+        if (setImgSafe(img, src, source.allowedHosts)) {
             if (item.nsfw && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
             }
@@ -318,8 +387,15 @@ function describeError(error, sourceLabel) {
             return 'Too many searches — wait a moment and try again.';
         case 'source_busy':
             return `${sourceLabel} is busy — try again shortly.`;
+        case 'source_down':
+            return `${sourceLabel} isn’t responding.`;
         case 'http_error':
             return `${sourceLabel} returned an error.`;
+        case 'too_large':
+            return `${sourceLabel} sent more data than expected.`;
+        case 'bad_json':
+        case 'unsafe_json':
+            return `${sourceLabel} sent a response this version can’t read. It may have changed its API.`;
         default:
             return `Could not reach ${sourceLabel}.`;
     }

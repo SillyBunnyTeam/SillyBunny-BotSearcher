@@ -16,6 +16,7 @@
 
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
+import { mintRef } from '../refs.js';
 
 const BASE = 'https://botbooru.com';
 
@@ -70,25 +71,58 @@ function isNsfw(names) {
 }
 
 /**
+ * The image filename becomes a path segment, so it must not be able to
+ * introduce one. This is the only field from the payload that reaches a URL.
+ */
+const FILENAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * @param {unknown} post
+ * @returns {string | null}
+ */
+function filenameOf(post) {
+    const filename = own(post, 'filename');
+    return typeof filename === 'string' && FILENAME_PATTERN.test(filename) ? filename : null;
+}
+
+function revisionOf(post) {
+    const revision = own(post, 'card_image_revision');
+    return typeof revision === 'number' && Number.isFinite(revision) ? Math.floor(revision) : null;
+}
+
+/**
  * @param {unknown} post
  * @param {'grid' | 'detail'} size
  * @returns {string | null}
  */
 function previewUrl(post, size) {
-    const filename = own(post, 'filename');
-    // Path segment, so it must not be able to introduce one.
-    if (typeof filename !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(filename)) {
+    const filename = filenameOf(post);
+    if (filename === null) {
         return null;
     }
+    return buildPreviewUrl(filename, revisionOf(post), size);
+}
 
+function buildPreviewUrl(filename, revision, size) {
     const url = new URL(`/images/preview/${PREVIEW_SIZES[size]}/${encodeURIComponent(filename)}`, BASE);
-
-    const revision = own(post, 'card_image_revision');
-    if (typeof revision === 'number' && Number.isFinite(revision)) {
-        url.searchParams.set('v', String(Math.floor(revision)));
+    if (revision !== null && revision !== undefined) {
+        url.searchParams.set('v', String(revision));
     }
-
     return url.toString();
+}
+
+/**
+ * The opaque token behind the /thumb proxy. Carries no host and no path
+ * separator — only the filename and its cache-busting revision.
+ * @param {unknown} post
+ */
+function previewRef(post) {
+    const filename = filenameOf(post);
+    if (filename === null) {
+        return null;
+    }
+    const revision = revisionOf(post);
+    return mintRef('botbooru', revision === null ? { f: filename } : { f: filename, v: revision });
 }
 
 function idOf(post) {
@@ -116,6 +150,7 @@ function toSummary(post) {
         },
         createdAt: own(post, 'created_at'),
         thumbUrl: previewUrl(post, 'grid'),
+        thumbRef: previewRef(post),
         pageUrl: id ? `${BASE}/character/${id}` : null,
         // Accepted by content-manager.js's parseBotbooruUrl -> /download/png/<id>.
         importUrl: id ? `${BASE}/character/${id}` : null,
@@ -145,6 +180,7 @@ function toDetail(post, id) {
         },
         createdAt: own(post, 'created_at'),
         thumbUrl: previewUrl(post, 'detail'),
+        thumbRef: previewRef(post),
         pageUrl: `${BASE}/character/${id}`,
         importUrl: `${BASE}/character/${id}`,
         nativeImport: true,
@@ -248,6 +284,26 @@ export const botbooru = Object.freeze({
 
     getImportTarget(_ctx, id) {
         return { kind: 'url', url: `${BASE}/character/${id}` };
+    },
+
+    /**
+     * Rebuilds the upstream image URL from a verified ref. Re-validates the
+     * filename even though minting validated it too: this is the last step
+     * before an outbound request, and it must not depend on the mint path
+     * having been correct.
+     * @param {Record<string, unknown>} ref
+     * @param {'grid' | 'detail'} size
+     */
+    thumbUrlFromRef(ref, size) {
+        const filename = own(ref, 'f');
+        if (typeof filename !== 'string' || !FILENAME_PATTERN.test(filename)) {
+            throw new Error('bad_ref');
+        }
+
+        const revision = own(ref, 'v');
+        const safeRevision = typeof revision === 'number' && Number.isFinite(revision) ? Math.floor(revision) : null;
+
+        return buildPreviewUrl(filename, safeRevision, size === 'detail' ? 'detail' : 'grid');
     },
 
     async probe(ctx) {

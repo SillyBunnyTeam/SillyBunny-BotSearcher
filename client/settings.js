@@ -19,19 +19,21 @@ import { el, setText } from './render.js';
 
 const PAGE_SIZES = [12, 24, 48];
 
-/** Phase 1 ships direct and off; 'proxy' becomes available and default in Phase 2. */
-const AVAILABLE_IMAGE_MODES = IMAGE_MODES.filter((mode) => mode !== 'proxy');
+const AVAILABLE_IMAGE_MODES = IMAGE_MODES;
 
 const IMAGE_MODE_LABELS = {
-    direct: 'Load from the source site (faster; the site sees your IP address)',
-    off: 'No images (lowest data use)',
+    proxy: 'Through your own server (the card site never sees your IP address)',
+    direct: 'Straight from the card site (faster, but the site sees your IP address)',
+    off: 'No thumbnails (lowest data use)',
 };
 
 const DEFAULTS = Object.freeze({
     defaultSource: 'botbooru',
     sfwOnlyDefault: true,
     blurNsfw: true,
-    imageMode: 'direct',
+    // Private by default. 'direct' is offered, but opting out of privacy should
+    // be a choice the user makes, not the one they get by not choosing.
+    imageMode: 'proxy',
     resultsPerPage: 24,
     sortDefault: 'latest',
     showTrustPanel: true,

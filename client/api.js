@@ -82,6 +82,36 @@ export async function getAvailability({ force = false } = {}) {
 }
 
 /**
+ * Builds the <img> source for a card.
+ *
+ * In 'proxy' mode this is a same-origin URL carrying the server-minted ref, so
+ * the card site never sees the user's IP address or browsing pattern. In
+ * 'direct' mode it is the upstream URL the server built, which is faster and
+ * costs the server nothing but does reveal the viewer to the site.
+ *
+ * @param {any} card
+ * @param {{ id: string }} source
+ * @param {'grid' | 'detail'} size
+ * @param {'proxy' | 'direct' | 'off'} imageMode
+ * @returns {string | null}
+ */
+export function thumbSrc(card, source, size, imageMode) {
+    if (imageMode === 'off') {
+        return null;
+    }
+
+    if (imageMode === 'proxy') {
+        if (typeof card?.thumbRef !== 'string' || card.thumbRef === '') {
+            return null;
+        }
+        const params = new URLSearchParams({ source: source.id, ref: card.thumbRef, size });
+        return `${PLUGIN_BASE}/thumb?${params}`;
+    }
+
+    return typeof card?.thumbUrl === 'string' && card.thumbUrl !== '' ? card.thumbUrl : null;
+}
+
+/**
  * POSTs a flat JSON body to one of our routes. `path` is always a literal from
  * our own code — it is never built from anything a card site returned.
  *

@@ -9,7 +9,7 @@
  */
 
 import { el, setText, setImgSafe, setLinkSafe } from './render.js';
-import { post } from './api.js';
+import { post, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
 import { importCard, openCharacter } from './importer.js';
 
@@ -52,11 +52,12 @@ export async function showDetail(container, summary, source, onBack) {
     const body = el('div', 'sbbs-detail-body');
 
     // ---- preview ----
-    if (settings.imageMode !== 'off' && card.thumbUrl) {
+    const previewSrc = thumbSrc(card, source, 'detail', settings.imageMode);
+    if (previewSrc) {
         const figure = el('div', 'sbbs-detail-image');
         const img = document.createElement('img');
         img.alt = '';
-        if (setImgSafe(img, card.thumbUrl, source.allowedHosts)) {
+        if (setImgSafe(img, previewSrc, source.allowedHosts)) {
             if (card.nsfw && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
                 figure.title = 'Click to reveal';

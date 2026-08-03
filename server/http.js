@@ -34,7 +34,11 @@ const MAX_REDIRECTS = 2;
  * @param {URL} url
  */
 function assertReachable(adapter, url) {
-    if (url.protocol !== 'https:') {
+    // `allowInsecureForTests` exists so the hardening tests can point a fake
+    // adapter at a local http server. It can only be set by writing it into an
+    // adapter's own source; tests/hardening.test.js asserts that no shipped
+    // adapter has it, and registry.test.js re-checks on every future adapter.
+    if (url.protocol !== 'https:' && adapter.allowInsecureForTests !== true) {
         throw new UpstreamError('insecure_scheme', url.protocol);
     }
     // Exact hostname match. A suffix test would accept "botbooru.com.evil.tld".
