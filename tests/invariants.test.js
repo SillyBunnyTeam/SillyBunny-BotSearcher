@@ -64,21 +64,55 @@ test('I4: render.js is the only module importing the DOM writers from outside', 
     }
 });
 
-test('version is identical across schema.js, package.json and manifest.json', async () => {
+test('version is identical across schema.js, package metadata and manifest.json', async () => {
     const { VERSION } = await import('../shared/schema.js');
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
     const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 
     assert.equal(pkg.version, VERSION, 'package.json version drifted from shared/schema.js');
+    assert.equal(lock.version, VERSION, 'package-lock.json version drifted from shared/schema.js');
+    assert.equal(lock.packages[''].version, VERSION, 'package-lock root package version drifted from shared/schema.js');
     assert.equal(manifest.version, VERSION, 'manifest.json version drifted from shared/schema.js');
+
+    const expectedTag = `v${VERSION}`;
+    for (const relativePath of ['README.md', 'templates/plugin-missing.html']) {
+        const text = fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
+        const releaseTags = text.match(/v\d+\.\d+\.\d+/g) ?? [];
+        assert.ok(releaseTags.length > 0, `${relativePath} must show the exact release tag`);
+        assert.ok(
+            releaseTags.every((tag) => tag === expectedTag),
+            `${relativePath} contains a release tag that drifted from shared/schema.js`,
+        );
+    }
 });
 
 test('manifest and package agree on the extension identity', async () => {
-    const { PLUGIN_ID, EXTENSION_NAME } = await import('../shared/schema.js');
+    const { PLUGIN_ID, EXTENSION_NAME, REPOSITORY_URL } = await import('../shared/schema.js');
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
     // src/plugin-loader.js:266 rejects anything else, and the route path is derived from it.
     assert.match(PLUGIN_ID, /^[a-z0-9_-]+$/);
     assert.equal(pkg.name, PLUGIN_ID);
+    assert.equal(pkg.sillybunny?.serverPlugin?.id, PLUGIN_ID);
+    assert.equal(
+        pkg.repository?.url,
+        REPOSITORY_URL,
+        'the host updater trust boundary depends on the pinned repository identity',
+    );
+    const repositoryForms = new Set([REPOSITORY_URL, REPOSITORY_URL.replace(/\.git$/, '')]);
+    for (const relativePath of ['README.md', 'templates/plugin-missing.html']) {
+        const text = fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
+        const urls = text.match(/https:\/\/github\.com\/platberlitz\/SillyBunny-BotSearcher(?:\.git)?/g) ?? [];
+        assert.ok(urls.length > 0, `${relativePath} must identify the pinned repository`);
+        assert.ok(urls.every((url) => repositoryForms.has(url)), `${relativePath} contains an unpinned repository URL`);
+    }
     assert.match(EXTENSION_NAME, /^[A-Za-z0-9._-]+$/, 'extension dir name must survive sanitize()');
+    assert.deepEqual(
+        pkg.sillybunny?.serverPlugin?.preservePaths,
+        ['.cursor-key'],
+        'exact-release updates must preserve the server-minted cursor secret',
+    );
+    const ignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
+    assert.match(ignore, /^\.sillybunny-release\.json$/m, 'host release metadata must not dirty the managed checkout');
 });

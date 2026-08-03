@@ -16,13 +16,28 @@
  * GET/HEAD/OPTIONS; state-changing calls send the token via getRequestHeaders().
  */
 
-import { PROTOCOL_VERSION, MAX_INGEST_BYTES } from '../shared/schema.js';
-import { PLUGIN_BASE, LOG_TAG } from './constants.js';
+import {
+    EXTENSION_NAME,
+    PROTOCOL_VERSION,
+    VERSION,
+    MAX_INGEST_BYTES,
+} from '../shared/schema.js';
+import {
+    PLUGIN_BASE,
+    SERVER_PLUGIN_ADMIN_BASE,
+    SERVER_VERSION_PATH,
+    LOG_TAG,
+} from './constants.js';
 import { isAllowedUpstreamUrl } from './render.js';
 
 const POSITIVE_TTL_MS = 60_000;
 const NEGATIVE_TTL_MS = 5_000;
 const DIRECT_TIMEOUT_MS = 15_000;
+const ADMIN_TIMEOUT_MS = 8_000;
+const APPLY_TIMEOUT_MS = 25 * 60_000;
+const RESTART_TIMEOUT_MS = 180_000;
+const VERIFY_TIMEOUT_MS = 30_000;
+const RESTART_POLL_MS = 1_500;
 
 /** Statuses that mean "the route isn't there", as opposed to "the call failed". */
 const MISSING_STATUSES = new Set([404, 405, 501]);
@@ -32,6 +47,15 @@ export const AVAILABILITY = Object.freeze({
     MISSING: 'missing',
     PROTOCOL_MISMATCH: 'protocol-mismatch',
     ERROR: 'error',
+});
+
+export const UPDATE_CAPABILITY = Object.freeze({
+    AVAILABLE: 'available',
+    DISABLED: 'disabled',
+    FORBIDDEN: 'forbidden',
+    LEGACY: 'legacy',
+    UNSUPPORTED: 'unsupported',
+    UNAVAILABLE: 'unavailable',
 });
 
 /** @type {{ at: number, value: any } | null} */
@@ -50,10 +74,10 @@ export function invalidateAvailability() {
  * not re-probe, but a negative result expires quickly so installing the plugin
  * and hitting Recheck feels immediate.
  *
- * @param {{ force?: boolean }} [options]
+ * @param {{ force?: boolean, signal?: AbortSignal, timeoutMs?: number }} [options]
  * @returns {Promise<{ status: string, health: any | null }>}
  */
-export async function getAvailability({ force = false } = {}) {
+export async function getAvailability({ force = false, signal, timeoutMs = ADMIN_TIMEOUT_MS } = {}) {
     const now = Date.now();
 
     if (!force && cached) {
@@ -64,12 +88,13 @@ export async function getAvailability({ force = false } = {}) {
     }
 
     let value;
+    const request = timedSignal(signal, Math.max(1, timeoutMs));
     try {
         const response = await fetch(`${PLUGIN_BASE}/healthz`, {
             method: 'GET',
             credentials: 'same-origin',
             headers: { Accept: 'application/json' },
-            signal: AbortSignal.timeout(8000),
+            signal: request.signal,
         });
 
         if (MISSING_STATUSES.has(response.status)) {
@@ -83,12 +108,231 @@ export async function getAvailability({ force = false } = {}) {
                 : { status: AVAILABILITY.PROTOCOL_MISMATCH, health };
         }
     } catch (error) {
+        if (signal?.aborted) {
+            throw abortError();
+        }
         console.debug(`[${LOG_TAG}] availability probe failed:`, error);
         value = { status: AVAILABILITY.ERROR, health: null };
+    } finally {
+        request.dispose();
     }
 
     cached = { at: now, value };
     return value;
+}
+
+/**
+ * Checks whether this SillyBunny host can safely update an existing server
+ * plugin to an exact Git release. Unsupported hosts and non-admin sessions are
+ * normal fallback states, not exceptions.
+ *
+ * @param {{ signal?: AbortSignal }} [options]
+ */
+export async function getServerPluginUpdateCapabilities({ signal } = {}) {
+    const request = timedSignal(signal, ADMIN_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${SERVER_PLUGIN_ADMIN_BASE}/capabilities`, {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+            signal: request.signal,
+        });
+
+        if (response.status === 403) {
+            return { status: UPDATE_CAPABILITY.FORBIDDEN, capabilities: null };
+        }
+        if (MISSING_STATUSES.has(response.status)) {
+            return { status: UPDATE_CAPABILITY.LEGACY, capabilities: null };
+        }
+        if (!response.ok) {
+            return { status: UPDATE_CAPABILITY.UNAVAILABLE, capabilities: null };
+        }
+
+        const capabilities = await response.json();
+        const supported = capabilities?.apiVersion === 1
+            && capabilities?.exactGitRelease === true
+            && capabilities?.existingPluginsOnly === true
+            && capabilities?.installsDependencies === true
+            && capabilities?.dependencyPolicy === 'npm-ci-production-ignore-scripts'
+            && capabilities?.safeRestart === true;
+        if (!supported) {
+            return { status: UPDATE_CAPABILITY.UNSUPPORTED, capabilities };
+        }
+        if (capabilities?.serverPluginsEnabled !== true) {
+            return { status: UPDATE_CAPABILITY.DISABLED, capabilities };
+        }
+        if (capabilities?.available !== true) {
+            return { status: UPDATE_CAPABILITY.UNAVAILABLE, capabilities };
+        }
+        return { status: UPDATE_CAPABILITY.AVAILABLE, capabilities };
+    } catch (error) {
+        if (signal?.aborted) {
+            throw abortError();
+        }
+        console.debug(`[${LOG_TAG}] server-plugin update capability probe failed:`, error);
+        return { status: UPDATE_CAPABILITY.UNAVAILABLE, capabilities: null };
+    } finally {
+        request.dispose();
+    }
+}
+
+/**
+ * Stages the immutable server-plugin tag matching this frontend release. The
+ * host derives and verifies the repository from the existing installation.
+ *
+ * @param {{ signal?: AbortSignal }} [options]
+ */
+export async function applyServerPluginRelease({ signal } = {}) {
+    const response = await fetch(`${SERVER_PLUGIN_ADMIN_BASE}/apply-release`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+            ...context().getRequestHeaders(),
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            directoryName: EXTENSION_NAME,
+            targetVersion: VERSION,
+        }),
+        signal,
+    });
+
+    if (!response.ok) {
+        throw await responseError(response);
+    }
+    return response.json();
+}
+
+/**
+ * Waits for the server boot marker to change after the update helper restarts
+ * SillyBunny.
+ *
+ * @param {string} previousBootId
+ * @param {{ signal?: AbortSignal, timeoutMs?: number, intervalMs?: number }} [options]
+ */
+export async function waitForServerRestart(previousBootId, {
+    signal,
+    timeoutMs = RESTART_TIMEOUT_MS,
+    intervalMs = RESTART_POLL_MS,
+} = {}) {
+    if (typeof previousBootId !== 'string' || previousBootId === '') {
+        throw codedError('restart_marker_missing');
+    }
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    while (Date.now() < deadline) {
+        if (signal?.aborted) {
+            throw abortError();
+        }
+
+        const request = timedSignal(
+            signal,
+            Math.min(ADMIN_TIMEOUT_MS, Math.max(1, deadline - Date.now())),
+        );
+        try {
+            const response = await fetch(SERVER_VERSION_PATH, {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: { Accept: 'application/json' },
+                signal: request.signal,
+            });
+            if (response.ok) {
+                const version = await response.json();
+                if (typeof version?.serverBootId === 'string'
+                    && version.serverBootId !== ''
+                    && version.serverBootId !== previousBootId) {
+                    return version;
+                }
+            }
+        } catch (_error) {
+            if (signal?.aborted) {
+                throw abortError();
+            }
+            // Going offline briefly is expected while the helper swaps releases.
+        } finally {
+            request.dispose();
+        }
+
+        await delay(Math.min(Math.max(1, intervalMs), Math.max(1, deadline - Date.now())), signal);
+    }
+
+    throw codedError('restart_timeout');
+}
+
+/**
+ * Runs the complete one-click flow and verifies the active plugin before
+ * reporting success.
+ *
+ * @param {{
+ *   signal?: AbortSignal,
+ *   onPhase?: (phase: string) => void,
+ *   restartTimeoutMs?: number,
+ *   verifyTimeoutMs?: number,
+ *   applyTimeoutMs?: number,
+ *   intervalMs?: number,
+ * }} [options]
+ * The signal cancels monitoring, but not an apply request already sent. That
+ * request has its own finite timeout so UI disposal cannot leave an ambiguous
+ * host transaction half-cancelled.
+ */
+export async function updateServerPlugin({
+    signal,
+    onPhase,
+    restartTimeoutMs = RESTART_TIMEOUT_MS,
+    verifyTimeoutMs = VERIFY_TIMEOUT_MS,
+    applyTimeoutMs = APPLY_TIMEOUT_MS,
+    intervalMs = RESTART_POLL_MS,
+} = {}) {
+    if (signal?.aborted) {
+        throw abortError();
+    }
+    onPhase?.('staging');
+    // Once requested, let the host either queue the transaction or cancel it
+    // cleanly. UI disposal may stop monitoring, but must not tear down the POST.
+    const apply = timedSignal(undefined, Math.max(1, applyTimeoutMs));
+    let result;
+    try {
+        result = await applyServerPluginRelease({ signal: apply.signal });
+    } catch (error) {
+        if (apply.timedOut()) {
+            throw codedError('staging_timeout');
+        }
+        throw error;
+    } finally {
+        apply.dispose();
+    }
+
+    if (result?.restarting === true) {
+        onPhase?.('restarting');
+        await waitForServerRestart(result.serverBootId, {
+            signal,
+            timeoutMs: restartTimeoutMs,
+            intervalMs,
+        });
+    }
+
+    onPhase?.('verifying');
+    const deadline = Date.now() + Math.max(1, verifyTimeoutMs);
+    do {
+        const remaining = Math.max(1, deadline - Date.now());
+        const availability = await getAvailability({
+            force: true,
+            signal,
+            timeoutMs: Math.min(ADMIN_TIMEOUT_MS, remaining),
+        });
+        if (availability.status === AVAILABILITY.OK && availability.health?.version === VERSION) {
+            onPhase?.('complete');
+            return { result, availability };
+        }
+        if (Date.now() >= deadline) {
+            break;
+        }
+        await delay(Math.min(Math.max(1, intervalMs), Math.max(1, deadline - Date.now())), signal);
+    } while (Date.now() < deadline);
+
+    throw codedError('plugin_verification_failed');
 }
 
 /**
@@ -163,6 +407,28 @@ export async function post(path, body, { signal, bodyText } = {}) {
     }
 
     return response.json();
+}
+
+async function responseError(response) {
+    let code = `http_${response.status}`;
+    let message = code;
+    try {
+        const payload = await response.json();
+        if (typeof payload?.code === 'string' && payload.code !== '') {
+            code = payload.code;
+        } else if (typeof payload?.error === 'string' && payload.error !== '') {
+            code = payload.error;
+        }
+        if (typeof payload?.error === 'string' && payload.error !== '') {
+            message = payload.error;
+        }
+    } catch {
+        // The status code remains actionable when a proxy supplied the body.
+    }
+    const error = new Error(message);
+    error.status = response.status;
+    error.code = code;
+    return error;
 }
 
 /**
@@ -334,6 +600,25 @@ function codedError(code) {
     const error = new Error(code);
     error.code = code;
     return error;
+}
+
+function delay(ms, signal) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(abortError());
+            return;
+        }
+        const finish = () => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        };
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(abortError());
+        };
+        const timer = setTimeout(finish, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 function abortError() {

@@ -8,6 +8,7 @@ import {
     SORT_LABELS,
     additionalImportContents,
     availabilityCopy,
+    compareReleaseVersions,
     detailErrorMessage,
     formatCount,
     formatNumber,
@@ -19,6 +20,7 @@ import {
     directRoutingNotice,
     sortLabel,
     sourceStatLine,
+    serverPluginUpdateErrorMessage,
 } from '../client/copy.js';
 import { SOURCES } from '../server/registry.js';
 
@@ -171,6 +173,7 @@ test('availability states give different recovery instructions', () => {
 
     assert.equal(missing.title, 'Server plugin not found');
     assert.equal(missing.showInstall, true);
+    assert.equal(missing.showUpdate, false);
     assert.equal(unavailable.title, 'Server plugin unavailable');
     assert.equal(unavailable.showInstall, false);
     assert.match(unavailable.guidance, /server logs/);
@@ -178,6 +181,48 @@ test('availability states give different recovery instructions', () => {
     assert.equal(mismatch.showInstall, false);
     assert.match(mismatch.guidance, /Frontend protocol: 1\. Server protocol: 2\./);
     assert.match(mismatch.guidance, /Frontend version: 0\.1\.0\. Server version: 0\.1\.0\./);
+    assert.equal(mismatch.showManualUpdate, false);
+    assert.equal(mismatch.showUpdate, false);
+});
+
+test('only an older server is offered the matching release update', () => {
+    const older = availabilityCopy('protocol-mismatch', { protocol: 3, version: '0.2.0' }, 4, '0.3.0', 'available');
+    const newer = availabilityCopy('protocol-mismatch', { protocol: 5, version: '0.4.0' }, 4, '0.3.0', 'available');
+
+    assert.equal(compareReleaseVersions('0.2.9', '0.3.0'), -1);
+    assert.equal(compareReleaseVersions('0.3.0', '0.3.0'), 0);
+    assert.equal(compareReleaseVersions('1.0.0', '0.3.0'), 1);
+    assert.equal(compareReleaseVersions('latest', '0.3.0'), null);
+    assert.equal(older.showUpdate, true);
+    assert.equal(older.showManualUpdate, false);
+    assert.match(older.guidance, /Update the server plugin to v0\.3\.0/);
+    assert.equal(newer.showUpdate, false);
+    assert.equal(newer.showManualUpdate, false);
+    assert.match(newer.guidance, /server is newer/i);
+    assert.match(newer.guidance, /downgrade is not offered/i);
+});
+
+test('manual update fallback is limited to known upgrades on legacy hosts', () => {
+    const older = availabilityCopy('protocol-mismatch', { protocol: 3, version: '0.2.0' }, 4, '0.3.0', 'legacy');
+    const unsafeUpdater = availabilityCopy('protocol-mismatch', { protocol: 3, version: '0.2.0' }, 4, '0.3.0', 'unsupported');
+    const missingTools = availabilityCopy('protocol-mismatch', { protocol: 3, version: '0.2.0' }, 4, '0.3.0', 'unavailable');
+    const unknown = availabilityCopy('protocol-mismatch', { protocol: 5, version: '0.4.0-beta.1' }, 4, '0.3.0', 'unsupported');
+
+    assert.equal(older.showManualUpdate, true);
+    assert.equal(older.showUpdate, false);
+    assert.equal(unsafeUpdater.showManualUpdate, false);
+    assert.equal(missingTools.showManualUpdate, false);
+    assert.equal(unknown.showManualUpdate, false);
+    assert.equal(unknown.showUpdate, false);
+    assert.match(unknown.guidance, /cannot be ordered safely/);
+});
+
+test('server-plugin update errors give an actionable recovery', () => {
+    assert.match(serverPluginUpdateErrorMessage({ code: 'managed_externally' }), /externally managed/);
+    assert.match(serverPluginUpdateErrorMessage({ code: 'dirty_checkout' }), /tracked local changes/);
+    assert.match(serverPluginUpdateErrorMessage({ code: 'restart_timeout' }), /restart timeout/);
+    assert.match(serverPluginUpdateErrorMessage({ status: 403 }), /administrator/);
+    assert.doesNotMatch(serverPluginUpdateErrorMessage({ code: 'wrong_remote' }), /manual commands/i);
 });
 
 test('an unreachable source is described by what actually happened', () => {
@@ -260,4 +305,17 @@ test('browser template gives the search field a durable name and matching limit'
     assert.match(browserScript, /popup\.dlg\.setAttribute\('aria-label', 'Find cards online'\)/);
     assert.match(install, />Check again<\/button>/);
     assert.match(install, /class="sbbs-install-guidance" hidden/);
+    assert.match(install, /id="sbbs_update_plugin"[^>]*hidden>Update server plugin and restart<\/button>/);
+    assert.match(install, /class="sbbs-install-update-status" role="status" aria-live="polite" hidden/);
+    assert.match(install, /RELEASE=<span class="sbbs-release-tag">v0\.3\.0<\/span>/);
+    assert.match(install, /git clone --branch "\$RELEASE" --depth 1/);
+    assert.match(install, /npm --prefix plugins\/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts --no-audit --no-fund/);
+    assert.match(install, /set -eu/);
+    assert.match(install, /GIT_ROOT="\$\(git -C "\$PLUGIN_ROOT" rev-parse --show-toplevel\)"/);
+    assert.match(install, /test "\$GIT_ROOT" = "\$PLUGIN_ROOT"/);
+    assert.match(install, /REMOTE="\$\(git -C "\$PLUGIN_ROOT" remote get-url origin\)"/);
+    assert.match(install, /REPO_NO_SUFFIX="\$\{REPO%\.git\}"/);
+    assert.match(install, /STATUS="\$\(git -C "\$PLUGIN_ROOT" status --porcelain --untracked-files=no\)"/);
+    assert.match(install, /trap rollback ERR/);
+    assert.match(install, /including on Windows/);
 });
