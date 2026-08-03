@@ -1,12 +1,9 @@
 /**
  * Importing a card.
  *
- * Phase 1 only implements the native path: every source shipped so far is one
- * SillyBunny already knows how to import (src/endpoints/content-manager.js:1631),
- * so the download, the host dispatch and the PNG signature check all happen in
- * the host's existing, already-hardened code. This extension contributes no new
- * trust surface to the import itself — it only decides which URL to hand over,
- * and that URL was built server-side from a fixed base.
+ * Native sources use SillyBunny's URL importer. Other sources use the server
+ * plugin to download or assemble and validate card bytes before passing them to
+ * SillyBunny's file importer.
  */
 
 import { isAllowedImageUrl } from './render.js';
@@ -35,7 +32,7 @@ export async function importCard(card, clientHosts) {
 
     const before = new Set(snapshotAvatars());
 
-    // importFromExternalUrl resolves with undefined on BOTH success and failure —
+    // importFromExternalUrl resolves with undefined on both success and failure.
     // on error it fires a toast and returns (public/scripts/utils.js:3036).
     // So its return value cannot drive the button state; diffing the character
     // list is the only reliable success signal.
@@ -56,7 +53,7 @@ export async function importCard(card, clientHosts) {
  * The server downloads and structurally validates the bytes; this only carries
  * them to the host's own importer. Note that /api/characters/import answers 200
  * with `{ error: true }` on failure rather than an error status, so the status
- * code alone cannot be trusted — and as with the native path, the character
+ * code alone cannot be trusted. As with the native path, the character
  * list diff is the real success signal.
  *
  * @param {any} card

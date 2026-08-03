@@ -247,8 +247,8 @@ export function describeCard(parsed) {
         regexScripts: Array.isArray(regex) ? regex.length : 0,
         embeddedAssets: Array.isArray(assets) ? assets.length : 0,
         specVersion: parsed.spec,
-        // Remote images referenced from the description render in chat and would
-        // report back to whoever hosts them. Worth surfacing before importing.
+        // External URLs in the description may be requested after import, so
+        // report their count without trying to infer what each URL serves.
         externalImages: countExternalUrls(description),
         originSite: null,
     };

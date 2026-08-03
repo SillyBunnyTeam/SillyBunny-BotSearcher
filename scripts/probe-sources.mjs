@@ -25,12 +25,20 @@ const SEARCH_TERM = 'elf';
 const TIER_THAT_MUST_WORK = 2;
 
 const requested = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log('Usage: node scripts/probe-sources.mjs [source ...]');
+    console.log('Checks every source by default. Source IDs limit the check.');
+    console.log(`Available sources: ${Object.keys(SOURCES).join(', ')}`);
+    process.exit(0);
+}
+
 const ids = requested.length > 0 ? requested : Object.keys(SOURCES);
 
 const unknown = ids.filter((id) => !Object.prototype.hasOwnProperty.call(SOURCES, id));
 if (unknown.length > 0) {
-    console.error(`Unknown source(s): ${unknown.join(', ')}`);
-    console.error(`Known: ${Object.keys(SOURCES).join(', ')}`);
+    console.error(`Unknown sources: ${unknown.join(', ')}`);
+    console.error(`Available sources: ${Object.keys(SOURCES).join(', ')}`);
     process.exit(2);
 }
 
@@ -91,7 +99,7 @@ for (const id of ids) {
     });
 }
 
-const mark = (value) => (value === null ? ' - ' : value ? ' ok' : 'FAIL');
+const mark = (value) => (value === null ? ' - ' : value ? ' OK' : 'FAIL');
 
 console.log('');
 console.log('id            tier  probe  search  detail  items  total     ms   first result');
@@ -118,7 +126,7 @@ for (const r of results) {
         }
     }
     if (!r.mappingOk) {
-        console.log(`  ${r.id}: search returned items with no name — the field mapping has drifted`);
+        console.log(`  ${r.id}: search returned unnamed items; the field mapping may have changed`);
     }
 }
 
@@ -126,14 +134,14 @@ const broken = results.filter((r) => r.tier <= TIER_THAT_MUST_WORK && (!r.search
 
 if (broken.length > 0) {
     console.log('');
-    console.log(`${broken.length} source(s) at tier <= ${TIER_THAT_MUST_WORK} are broken: ${broken.map((r) => r.id).join(', ')}`);
-    console.log('Either fix the adapter or move it to tier 3 so it ships off by default.');
+    console.log(`Required sources failed: ${broken.map((r) => r.id).join(', ')}`);
+    console.log('Fix each adapter or move it to tier 3 so it is disabled by default.');
     process.exit(1);
 }
 
 const degraded = results.filter((r) => r.tier > TIER_THAT_MUST_WORK && !r.search);
 if (degraded.length > 0) {
-    console.log(`Opt-in source(s) currently down (not a failure): ${degraded.map((r) => r.id).join(', ')}`);
+    console.log(`Unavailable opt-in sources (allowed): ${degraded.map((r) => r.id).join(', ')}`);
 }
 
-console.log('All required sources responded.');
+console.log('Required sources passed.');

@@ -2,7 +2,7 @@
     "display_name": "BotSearcher",
     "author": "platberlitz",
     "version": "0.1.0",
-    "description": "Search character cards on external sites and import them, without any third-party relay.",
+    "description": "Search supported character-card sites and import cards into SillyBunny. Requires the BotSearcher server plugin.",
     "requires": [],
     "optional": [],
     "js": "index.js",

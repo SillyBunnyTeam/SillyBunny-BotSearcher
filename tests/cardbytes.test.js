@@ -273,7 +273,7 @@ test('remote images referenced in a description are counted', () => {
     assert.equal(inside.externalImages, 2, 'duplicates count once');
 });
 
-test('a card with nothing unusual reports nothing unusual', () => {
+test('a minimal card reports zero optional contents', () => {
     const inside = describeCard({
         spec: 'chara_card_v1',
         card: { name: 'Plain', description: 'Nothing special.' },

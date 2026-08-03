@@ -5,7 +5,7 @@
  * /scripts/extensions/third-party/SillyBunny-BotSearcher/shared/schema.js.
  * It must therefore stay pure ESM with no `node:` imports and no DOM access.
  *
- * The two halves are installed as separate git clones and can drift, so every
+ * The frontend and server plugin are installed as separate git clones and can drift, so every
  * response carries PROTOCOL_VERSION and the client refuses to talk to a server
  * that reports a different one.
  */
@@ -13,7 +13,7 @@
 /** Bumped only when the request/response contract changes incompatibly. */
 export const PROTOCOL_VERSION = 1;
 
-/** Release version. `tests/version-sync.test.js` asserts this matches package.json and manifest.json. */
+/** Release version. `tests/invariants.test.js` asserts this matches package.json and manifest.json. */
 export const VERSION = '0.1.0';
 
 export const PLUGIN_ID = 'sillybunny-botsearcher';

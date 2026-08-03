@@ -1,11 +1,11 @@
 /**
- * Puts a "Browse online" entry point into the UI.
+ * Puts a "Find cards online" entry point into the UI.
  *
  * Primary placement is a third button in SillyBunny's Characters > Import panel,
  * next to "Import from file" and "Import from URL" (public/index.html:6628).
  * Reusing the sibling markup and the `.sb-character-import-action` class means
  * it inherits the icon tile, hover lift and focus ring from
- * public/css/sillybunny-tabs.css:2716 — no CSS of our own, and it stays correct
+ * public/css/sillybunny-tabs.css:2716. It needs no CSS of its own and stays correct
  * when the fork restyles that panel.
  *
  * Fallback is the wand menu, for stock SillyTavern or a fork that renamed the
@@ -20,8 +20,8 @@ const ACTIONS_SELECTOR = '.sb-character-import-actions';
 const FALLBACK_GRACE_MS = 3000;
 const OBSERVER_DEBOUNCE_MS = 150;
 
-const LABEL = 'Browse online';
-const SUBLABEL = 'Search character cards on Botbooru and other sites.';
+const LABEL = 'Find cards online';
+const SUBLABEL = 'Search supported card sites and import a card.';
 
 /**
  * @param {() => void} onOpen

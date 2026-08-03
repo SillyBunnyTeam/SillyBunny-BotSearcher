@@ -3,7 +3,7 @@
  *
  * Everything is re-clamped on read with the same discipline the server uses on
  * requests, so a hand-edited settings.json cannot inject an unknown source id or
- * an absurd page size. No secret is ever stored here — this extension needs no
+ * an absurd page size. No secret is ever stored here; this extension needs no
  * credentials for any source, and deliberately does not implement the API-key
  * features some sites offer.
  *
@@ -23,9 +23,9 @@ const PAGE_SIZES = [12, 24, 48];
 const AVAILABLE_IMAGE_MODES = IMAGE_MODES;
 
 const IMAGE_MODE_LABELS = {
-    proxy: 'Through your own server (the card site never sees your IP address)',
-    direct: 'Straight from the card site (faster, but the site sees your IP address)',
-    off: 'No thumbnails (lowest data use)',
+    proxy: 'Through SillyBunny server (image host sees the server IP)',
+    direct: 'Direct from card site (image host sees the browser connection)',
+    off: 'No thumbnails',
 };
 
 /** Sources above this tier are opt-in: they work, but are narrow or unreliable. */
@@ -37,8 +37,7 @@ const DEFAULTS = Object.freeze({
     defaultSource: 'botbooru',
     sfwOnlyDefault: true,
     blurNsfw: true,
-    // Private by default. 'direct' is offered, but opting out of privacy should
-    // be a choice the user makes, not the one they get by not choosing.
+    // Avoid direct browser connections to image hosts by default.
     imageMode: 'proxy',
     resultsPerPage: 24,
     sortDefault: 'latest',
@@ -135,9 +134,9 @@ export async function mountSettings() {
     const settings = getSettings();
 
     content.append(
-        checkbox('sbbs_set_sfw', 'SFW only by default', settings.sfwOnlyDefault, (v) => updateSettings({ sfwOnlyDefault: v })),
-        checkbox('sbbs_set_blur', 'Blur adult thumbnails until clicked', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
-        checkbox('sbbs_set_trust', 'Show the "What’s inside this card" panel', settings.showTrustPanel, (v) => updateSettings({ showTrustPanel: v })),
+        checkbox('sbbs_set_sfw', 'Request SFW results by default', settings.sfwOnlyDefault, (v) => updateSettings({ sfwOnlyDefault: v })),
+        checkbox('sbbs_set_blur', 'Blur sensitive thumbnails until opened', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
+        checkbox('sbbs_set_trust', 'Show the Card contents panel', settings.showTrustPanel, (v) => updateSettings({ showTrustPanel: v })),
         select(
             'sbbs_set_images',
             'Thumbnails',
@@ -202,10 +201,10 @@ function sourceList(sources) {
         row.append(input, el('span', undefined, source.label ?? source.id));
 
         if (source.tier > DEFAULT_MAX_TIER) {
-            row.append(el('small', 'sbbs-source-note', 'limited'));
+            row.append(el('small', 'sbbs-source-note', 'limited public catalog'));
         }
         if (source.state === 'down') {
-            row.append(el('small', 'sbbs-source-note', 'not responding'));
+            row.append(el('small', 'sbbs-source-note', 'unavailable'));
         }
 
         wrapper.append(row);

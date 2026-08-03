@@ -12,6 +12,13 @@ import { el, setText, setImgSafe, setLinkSafe } from './render.js';
 import { post, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
 import { importCard, importCardBytes, openCharacter } from './importer.js';
+import {
+    additionalImportContents,
+    detailErrorMessage,
+    importErrorMessage,
+    insideRows,
+    sourceStatLine,
+} from './copy.js';
 
 /**
  * @param {HTMLElement} container the #sbbs_detail node
@@ -36,15 +43,15 @@ export async function showDetail(container, summary, source, onBack) {
     // is left tabbing through a hidden view.
     back.focus();
 
-    const loading = el('div', 'sbbs-state', 'Loading…');
+    const loading = el('div', 'sbbs-state', 'Loading card details...');
     container.append(loading);
 
     let card;
     try {
         card = await post('/detail', { source: source.id, id: summary.id });
     } catch (error) {
-        setText(loading, describeError(error, source.label));
-        const retry = el('button', 'menu_button', 'Retry');
+        setText(loading, detailErrorMessage(error, source.label));
+        const retry = el('button', 'menu_button', 'Try again');
         retry.type = 'button';
         retry.addEventListener('click', () => showDetail(container, summary, source, onBack));
         container.append(retry);
@@ -65,7 +72,7 @@ export async function showDetail(container, summary, source, onBack) {
             if (card.nsfw && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
                 // A real button, so revealing works by keyboard too.
-                const reveal = el('button', 'sbbs-reveal', 'Show image');
+                const reveal = el('button', 'sbbs-reveal', 'Show sensitive image');
                 reveal.type = 'button';
                 reveal.addEventListener('click', () => {
                     figure.classList.remove('sbbs-blurred');
@@ -100,7 +107,7 @@ export async function showDetail(container, summary, source, onBack) {
     }
 
     // ---- stats ----
-    const stats = statLine(card.stats);
+    const stats = sourceStatLine(source.id, card.stats);
     if (stats) {
         main.append(el('div', 'sbbs-detail-stats', stats));
     }
@@ -114,7 +121,7 @@ export async function showDetail(container, summary, source, onBack) {
         main.append(tagRow);
     }
 
-    // ---- what's inside ----
+    // ---- source-reported card contents ----
     if (settings.showTrustPanel) {
         const panel = insidePanel(card.inside);
         if (panel) {
@@ -144,50 +151,30 @@ export async function showDetail(container, summary, source, onBack) {
 }
 
 /**
- * The trust panel. Counts only — never the lorebook contents, which would be
- * more untrusted text with nothing to gain.
+ * Summarizes reported metadata, never raw lorebook or script contents.
  */
 function insidePanel(inside) {
     if (!inside || typeof inside !== 'object') {
         return null;
     }
 
-    const rows = [];
-    const add = (label, value) => rows.push({ label, value });
-
-    if (inside.lorebookEntries === null) {
-        add('Lorebook', 'present (size unknown)');
-    } else if (inside.lorebookEntries > 0) {
-        add('Lorebook', `${inside.lorebookEntries} entr${inside.lorebookEntries === 1 ? 'y' : 'ies'}`);
-    }
-    if (inside.alternateGreetings > 0) {
-        add('Alternate greetings', String(inside.alternateGreetings));
-    }
-    if (inside.hasSystemPrompt) {
-        add('System prompt', 'overrides yours');
-    }
-    if (inside.hasPostHistoryInstructions) {
-        add('Post-history instructions', 'yes');
-    }
-    if (inside.hasDepthPrompt) {
-        add('Depth prompt', 'yes');
-    }
-    if (inside.embeddedAssets > 0) {
-        add('Extra images', String(inside.embeddedAssets));
-    }
-    if (inside.originSite) {
-        add('Originally from', inside.originSite);
-    }
-    if (inside.specVersion) {
-        add('Card format', inside.specVersion);
-    }
+    const rows = insideRows(inside);
 
     const panel = el('details', 'sbbs-inside');
-    panel.open = rows.length > 0 && (inside.lorebookEntries > 0 || inside.hasSystemPrompt);
+    panel.open = inside.lorebookEntries > 0
+        || inside.hasSystemPrompt
+        || inside.hasPostHistoryInstructions
+        || inside.hasDepthPrompt
+        || inside.regexScripts > 0;
 
     const summary = document.createElement('summary');
-    setText(summary, rows.length === 0 ? 'What’s inside this card: nothing unusual' : 'What’s inside this card');
+    setText(summary, 'Card contents');
     panel.append(summary);
+
+    if (rows.length === 0) {
+        panel.append(el('p', 'sbbs-inside-empty', 'No additional details reported by this source.'));
+        return panel;
+    }
 
     const list = el('dl', 'sbbs-inside-list');
     for (const row of rows) {
@@ -203,7 +190,7 @@ function actionBar(card, source) {
 
     const button = el('button', 'menu_button sbbs-import');
     button.type = 'button';
-    setText(button, 'Import');
+    setText(button, 'Import card');
 
     const status = el('span', 'sbbs-import-status');
     status.setAttribute('role', 'status');
@@ -211,7 +198,7 @@ function actionBar(card, source) {
     button.addEventListener('click', async () => {
         // The button is the lock: one import at a time.
         button.disabled = true;
-        setText(button, 'Importing…');
+        setText(button, 'Importing...');
         setText(status, '');
 
         try {
@@ -223,7 +210,7 @@ function actionBar(card, source) {
 
             setText(button, 'Imported');
 
-            const open = el('button', 'menu_button sbbs-open-character', 'Go to character');
+            const open = el('button', 'menu_button sbbs-open-character', 'Open character');
             open.type = 'button';
             open.addEventListener('click', () => openCharacter(added.avatar));
             bar.append(open);
@@ -232,109 +219,19 @@ function actionBar(card, source) {
 
             // The bytes are the only honest source for this. If the card turned
             // out to carry something the listing never mentioned, say so.
-            const surprise = describeSurprise(added.inside, card.inside);
+            const surprise = additionalImportContents(added.inside, card.inside);
             if (surprise) {
-                toastr.info(surprise, 'What this card brought with it', { timeOut: 12000 });
+                toastr.info(surprise, 'Additional contents found', { timeOut: 12000 });
             }
         } catch (error) {
             button.disabled = false;
-            setText(button, 'Import failed — retry');
-            setText(status, describeImportError(error));
-            toastr.error(describeImportError(error), 'Import failed');
+            setText(button, 'Try import again');
+            setText(status, importErrorMessage(error));
+            toastr.error(importErrorMessage(error), 'Import failed');
         }
     });
 
     bar.append(button, status);
-    bar.append(el('p', 'sbbs-trust-note', 'Cards come from third-party sites. Review the description before starting a chat.'));
+    bar.append(el('p', 'sbbs-trust-note', 'Cards come from third-party sites. Review the description and card contents before starting a chat.'));
     return bar;
-}
-
-function statLine(stats) {
-    if (!stats || typeof stats !== 'object') {
-        return '';
-    }
-    const parts = [];
-    if (stats.tokens !== null && stats.tokens !== undefined) {
-        parts.push(`${stats.tokens} tokens`);
-    }
-    if (stats.downloads !== null && stats.downloads !== undefined) {
-        parts.push(`${stats.downloads} downloads`);
-    }
-    if (stats.views !== null && stats.views !== undefined) {
-        parts.push(`${stats.views} views`);
-    }
-    return parts.join(' · ');
-}
-
-function describeError(error, sourceLabel) {
-    switch (error?.code) {
-        case 'timeout':
-            return `${sourceLabel} did not respond in time.`;
-        case 'rate_limited':
-            return 'Too many requests — wait a moment and try again.';
-        case 'source_busy':
-            return `${sourceLabel} is busy — try again shortly.`;
-        default:
-            return `Could not load this card from ${sourceLabel}.`;
-    }
-}
-
-/**
- * Compares what the card actually contained against what the listing claimed.
- * Only the difference is worth interrupting for — repeating what the detail
- * view already showed is noise.
- */
-function describeSurprise(actual, claimed) {
-    if (!actual || typeof actual !== 'object') {
-        return '';
-    }
-
-    const notes = [];
-    const wasClaimed = (key) => claimed && typeof claimed === 'object' && claimed[key];
-
-    if (actual.lorebookEntries > 0 && !wasClaimed('lorebookEntries')) {
-        notes.push(`a lorebook with ${actual.lorebookEntries} entr${actual.lorebookEntries === 1 ? 'y' : 'ies'}`);
-    }
-    if (actual.hasSystemPrompt && !wasClaimed('hasSystemPrompt')) {
-        notes.push('a system prompt that overrides yours');
-    }
-    if (actual.hasPostHistoryInstructions && !wasClaimed('hasPostHistoryInstructions')) {
-        notes.push('post-history instructions');
-    }
-    if (actual.externalImages > 0) {
-        notes.push(`${actual.externalImages} image${actual.externalImages === 1 ? '' : 's'} loaded from other sites`);
-    }
-
-    return notes.length === 0 ? '' : `This card also includes ${joinList(notes)}.`;
-}
-
-function joinList(items) {
-    if (items.length === 1) {
-        return items[0];
-    }
-    return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
-}
-
-function describeImportError(error) {
-    switch (error?.message) {
-        case 'import_url_rejected':
-            return 'That download link was rejected as unsafe.';
-        case 'import_unsupported':
-            return 'This source cannot be imported yet.';
-        case 'import_failed':
-            return 'The card did not arrive. It may have been removed.';
-        case 'card_invalid':
-            return 'That download was not a usable character card.';
-        case 'png_malformed':
-        case 'not_a_png':
-            return 'That download was damaged or incomplete.';
-        case 'too_large':
-            return 'That card is larger than this extension will download.';
-        case 'use_native_import':
-            return 'This source should import directly — please report this.';
-        case 'rate_limited':
-            return 'Too many downloads — wait a moment and try again.';
-        default:
-            return 'Something went wrong during import.';
-    }
 }

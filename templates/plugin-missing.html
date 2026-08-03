@@ -1,24 +1,28 @@
 <div class="sbbs-install">
-    <h3 class="sbbs-install-title">Server half not installed</h3>
+    <h3 class="sbbs-install-title">Server plugin not found</h3>
 
-    <p class="sbbs-install-lead">BotSearcher comes in two halves. The extension is installed — this part — but the server half is missing, and searching needs it. The card sites do not allow a browser to call them directly, so your own server has to make the requests.</p>
+    <p class="sbbs-install-lead">The frontend extension is installed, but BotSearcher could not find its server plugin. Both components are required for search.</p>
 
-    <ol class="sbbs-install-steps">
-        <li>
-            <p>From your SillyBunny folder, install the plugin:</p>
-            <pre class="sbbs-install-code"><code>bun plugins.js install https://github.com/platberlitz/SillyBunny-BotSearcher</code></pre>
-        </li>
-        <li>
-            <p>Open <code>config.yaml</code> and set both of these:</p>
-            <pre class="sbbs-install-code"><code>enableServerPlugins: true
+    <div class="sbbs-install-instructions">
+        <ol class="sbbs-install-steps">
+            <li>
+                <p>From your SillyBunny folder, install the server plugin:</p>
+                <pre class="sbbs-install-code"><code>bun plugins.js install https://github.com/platberlitz/SillyBunny-BotSearcher</code></pre>
+            </li>
+            <li>
+                <p>Open <code>config.yaml</code> and set these values:</p>
+                <pre class="sbbs-install-code"><code>enableServerPlugins: true
 enableServerPluginsAutoUpdate: false</code></pre>
-        </li>
-        <li>
-            <p>Restart SillyBunny, then come back here and press Recheck.</p>
-        </li>
-    </ol>
+            </li>
+            <li>
+                <p>Restart SillyBunny, then select <strong>Check again</strong>.</p>
+            </li>
+        </ol>
 
-    <p class="sbbs-install-note">Turning auto-update off is deliberate: with it on, every start pulls the latest code for each plugin and runs it. Updating on purpose, after reading what changed, is the safer habit.</p>
+        <p class="sbbs-install-note"><code>enableServerPluginsAutoUpdate: false</code> keeps server-plugin updates manual so you can review changes before installing them.</p>
+    </div>
 
-    <button id="sbbs_recheck" class="menu_button" type="button">Recheck</button>
+    <p class="sbbs-install-guidance" hidden></p>
+
+    <button id="sbbs_recheck" class="menu_button" type="button">Check again</button>
 </div>

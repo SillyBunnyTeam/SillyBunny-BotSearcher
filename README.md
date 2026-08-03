@@ -1,126 +1,162 @@
-# SillyBunny-BotSearcher
+# SillyBunny BotSearcher
 
-Browse character card sites from inside SillyBunny and import with one click.
+BotSearcher adds a character-card browser to SillyBunny. It can search supported card sites, show the details each site provides, and import a selected card.
 
-SillyBunny can already import a card from a file or from a link you paste. What it has no way to do is help you *find* one. This adds that: a search box, a grid of results across seven sites, a detail view, and an Import button.
+The frontend extension and server plugin are both required. Search requests go through your SillyBunny server directly to the selected source. BotSearcher does not use a public relay.
 
-It is built so that the sites you browse learn nothing about you, and so that nothing they send can act on your machine. That constraint shaped most of the design, and the [Security](#security) section is honest about where it stops.
+## Requirements
 
-## Installing
+- A working SillyBunny installation
+- Server plugins enabled in SillyBunny
+- The BotSearcher frontend extension and server plugin from this repository
 
-Two halves, both from this repo.
+## Installation
 
-**Frontend extension** — in SillyBunny: Extensions ▸ Install extension, paste:
+Install the frontend extension from SillyBunny's extension manager. Use this repository URL:
 
-```
+```text
 https://github.com/platberlitz/SillyBunny-BotSearcher
 ```
 
-**Server plugin** — from your SillyBunny directory:
+From your SillyBunny directory, install the server plugin:
 
 ```bash
 bun plugins.js install https://github.com/platberlitz/SillyBunny-BotSearcher
 ```
 
-Then in `config.yaml`:
+Set these values in `config.yaml`:
 
 ```yaml
 enableServerPlugins: true
 enableServerPluginsAutoUpdate: false
 ```
 
-Restart SillyBunny. `enableServerPluginsAutoUpdate` defaults to `true`, which means every start does a `git pull` on each plugin and then runs the result. Setting it to `false` is recommended: update deliberately, and read the diff first.
+Restart SillyBunny after installing or updating either component.
 
-Both halves are needed. The extension alone opens to install instructions.
+`enableServerPluginsAutoUpdate` controls updates for server plugins. It defaults to `true`, which runs `git pull` for each plugin when SillyBunny starts. Setting it to `false` lets you review and apply server-plugin updates yourself. The frontend extension has its own update setting.
 
-## Why there is a server half
+## Usage
 
-Most extensions are frontend-only. This one cannot be, for a boring reason and a good one.
+Open the character import screen and select **Find cards online**, or use the slash command:
 
-The boring reason: Botbooru — and most of these sites — send no CORS headers, so a browser is simply not allowed to call them from another page. Something server-side has to make the request.
+```text
+/botsearch [search term]
+```
 
-The good reason is what that makes possible. Because the server is doing the fetching anyway, it can own every address. The browser never says "fetch this URL"; it says "search *this source*", and the server decides what that means. There is no route in this plugin that will fetch a URL supplied by the client — which is the single property that makes the rest of the security story hold up.
+Choose a source, enter a search term, and open a result to review its details. An empty search shows the source's default or newest results where supported.
 
-It also means your searches never leave your own machine except to the site you actually chose. The obvious alternative — a public CORS relay — sends every query you type through a stranger's server. [CleanBotBrowser](https://github.com/Nulliik/SillyTavern-CleanBotBrowser), the extension this one is modelled on, falls back to three of them, plus a fourth for two of its sources. That is the main thing this project does differently.
+The details shown before import come from the selected source. A source may omit fields or report incomplete information. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
-## Sources
+## Request routing and privacy
 
-| Source | Tier | Import | Thumbnails | Notes |
-|---|---|---|---|---|
-| Botbooru | 0 | native | yes (320/640 previews) | |
-| Chub | 1 | native | yes | |
-| Pygmalion | 1 | native | full-size (~1.3 MB each) | no preview endpoint |
-| RisuRealm | 1 | native | full-size (~1.4 MB each) | data comes from SvelteKit page data; fragile by nature |
-| Wyvern | 2 | assembled | yes (CDN resize) | no downloadable card file |
-| Character Tavern | 2 | assembled | none | image CDN returns 403 to non-browser requests |
-| Quillgen | 3 | download | full-size | **off by default**: public API returns 1 card total |
+For search and detail requests, the browser contacts the BotSearcher plugin on your SillyBunny server. The server then contacts only the selected source through a fixed source adapter.
 
-"native" means SillyBunny's own importer does the download. "download" means this plugin fetches and validates a card file. "assembled" means the site publishes card data but no file, so the card is built from it and validated the same way.
+- BotSearcher does not send searches through a public relay.
+- The selected source receives the search query and sees the SillyBunny server's outgoing IP address.
+- If SillyBunny runs on your computer or home network, the server's public IP may be the same public IP used by your browser.
+- BotSearcher does not provide a route that fetches an arbitrary URL supplied by the frontend. Each adapter defines the hosts it may contact.
 
-Tier 0–2 are on by default. Tier 3 is opt-in, in the extension settings.
+Thumbnail routing depends on the **Thumbnails** setting:
 
-### Not included, and why
-
-| Source | Reason |
+| Mode | Behavior |
 |---|---|
-| JanitorAI | Search needs a bearer token lifted from their frontend plus forged `Origin` and `Referer` headers. This project does not store credentials and does not forge headers to get past a site's own access control. |
-| Xoul | Works, but its images are full-size animated GIFs — one measured 19 MB — with no resize support. |
-| bot3, PolyBuzz | CleanBotBrowser reaches these only through `r.jina.ai`, a third-party relay. Excluded by the same rule as any other relay. |
-| Saucepan | `api.saucepan.ai` no longer resolves. |
-| Sakura.fm | Its documented endpoint returns 404. |
-| CAIBotList | Cloudflare bot wall. Evading it is an arms race. |
-| Harpy.chat | Disabled in CleanBotBrowser's own source; needs an external Supabase project and key. |
+| Through SillyBunny server | The browser requests thumbnails from your SillyBunny server. The image host sees the server's outgoing IP address. |
+| Direct from card site | The browser requests thumbnails from an allowed image host. That host sees the browser connection and its IP address. |
+| No thumbnails | BotSearcher shows letter tiles and does not request thumbnail images. |
 
-Checked 2026-08-03. Re-run `node scripts/probe-sources.mjs` to see the current state.
+Opening a source-page link leaves SillyBunny and contacts that site in the browser. Importing can also make additional requests through SillyBunny's importer or the BotSearcher server, depending on the import mode.
 
-## Security
+## Sources and imports
 
-Two things are being defended against, and they are different problems.
+| Source | Default | Import mode | Thumbnail notes |
+|---|---:|---|---|
+| Botbooru | Yes | Native | 320 or 640 pixel previews |
+| Chub | Yes | Native | Preview images |
+| Pygmalion | Yes | Native | Full-size images; no preview endpoint |
+| RisuRealm | Yes | Native | Full-size images; data comes from SvelteKit page data |
+| Wyvern | Yes | Assembled | Resized CDN images |
+| Character Tavern | Yes | Assembled | Thumbnails are unavailable through the server |
+| Quillgen | No | Downloaded | Limited public catalog |
 
-The first is the sites themselves learning about you — your IP address, what you search for, which cards you linger on. That is solved by routing everything through your own server, which is the default.
+Import modes:
 
-The second is content from those sites acting on your machine. Every name, description and tag in the grid was typed by a stranger. The rule throughout is that such text is never allowed to become anything other than text: the server rebuilds each record field by field against a fixed whitelist, and the browser writes it with `textContent` and nothing else. There is no HTML parsing anywhere in the frontend, no `innerHTML`, and a test fails the build if any appears. This matters more than usual because SillyBunny runs with its Content-Security-Policy disabled, so these checks are not a second line of defence — they are the only one.
+- **Native:** BotSearcher gives a source URL to SillyBunny's existing importer.
+- **Downloaded:** The BotSearcher server downloads and validates a card file before passing it to SillyBunny's importer.
+- **Assembled:** The source provides card data but no downloadable card file. The BotSearcher server builds and validates a card from that data.
 
-Card descriptions render as plain text rather than markdown. Rendering markdown would mean turning a stranger's string into HTML and relying on a sanitizer to be perfect, which is a bypass surface, for very little gain when you are deciding whether you like a character.
+Sources with tiers 0, 1, and 2 are enabled by default. Tier 3 sources are opt-in under **Extensions > BotSearcher > Sources**. Source APIs can change without notice; use `node scripts/probe-sources.mjs` to check their current status.
 
-### What is actually guaranteed
+## Card contents and import risks
 
-- No third party ever sees a search. There is no CORS relay anywhere in this project.
-- No URL supplied by the browser is ever fetched by the server. The client names a *source*; the server owns every address.
-- Text from a card site can never become HTML, an attribute, or a URL. It is rebuilt field by field against a whitelist on the server and written with `textContent` in the browser.
-- Downloaded card bytes are structurally validated before they reach the character importer.
-- In the default thumbnail mode, a browse session makes no request to any address other than your own server.
+Character cards are third-party documents. In addition to visible fields, a card can contain lorebook entries, alternate greetings, system prompts, post-history instructions, depth prompts, regex scripts, embedded assets, and external URLs. These fields can change model input or message processing after import.
 
-### What is not, and cannot be
+The **Card contents** panel reports what the source says about a listing. "Not reported" means BotSearcher does not have enough information to claim that a field is present or absent.
 
-Everything above is about plumbing, and plumbing is the part that can genuinely be made safe. Importing a card is a different kind of risk, and no amount of validation touches it.
+For downloaded and assembled imports, BotSearcher validates the actual card bytes and reports additional contents found during import. Native imports use SillyBunny's importer and do not receive the same byte-derived report from BotSearcher.
 
-A character card is a document written by a stranger. Cards carry lorebooks that fire on ordinary words, prompts that override your own, and regex scripts that rewrite messages in flight. The format exists to be partly executed. No browser extension makes that safe.
+Review the card description and contents before starting a chat. Structural validation confirms that downloaded data is a supported card format; it does not determine whether the card's instructions are safe or appropriate.
 
-What this does instead is show you what a card contains — lorebook entries, prompt overrides, regex scripts, images that load from other sites — before you import it, and again afterwards if the card turned out to hold something its listing never mentioned.
+## Security scope
+
+BotSearcher applies the following controls:
+
+- Server requests are limited to hosts declared by each source adapter.
+- Source records are rebuilt from an allowed set of fields and normalized before they reach the frontend.
+- Untrusted source text is not parsed as HTML. The frontend writes it through text properties and uses safe properties or attributes where needed.
+- Source links, image URLs, and native import URLs are checked against the source's allowed client hosts before use.
+- Card files downloaded by the BotSearcher server are size-limited and structurally validated before import.
+- Card descriptions are shown as plain text, not rendered as Markdown or HTML.
+
+These controls do not make third-party card instructions safe. They also do not hide a query from the selected source or hide the server's outgoing IP address from that source.
 
 ## Settings
 
-| Setting | Default | |
+| Setting | Default | Description |
 |---|---|---|
-| Sources | tier 0–2 | which sites appear in the picker |
-| Thumbnails | through your own server | `direct` is faster but shows the site your IP address; `off` uses letter tiles |
-| SFW only by default | on | only applied where a source can really filter; the toggle is disabled where it cannot |
-| Blur adult thumbnails | on | |
-| "What's inside this card" panel | on | the one-line note below Import cannot be turned off |
-| Results per page | 24 | |
+| Sources | Tiers 0, 1, and 2 | Selects the sites shown in the source list. |
+| Thumbnails | Through SillyBunny server | Controls whether images load through the server, directly in the browser, or not at all. |
+| SFW only by default | On | Requests an SFW filter where the selected source supports one. |
+| Blur sensitive thumbnails | On | Blurs thumbnails marked as sensitive until selected. |
+| Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
+| Results per page | 24 | Requests 12, 24, or 48 results at a time. |
+
+## Troubleshooting
+
+### Server plugin not found
+
+Confirm that the server plugin is installed, `enableServerPlugins` is `true`, and SillyBunny has been restarted.
+
+### Server plugin unavailable
+
+Restart SillyBunny and check the server-plugin logs. If the plugin route exists but returns an error, the frontend cannot search until that error is fixed.
+
+### Frontend and server are incompatible
+
+Update both components from the same release, then restart SillyBunny. Updating only the frontend extension or only the server plugin can leave their protocol versions out of sync.
+
+### A source is unavailable
+
+Try another source. BotSearcher temporarily removes a source from the current browser session after a failed request and lets you retry it.
+
+### SFW filtering is unavailable
+
+Some sources do not provide a reliable SFW filter. BotSearcher disables the control for those sources rather than claiming to filter their results.
 
 ## Development
 
+Node.js 18 or newer is required for the test suite.
+
 ```bash
-npm test                          # no dependencies; uses node --test
-node scripts/probe-sources.mjs    # check every source against the live sites
+npm test
+node scripts/probe-sources.mjs
 node scripts/probe-sources.mjs chub wyvern
 ```
 
-The prober exits non-zero if a tier 0–2 source is broken. Run it before a release: these APIs change without notice.
+The tests use Node's built-in test runner. Server contract tests also import packages supplied by SillyBunny, including Express, `node-fetch`, and `rate-limiter-flexible`, so run them where those dependencies are available.
 
-To work on both halves at once, symlink this directory into a SillyBunny checkout:
+The source probe contacts live external services. It exits with a nonzero status if a required source in tiers 0, 1, or 2 fails. Run it deliberately before a release.
+
+To work on the frontend extension and server plugin from one checkout, link this directory into a SillyBunny checkout:
 
 ```bash
 ln -s "$PWD" /path/to/SillyBunny/plugins/SillyBunny-BotSearcher
@@ -129,10 +165,10 @@ ln -s "$PWD" /path/to/SillyBunny/data/default-user/extensions/SillyBunny-BotSear
 
 ### Adding a source
 
-Copy the closest existing adapter in `server/sources/` and add it to `server/registry.js`. The tests in `tests/sources.test.js` apply to every adapter automatically and will tell you what is missing.
+Copy the closest adapter in `server/sources/`, then register it in `server/registry.js`. The shared adapter tests in `tests/sources.test.js` run against every registered source.
 
-An adapter declares which hosts it may contact (`allowedHosts`) separately from which may merely appear in a link (`linkHosts`). Nothing else in the project may widen either.
+Each adapter declares `allowedHosts` for server requests and `linkHosts` for links or import URLs that the plugin does not fetch. Do not widen either list outside the adapter.
 
-## Licence
+## License
 
-AGPL-3.0, matching SillyBunny.
+BotSearcher is licensed under the GNU Affero General Public License, version 3. See [LICENSE](LICENSE).

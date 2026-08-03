@@ -1,10 +1,11 @@
 /**
- * Every network call the frontend makes. All of them are same-origin, to our own
- * server plugin — there is no direct call to any card site from the browser, and
- * no third-party CORS relay anywhere in this project.
+ * API calls made by the frontend go to the same-origin server plugin. Search
+ * and detail requests never go directly from the browser to a card site, and
+ * this project uses no public CORS relay. Direct thumbnail mode is the explicit
+ * exception: image elements load from an adapter-approved image host.
  *
  * SillyBunny has no plugin-discovery endpoint (loadedPlugins is module-private in
- * src/plugin-loader.js), so "is the server half installed?" is answered by
+ * src/plugin-loader.js), so server-plugin availability is checked by
  * probing our own /healthz. That probe is a GET because csrf-sync skips
  * GET/HEAD/OPTIONS; state-changing calls send the token via getRequestHeaders().
  */
@@ -37,7 +38,7 @@ export function invalidateAvailability() {
 }
 
 /**
- * Probes the server half. Result is cached so opening the dialog repeatedly does
+ * Probes the server plugin. Results are cached so opening the dialog repeatedly does
  * not re-probe, but a negative result expires quickly so installing the plugin
  * and hitting Recheck feels immediate.
  *
@@ -84,10 +85,10 @@ export async function getAvailability({ force = false } = {}) {
 /**
  * Builds the <img> source for a card.
  *
- * In 'proxy' mode this is a same-origin URL carrying the server-minted ref, so
- * the card site never sees the user's IP address or browsing pattern. In
- * 'direct' mode it is the upstream URL the server built, which is faster and
- * costs the server nothing but does reveal the viewer to the site.
+ * In 'proxy' mode this is a same-origin URL carrying the server-minted ref. The
+ * image host sees the server connection, not a direct browser connection. In
+ * 'direct' mode the browser loads the upstream URL built by the server, so the
+ * image host sees the browser connection and its IP address.
  *
  * @param {any} card
  * @param {{ id: string }} source
@@ -113,7 +114,7 @@ export function thumbSrc(card, source, size, imageMode) {
 
 /**
  * POSTs a flat JSON body to one of our routes. `path` is always a literal from
- * our own code — it is never built from anything a card site returned.
+ * our own code. It is never built from anything a card site returned.
  *
  * @param {string} path e.g. '/search'
  * @param {Record<string, unknown>} body

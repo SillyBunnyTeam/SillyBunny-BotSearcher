@@ -11,8 +11,8 @@
  * request chub.ai.
  *
  * Chub does send `access-control-allow-origin: *`, so a browser could call it
- * directly. We still go through the server, both for privacy — Chub should not
- * see the user's IP or queries — and so every source behaves identically.
+ * directly. Search still goes through the server so the browser does not make
+ * that connection directly and every source follows the same request path.
  */
 
 import { buildSummary, buildDetail } from '../normalize.js';

@@ -1,5 +1,5 @@
 /**
- * SillyBunny-BotSearcher — server plugin entry point.
+ * SillyBunny-BotSearcher server plugin entry point.
  *
  * Loaded by src/plugin-loader.js, which reads `main` from our package.json.
  * Contract: an `info` object with string id/name/description, an `init(router)`,
@@ -7,8 +7,7 @@
  *
  * This half exists because the card sites do not send CORS headers, so the
  * browser cannot call them. Putting the calls here means the server owns every
- * outbound URL — no client-supplied URL is ever fetched, and no third-party
- * relay is involved at any point.
+ * outbound URL. No client-supplied URL is fetched, and no public relay is used.
  */
 
 import { PLUGIN_ID } from '../shared/schema.js';
@@ -18,7 +17,7 @@ import { LOG_TAG } from './guards.js';
 export const info = {
     id: PLUGIN_ID,
     name: 'SillyBunny BotSearcher',
-    description: 'Server half of the BotSearcher extension: searches character card sites and normalizes their responses.',
+    description: 'Required server plugin for searching supported character-card sites with the BotSearcher frontend extension.',
 };
 
 const state = {

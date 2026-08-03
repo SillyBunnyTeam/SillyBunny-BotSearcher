@@ -1,5 +1,5 @@
 /**
- * SillyBunny-BotSearcher — frontend extension entry point.
+ * SillyBunny-BotSearcher frontend extension entry point.
  *
  * Loaded as a module by src/../public/scripts/extensions.js from
  * /scripts/extensions/third-party/SillyBunny-BotSearcher/index.js.
@@ -36,10 +36,10 @@ export function init() {
     const ctx = globalThis.SillyTavern.getContext();
     ctx.SlashCommandParser.addCommandObject(ctx.SlashCommand.fromProps({
         name: 'botsearch',
-        helpString: 'Open the character card browser, optionally with a search term.',
+        helpString: 'Find and import character cards, with an optional search term.',
         unnamedArgumentList: [
             ctx.SlashCommandArgument.fromProps({
-                description: 'search term',
+                description: 'character name or keyword',
                 typeList: [ctx.ARGUMENT_TYPE.STRING],
                 isRequired: false,
             }),

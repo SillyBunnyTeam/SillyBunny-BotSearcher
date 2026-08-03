@@ -5,7 +5,8 @@
  * its JSON API is clean and unauthenticated, and SillyBunny already imports
  * botbooru.com natively (src/endpoints/content-manager.js:1631 dispatches to
  * downloadBotbooruCharacter, which re-asserts the PNG signature itself). So
- * importing adds no new trust surface at all — we only supply discovery.
+ * importing reuses SillyBunny's existing URL importer; this adapter supplies
+ * discovery and a server-built URL rather than another download path.
  *
  * Endpoints, all verified live:
  *   GET /posts/?q=&limit=&offset=&sort=&sfw_only=&hide_ai=  -> { total, posts[] }

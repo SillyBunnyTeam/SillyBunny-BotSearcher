@@ -50,7 +50,7 @@ function stats(value) {
 }
 
 /**
- * The "What's inside this card" summary. Counts only — never the lorebook
+ * The Card contents summary. Counts only; never the lorebook
  * contents themselves, which would be untrusted text we have no reason to ship.
  * @param {unknown} value
  */

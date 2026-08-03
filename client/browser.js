@@ -15,6 +15,14 @@ import { AVAILABILITY, getAvailability, invalidateAvailability, post, thumbSrc }
 import { el, setText, setImgSafe } from './render.js';
 import { getSettings, updateSettings, isSourceEnabled } from './settings.js';
 import { showDetail } from './detail.js';
+import {
+    availabilityCopy,
+    formatCount,
+    formatResultCount,
+    searchErrorMessage,
+    sortLabel,
+} from './copy.js';
+import { PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
 
 let openPopup = null;
 
@@ -57,6 +65,7 @@ export async function openBrowser(options = {}) {
             openPopup = null;
         },
     });
+    popup.dlg.setAttribute('aria-label', 'Find cards online');
 
     openPopup = popup;
     const closed = popup.show();
@@ -64,7 +73,7 @@ export async function openBrowser(options = {}) {
     if (connected) {
         wireBrowser(popup, availability.health, options);
     } else {
-        wireInstallPanel(popup, availability.status);
+        wireInstallPanel(popup, availability);
     }
 
     await closed;
@@ -85,6 +94,7 @@ function wireBrowser(popup, health, options) {
         go: root.querySelector('#sbbs_go'),
         sort: root.querySelector('#sbbs_sort'),
         sfw: root.querySelector('#sbbs_sfw'),
+        sfwNote: root.querySelector('#sbbs_sfw_note'),
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
         grid: root.querySelector('#sbbs_grid'),
@@ -94,14 +104,19 @@ function wireBrowser(popup, health, options) {
 
     const settings = getSettings();
     const sources = Array.isArray(health?.sources) ? health.sources : [];
-    const usable = sources.filter((source) => source
-        && source.state !== 'down'
-        && source.capabilities?.search
-        && isSourceEnabled(source, settings.enabledSources));
+    const searchable = sources.filter((source) => source?.capabilities?.search);
+    const enabled = searchable.filter((source) => isSourceEnabled(source, settings.enabledSources));
+    const usable = enabled.filter((source) => source.state !== 'down');
 
     if (usable.length === 0) {
         dom.bar.hidden = true;
-        setText(dom.state, 'No sources are available yet.');
+        if (searchable.length === 0) {
+            setText(dom.state, 'The server did not report any searchable sources.');
+        } else if (enabled.length === 0) {
+            setText(dom.state, 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.');
+        } else {
+            setText(dom.state, 'Enabled sources are unavailable right now.');
+        }
         return;
     }
 
@@ -129,10 +144,10 @@ function wireBrowser(popup, health, options) {
     applySourceCapabilities();
 
     if (typeof options.query === 'string' && options.query !== '') {
-        dom.query.value = options.query;
+        dom.query.value = options.query.slice(0, 128);
     }
 
-    setText(dom.state, `Search ${state.source.label}, or press Enter to see the latest.`);
+    setText(dom.state, `Enter a search term, or leave it blank to browse ${state.source.label}.`);
 
     // ---- events ----
 
@@ -184,7 +199,12 @@ function wireBrowser(popup, health, options) {
         // Never imply filtering that the source cannot actually do.
         const canFilter = state.source.capabilities?.sfwToggle === true;
         dom.sfw.disabled = !canFilter;
-        dom.sfw.closest('.sbbs-sfw').title = canFilter ? '' : `${state.source.label} has no SFW filter`;
+        setText(dom.sfwNote, canFilter ? '' : `${state.source.label} does not provide a reliable SFW filter.`);
+        if (canFilter) {
+            dom.sfw.removeAttribute('aria-describedby');
+        } else {
+            dom.sfw.setAttribute('aria-describedby', 'sbbs_sfw_note');
+        }
     }
 
     async function runSearch({ append }) {
@@ -197,6 +217,7 @@ function wireBrowser(popup, health, options) {
         }
         state.loading = true;
         state.rerun = null;
+        setText(dom.state, `Searching ${state.source.label}...`);
 
         if (!append) {
             state.offset = 0;
@@ -228,15 +249,13 @@ function wireBrowser(popup, health, options) {
             if (state.items.length === 0) {
                 const term = dom.query.value.trim();
                 setText(dom.state, term
-                    ? `No results for “${term}” on ${state.source.label}.`
+                    ? `No results for "${term}" on ${state.source.label}.`
                     : `No results on ${state.source.label}.`);
             } else {
                 setText(dom.state, '');
             }
 
-            setText(dom.count, result.total !== null && result.total !== undefined
-                ? `${state.items.length} of ${result.total}`
-                : `${state.items.length} shown`);
+            setText(dom.count, formatResultCount(state.items.length, result.total));
 
             dom.more.hidden = result.hasMore !== true || items.length === 0;
         } catch (error) {
@@ -248,7 +267,7 @@ function wireBrowser(popup, health, options) {
                 return;
             }
 
-            setText(dom.state, describeError(error, state.source.label));
+            setText(dom.state, searchErrorMessage(error, state.source.label));
         } finally {
             state.loading = false;
 
@@ -272,7 +291,7 @@ function wireBrowser(popup, health, options) {
         }
         dom.source.querySelector(`option[value="${CSS.escape(dead.id)}"]`)?.remove();
 
-        toastr.info(`${dead.label} isn’t responding — hidden for now.`, 'BotSearcher');
+        toastr.info(`${dead.label} is not responding and has been removed from this list.`, 'BotSearcher');
 
         dom.grid.replaceChildren();
         records.clear();
@@ -295,7 +314,7 @@ function wireBrowser(popup, health, options) {
             try {
                 await post('/retry', { source: dead.id });
                 invalidateAvailability();
-                toastr.success(`${dead.label} will be tried again.`, 'BotSearcher');
+                toastr.success(`Trying ${dead.label} again.`, 'BotSearcher');
                 restoreSource(dead, retry);
             } catch {
                 retry.disabled = false;
@@ -394,7 +413,7 @@ function buildCard(item, source, settings) {
 
     const sub = [];
     if (item.stats?.tokens) {
-        sub.push(`${item.stats.tokens} tokens`);
+        sub.push(formatCount(item.stats.tokens, 'token'));
     }
     if (item.creator) {
         sub.push(item.creator);
@@ -404,31 +423,17 @@ function buildCard(item, source, settings) {
     card.append(figure, meta);
     card.title = item.name || '';
 
-    // One accessible name covering both lines, plus the adult flag, so a screen
-    // reader announces something useful instead of "button, Bertha, 606 tokens".
+    // One accessible name covers both lines and the content flag.
     const parts = [item.name || 'Untitled'];
     if (item.creator) {
         parts.push(`by ${item.creator}`);
     }
     if (item.nsfw) {
-        parts.push('adult');
+        parts.push('sensitive content');
     }
     card.setAttribute('aria-label', parts.join(', '));
 
     return card;
-}
-
-/**
- * Sort values are whatever each API calls them — "approved_at",
- * "trending_downloads", "n_tokens". Show something readable without
- * maintaining a translation table per source.
- */
-const SORT_WORDS = { n: 'number of', asc: 'ascending', desc: 'descending' };
-
-function sortLabel(sort) {
-    const words = String(sort).split(/[_\s]+/).filter(Boolean);
-    const text = words.map((word) => SORT_WORDS[word] ?? word).join(' ');
-    return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** First character of a name, for the no-image tile. */
@@ -437,38 +442,26 @@ function initialOf(name) {
     return text === '' ? '?' : [...text][0].toUpperCase();
 }
 
-function describeError(error, sourceLabel) {
-    switch (error?.code) {
-        case 'timeout':
-            return `${sourceLabel} did not respond in time. Try again.`;
-        case 'rate_limited':
-            return 'Too many searches — wait a moment and try again.';
-        case 'source_busy':
-            return `${sourceLabel} is busy — try again shortly.`;
-        case 'source_down':
-            return `${sourceLabel} isn’t responding.`;
-        case 'http_error':
-            return `${sourceLabel} returned an error.`;
-        case 'too_large':
-            return `${sourceLabel} sent more data than expected.`;
-        case 'bad_json':
-        case 'unsafe_json':
-            return `${sourceLabel} sent a response this version can’t read. It may have changed its API.`;
-        default:
-            return `Could not reach ${sourceLabel}.`;
-    }
-}
-
 /**
  * @param {any} popup
- * @param {string} status
+ * @param {{ status: string, health: any }} availability
  */
-function wireInstallPanel(popup, status) {
+function wireInstallPanel(popup, availability) {
     const root = popup.content;
+    const copy = availabilityCopy(
+        availability.status,
+        availability.health,
+        PROTOCOL_VERSION,
+        VERSION,
+    );
+    const instructions = root.querySelector('.sbbs-install-instructions');
+    const guidance = root.querySelector('.sbbs-install-guidance');
 
-    if (status === AVAILABILITY.PROTOCOL_MISMATCH) {
-        setText(root.querySelector('.sbbs-install-title'), 'The two halves are out of sync');
-    }
+    setText(root.querySelector('.sbbs-install-title'), copy.title);
+    setText(root.querySelector('.sbbs-install-lead'), copy.lead);
+    instructions.hidden = !copy.showInstall;
+    setText(guidance, copy.guidance);
+    guidance.hidden = copy.guidance === '';
 
     root.querySelector('#sbbs_recheck')?.addEventListener('click', () => {
         invalidateAvailability();

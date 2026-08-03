@@ -2,7 +2,7 @@
     <header class="sbbs-bar">
         <div class="sbbs-bar-row">
             <select id="sbbs_source" class="text_pole sbbs-source" aria-label="Source"></select>
-            <input id="sbbs_query" class="text_pole sbbs-query" type="search" placeholder="Search characters…" enterkeyhint="search" autocomplete="off" spellcheck="false">
+            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="128" enterkeyhint="search" autocomplete="off" spellcheck="false">
             <button id="sbbs_go" class="menu_button sbbs-go" type="button" title="Search" aria-label="Search">
                 <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
             </button>
@@ -13,6 +13,7 @@
                 <input id="sbbs_sfw" type="checkbox">
                 <span>SFW only</span>
             </label>
+            <span id="sbbs_sfw_note" class="sbbs-control-note" aria-live="polite"></span>
             <span id="sbbs_count" class="sbbs-count" aria-live="polite"></span>
         </div>
     </header>
@@ -28,5 +29,5 @@
         `hidden` attribute here: the [hidden][hidden] rule in style.css outranks
         the data-view selector, so the pane would stay invisible after switching.
     -->
-    <section id="sbbs_detail" class="sbbs-detail" aria-label="Character details"></section>
+    <section id="sbbs_detail" class="sbbs-detail" aria-label="Card details"></section>
 </div>

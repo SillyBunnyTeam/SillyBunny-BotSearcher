@@ -4,7 +4,7 @@
  * Everything is namespaced .sbbs-*. Colours, radii and spacing come from the
  * fork's own tokens (public/css/sillybunny-theme.css, public/css/spacing-system.css)
  * so the dialog tracks the user's theme without any per-theme work. The
- * "Browse online" button deliberately has no rules here — it borrows
+ * "Find cards online" button deliberately has no rules here; it borrows
  * .sb-character-import-action from the fork.
  *
  * This sheet is injected at extension activation, i.e. after every core sheet,
@@ -88,6 +88,16 @@
     margin-inline-start: auto;
     opacity: 0.7;
     font-size: 0.9em;
+}
+
+.sbbs-control-note {
+    flex: 1 1 18rem;
+    opacity: 0.7;
+    font-size: 0.85em;
+}
+
+.sbbs-control-note:empty {
+    display: none;
 }
 
 /* ---- body ---- */
@@ -335,7 +345,7 @@
     overflow-wrap: anywhere;
 }
 
-/* ---- "what's inside this card" ---- */
+/* ---- card contents ---- */
 
 .sbbs-inside {
     border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
@@ -362,6 +372,11 @@
 
 .sbbs-inside-list dd {
     margin: 0;
+}
+
+.sbbs-inside-empty {
+    margin: var(--spacing-sm, 8px) 0 0;
+    opacity: 0.75;
 }
 
 /* ---- detail actions ---- */
@@ -411,6 +426,10 @@
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md, 12px);
+}
+
+.sbbs-install [hidden][hidden] {
+    display: none;
 }
 
 .sbbs-install-steps {
@@ -506,7 +525,7 @@
     font-size: 0.8em;
 }
 
-/* Keyboard-reachable reveal for a blurred adult preview. */
+/* Keyboard-reachable reveal for a blurred sensitive preview. */
 .sbbs-detail-image {
     position: relative;
 }
