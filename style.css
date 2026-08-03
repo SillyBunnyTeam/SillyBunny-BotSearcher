@@ -493,3 +493,22 @@
     opacity: 0.55;
     font-size: 0.8em;
 }
+
+/* Keyboard-reachable reveal for a blurred adult preview. */
+.sbbs-detail-image {
+    position: relative;
+}
+
+.sbbs-reveal {
+    position: absolute;
+    inset-inline-start: 50%;
+    inset-block-start: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1;
+    background: var(--sb-button-bg, rgba(0, 0, 0, 0.6));
+    border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.2));
+    border-radius: var(--sb-radius-button, 14px);
+    color: inherit;
+    padding: 6px 14px;
+    cursor: pointer;
+}

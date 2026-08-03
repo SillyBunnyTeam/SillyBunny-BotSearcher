@@ -112,6 +112,8 @@ function wireBrowser(popup, health, options) {
         source: usable.find((entry) => entry.id === settings.defaultSource) ?? usable[0],
         offset: 0,
         loading: false,
+        /** A search requested while one was in flight, honoured when it lands. */
+        rerun: null,
         items: [],
     };
 
@@ -186,10 +188,15 @@ function wireBrowser(popup, health, options) {
     }
 
     async function runSearch({ append }) {
+        // Dropping a request while one is in flight loses it silently: type a
+        // query during the initial load, press Enter, and nothing happens. Note
+        // the intent instead and honour it when the current one finishes.
         if (state.loading) {
+            state.rerun = append ? state.rerun : { append: false };
             return;
         }
         state.loading = true;
+        state.rerun = null;
 
         if (!append) {
             state.offset = 0;
@@ -244,6 +251,12 @@ function wireBrowser(popup, health, options) {
             setText(dom.state, describeError(error, state.source.label));
         } finally {
             state.loading = false;
+
+            const queued = state.rerun;
+            if (queued) {
+                state.rerun = null;
+                runSearch(queued);
+            }
         }
     }
 
@@ -319,6 +332,9 @@ function wireBrowser(popup, health, options) {
                 showDetail(dom.detail, records.get(card), state.source, () => {
                     dom.root.dataset.view = 'grid';
                     dom.detail.replaceChildren();
+                    // Return focus where it was, so keyboard and screen-reader
+                    // users are not dropped back at the top of the dialog.
+                    card.focus();
                 });
             });
             const li = document.createElement('li');
@@ -354,8 +370,11 @@ function buildCard(item, source, settings) {
 
     const figure = el('div', 'sbbs-card-img');
     // Always present, revealed if no image arrives. A source may have no
-    // thumbnail, or one too large for the proxy's cap.
-    figure.append(el('span', 'sbbs-card-initial', initialOf(item.name)));
+    // thumbnail, or one too large for the proxy's cap. Decorative: the card's
+    // accessible name already carries the character name.
+    const initial = el('span', 'sbbs-card-initial', initialOf(item.name));
+    initial.setAttribute('aria-hidden', 'true');
+    figure.append(initial);
 
     const src = thumbSrc(item, source, 'grid', settings.imageMode);
     if (src) {
@@ -384,6 +403,18 @@ function buildCard(item, source, settings) {
 
     card.append(figure, meta);
     card.title = item.name || '';
+
+    // One accessible name covering both lines, plus the adult flag, so a screen
+    // reader announces something useful instead of "button, Bertha, 606 tokens".
+    const parts = [item.name || 'Untitled'];
+    if (item.creator) {
+        parts.push(`by ${item.creator}`);
+    }
+    if (item.nsfw) {
+        parts.push('adult');
+    }
+    card.setAttribute('aria-label', parts.join(', '));
+
     return card;
 }
 

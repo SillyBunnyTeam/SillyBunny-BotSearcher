@@ -12,6 +12,7 @@ import { pygmalion } from './sources/pygmalion.js';
 import { risurealm } from './sources/risurealm.js';
 import { quillgen } from './sources/quillgen.js';
 import { wyvern } from './sources/wyvern.js';
+import { charactertavern } from './sources/charactertavern.js';
 
 /** @type {Readonly<Record<string, any>>} */
 export const SOURCES = Object.freeze({
@@ -21,6 +22,7 @@ export const SOURCES = Object.freeze({
     risurealm,
     quillgen,
     wyvern,
+    charactertavern,
 });
 
 /**

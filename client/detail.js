@@ -32,6 +32,10 @@ export async function showDetail(container, summary, source, onBack) {
     header.append(back);
     container.append(header);
 
+    // The detail pane replaces the grid, so focus has to follow it or the user
+    // is left tabbing through a hidden view.
+    back.focus();
+
     const loading = el('div', 'sbbs-state', 'Loading…');
     container.append(loading);
 
@@ -60,8 +64,14 @@ export async function showDetail(container, summary, source, onBack) {
         if (setImgSafe(img, previewSrc, source.clientHosts)) {
             if (card.nsfw && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
-                figure.title = 'Click to reveal';
-                figure.addEventListener('click', () => figure.classList.remove('sbbs-blurred'), { once: true });
+                // A real button, so revealing works by keyboard too.
+                const reveal = el('button', 'sbbs-reveal', 'Show image');
+                reveal.type = 'button';
+                reveal.addEventListener('click', () => {
+                    figure.classList.remove('sbbs-blurred');
+                    reveal.remove();
+                }, { once: true });
+                figure.append(reveal);
             }
             figure.append(img);
             body.append(figure);
