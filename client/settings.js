@@ -330,23 +330,32 @@ function historyControl() {
 }
 
 function checkbox(id, label, checked, onChange, note) {
-    const wrapper = el('label', 'checkbox_label sbbs-setting');
+    const control = el('label', 'checkbox_label sbbs-setting');
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.id = id;
     input.checked = checked === true;
     input.addEventListener('change', () => onChange(input.checked));
-    wrapper.append(input, el('span', undefined, label));
+    control.append(input, el('span', undefined, label));
+
+    if (!note) {
+        return control;
+    }
 
     // A setting that changes where a request comes from needs the consequence
     // written down next to it, not left to the label.
-    if (note) {
-        const hint = el('span', 'sbbs-setting-note', note);
-        hint.id = `${id}_note`;
-        input.setAttribute('aria-describedby', hint.id);
-        wrapper.append(hint);
-    }
+    //
+    // The note goes OUTSIDE the label. SillyBunny's .checkbox_label is a flex
+    // row with no flex-wrap (public/style.css:5160), so a full-width child
+    // inside it cannot wrap onto its own line — it takes the width and squeezes
+    // the label text down to one character per line instead.
+    const hint = el('span', 'sbbs-setting-note', note);
+    hint.id = `${id}_note`;
+    input.setAttribute('aria-describedby', hint.id);
 
+    control.classList.remove('sbbs-setting');
+    const wrapper = el('div', 'sbbs-setting sbbs-setting-noted');
+    wrapper.append(control, hint);
     return wrapper;
 }
 

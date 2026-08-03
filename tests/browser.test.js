@@ -113,6 +113,58 @@ test('a corrupt stored history is repaired rather than trusted', async () => {
     assert.equal(history[1].length, 128, 'and an oversized entry is capped');
 });
 
+test('a setting note sits beside its label, not inside it', async () => {
+    const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        fetch: globalThis.fetch,
+        SillyTavern: globalThis.SillyTavern,
+    };
+
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+    });
+    globalThis.fetch = async () => jsonResponse({ protocol: 3, version: '0.2.0', sources: [] });
+    const settingsStore = {};
+    globalThis.SillyTavern = {
+        getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
+    };
+
+    try {
+        const { mountSettings } = await import('../client/settings.js?settings-panel');
+        await mountSettings();
+
+        const input = dom.window.document.getElementById('sbbs_set_direct');
+        assert.ok(input, 'the direct-requests setting must be mounted');
+
+        const note = dom.window.document.getElementById('sbbs_set_direct_note');
+        assert.ok(note, 'a setting that changes where requests come from needs its consequence written down');
+
+        // SillyBunny's .checkbox_label is a flex row with no flex-wrap, so a
+        // full-width child inside it takes the whole row and squeezes the label
+        // text to one character per line. The note must be a sibling.
+        const label = input.closest('.checkbox_label');
+        assert.ok(label, 'the checkbox still needs its label');
+        assert.equal(label.contains(note), false, 'the note must not live inside .checkbox_label');
+        assert.equal(note.parentElement, label.parentElement, 'it belongs beside the label');
+
+        // Still announced with the control it explains.
+        assert.equal(input.getAttribute('aria-describedby'), note.id);
+    } finally {
+        // api.js caches /healthz for a minute, and that cache is shared across
+        // the query-suffixed module copies these tests use. Leaving this test's
+        // empty source list in it would starve whichever test ran next.
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('the browser is single-flight, ignores stale searches, deduplicates, and preserves append results on retry', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {

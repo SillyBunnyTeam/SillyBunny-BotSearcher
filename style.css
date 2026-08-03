@@ -744,15 +744,32 @@
 }
 
 /*
- * Explains what a setting costs. Full width under the label rather than beside
- * it, because .checkbox_label is a row and a wrapped sentence in a row column
- * becomes unreadable at narrow widths.
+ * A checkbox with an explanation under it.
+ *
+ * The note is a SIBLING of .checkbox_label, never a child: that class is one of
+ * SillyBunny's own and is a flex row with no flex-wrap, so a full-width child
+ * takes the row's width and collapses the label text to one character per line.
  */
+.sbbs-setting-noted {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+/* Explains what a setting costs, on its own line under the control. */
 .sbbs-setting-note {
-    flex: 1 0 100%;
+    display: block;
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.85em;
     line-height: 1.4;
+}
+
+/*
+ * Only under a checkbox: clears the box itself so the sentence lines up with
+ * the label rather than with the control. Other settings have no box to clear.
+ */
+.sbbs-setting-noted > .sbbs-setting-note {
+    padding-inline-start: calc(1em + 10px);
 }
 
 /* ---- install panel ---- */
