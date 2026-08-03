@@ -9,7 +9,7 @@
     "css": "style.css",
     "homePage": "https://github.com/platberlitz/SillyBunny-BotSearcher",
     "loading_order": 100,
-    "auto_update": true,
+    "auto_update": false,
     "hooks": {
         "activate": "init"
     }

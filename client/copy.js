@@ -57,7 +57,7 @@ const STAT_FIELDS = Object.freeze({
     ]),
     wyvern: Object.freeze([
         ['tokens', 'token'],
-        ['downloads', 'like'],
+        ['favorites', 'like'],
     ]),
     charactertavern: Object.freeze([
         ['tokens', 'token'],
@@ -162,6 +162,9 @@ export function insideRows(inside) {
         add('Embedded assets', 'Not reported');
     } else if (inside.embeddedAssets > 0) {
         add('Embedded assets', formatCount(inside.embeddedAssets, 'asset'));
+    }
+    if (inside.externalImages > 0) {
+        add('External URL references', formatCount(inside.externalImages, 'reference'));
     }
     if (inside.originSite) {
         add('Reported origin', inside.originSite);

@@ -20,6 +20,7 @@ import {
     FIELD_LIMITS,
     THUMB_SIZES,
     MAX_INGEST_BYTES,
+    MAX_CARD_BYTES,
     INGEST_KINDS,
     MAX_FANOUT,
 } from '../shared/schema.js';
@@ -27,9 +28,9 @@ import { describeSources, getSource } from './registry.js';
 import { wrap, jsonGuard, jsonGuardWithLimit, fail, UpstreamError, SAFE_UPSTREAM_CODES } from './guards.js';
 import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey, readFilters } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
-import { consume, acquire, callerKey } from './limits.js';
+import { consume, acquire, acquireThumbnail, callerKey } from './limits.js';
 import { mintCursor, verifyCursor, verifyRef, mintToken, verifyToken } from './refs.js';
-import { interleave, dedupe, sharePageBudget } from './merge.js';
+import { interleave, dedupe, identityFingerprint, sharePageBudget } from './merge.js';
 import { BadCursorError } from './paging.js';
 import { detectImageType } from './imagetype.js';
 import {
@@ -43,10 +44,7 @@ import {
     REROUTABLE_FAILURES,
 } from './health.js';
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
-import { getVocabulary } from './vocabulary.js';
-
-/** A character card is text plus one image; well past anything legitimate. */
-const MAX_CARD_BYTES = 8 * 1024 * 1024;
+import { getVocabulary, hasVocabulary } from './vocabulary.js';
 
 /**
  * Default thumbnail cap. A 320px preview is 20-60 KB, so anything near this is
@@ -67,6 +65,7 @@ const HARD_MAX_THUMB_BYTES = 6 * 1024 * 1024;
  * never be replayed as a merged one, or the reverse.
  */
 const MULTI_CURSOR_SCOPE = 'cursor:multi';
+const MAX_CARRIED_DEDUPE = 64;
 
 /**
  * @param {import('express').Router} router
@@ -100,22 +99,44 @@ export function createRouter(router, state) {
         }
         const { adapter } = resolved;
 
-        const limited = await consume('search', callerKey(request));
+        if (adapter.capabilities.tagVocabulary !== true || typeof adapter.fetchVocabulary !== 'function') {
+            response.json({ tags: [] });
+            return;
+        }
+
+        const caller = callerKey(request);
+        const limited = await consume('search', caller);
         if (!limited.allowed) {
             response.set('Retry-After', String(limited.retryAfterSeconds));
             fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
             return;
         }
 
-        if (adapter.capabilities.tagVocabulary !== true || typeof adapter.fetchVocabulary !== 'function') {
-            response.json({ tags: [] });
+        // A cache hit is local data and must remain available while a source is
+        // cooling down. A cache miss has the same source-wide egress gates as a
+        // search so a failed tags endpoint cannot be hammered independently.
+        if (hasVocabulary(adapter)) {
+            response.json({ tags: await getVocabulary(adapter) });
             return;
         }
 
-        const tags = await getVocabulary(
-            adapter,
-            () => callAdapter(adapter, () => adapter.fetchVocabulary(contextFor(adapter))),
-        );
+        const gate = await gateSource(caller, adapter.id);
+        if (!gate.ok) {
+            fail(response, gate.code === 'source_down' ? 503 : 429, gate.code);
+            return;
+        }
+
+        let tags;
+        try {
+            tags = await getVocabulary(
+                adapter,
+                // Vocabulary is optional metadata. Its 404/timeout must not
+                // globally mark card search and import operations unhealthy.
+                () => callAdapter(adapter, () => adapter.fetchVocabulary(contextFor(adapter)), { trackHealth: false }),
+            );
+        } finally {
+            gate.release();
+        }
         response.json({ tags });
     }));
 
@@ -144,21 +165,42 @@ export function createRouter(router, state) {
         const size = pick(own(request.query, 'size'), THUMB_SIZES, 'grid');
         const caller = callerKey(request);
 
-        const limited = await consume('thumb', caller);
-        if (!limited.allowed) {
-            response.set('Retry-After', String(limited.retryAfterSeconds));
-            fail(response, 429, 'rate_limited');
-            return;
+        for (const [name, key] of [
+            ['thumbUser', caller],
+            ['thumbSource', adapter.id],
+            ['thumbGlobal', 'all'],
+        ]) {
+            const limited = await consume(name, key, { failClosed: true });
+            if (!limited.allowed) {
+                response.set('Retry-After', String(limited.retryAfterSeconds));
+                fail(response, 429, 'rate_limited');
+                return;
+            }
         }
 
-        // One grid render fires a whole page of these at once.
-        const release = await acquire('thumb', caller);
-        if (!release) {
-            fail(response, 503, 'busy');
-            return;
-        }
+        const disconnected = new AbortController();
+        const abortOnDisconnect = () => disconnected.abort();
+        request.once?.('aborted', abortOnDisconnect);
+        response.once?.('close', abortOnDisconnect);
 
+        const releases = [];
+        const releaseAll = () => {
+            while (releases.length > 0) {
+                releases.pop()();
+            }
+            request.off?.('aborted', abortOnDisconnect);
+            response.off?.('close', abortOnDisconnect);
+        };
+
+        let sent = false;
         try {
+            const release = await acquireThumbnail(caller, adapter.id, { signal: disconnected.signal });
+            if (!release) {
+                fail(response, 503, 'busy');
+                return;
+            }
+            releases.push(release);
+
             let url;
             try {
                 url = adapter.thumbUrlFromRef(payload, size);
@@ -176,6 +218,7 @@ export function createRouter(router, state) {
                 accept: 'image/webp,image/png,image/jpeg,image/avif,image/gif;q=0.8,*/*;q=0.5',
                 maxBytes,
                 timeoutMs: 15000,
+                signal: disconnected.signal,
             });
 
             // Magic bytes decide, not the upstream header. SVG is not in the
@@ -196,9 +239,14 @@ export function createRouter(router, state) {
                 // The browser cache absorbs repeats, which is where the savings are.
                 'Cache-Control': 'private, max-age=86400, immutable',
             });
+            response.once?.('finish', releaseAll);
+            response.once?.('close', releaseAll);
             response.send(result.buffer);
+            sent = true;
         } finally {
-            release();
+            if (!sent) {
+                releaseAll();
+            }
         }
     }));
 
@@ -294,6 +342,16 @@ export function createRouter(router, state) {
             return;
         }
 
+        // This route receives the largest JSON body. The host parser has already
+        // run, but rate-limit before recursively walking attacker-controlled data.
+        const caller = callerKey(request);
+        const limited = await consume('search', caller);
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+
         const payload = own(request.body, 'payload');
         if (payload === undefined || payload === null) {
             fail(response, 400, 'bad_payload');
@@ -301,16 +359,6 @@ export function createRouter(router, state) {
         }
         if (hasForbiddenKey(payload)) {
             fail(response, 422, 'unsafe_json');
-            return;
-        }
-
-        // Ingesting costs no egress, but it still costs CPU on a small box, so it
-        // shares the per-user search budget.
-        const caller = callerKey(request);
-        const limited = await consume('search', caller);
-        if (!limited.allowed) {
-            response.set('Retry-After', String(limited.retryAfterSeconds));
-            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
             return;
         }
 
@@ -324,7 +372,12 @@ export function createRouter(router, state) {
                 fail(response, 400, 'bad_id');
                 return;
             }
-            response.json(adapter.parseDetail(payload, id));
+            const detail = adapter.parseDetail(payload, id);
+            if (!isExpectedDetail(adapter, id, detail)) {
+                fail(response, 502, 'bad_json');
+                return;
+            }
+            response.json(detail);
             return;
         }
 
@@ -392,14 +445,14 @@ export function createRouter(router, state) {
                     accept: 'image/png,application/json;q=0.9,*/*;q=0.5',
                     maxBytes: MAX_CARD_BYTES,
                     timeoutMs: 20000,
-                }));
+                }), { trackHealth: false });
                 buffer = result.buffer;
             } else if (target?.kind === 'inline' && typeof adapter.buildCard === 'function') {
                 // Some sources publish full card data but no downloadable file.
                 // The adapter assembles a card from it; the result then goes
                 // through exactly the same validation as a downloaded one, so
                 // this path is not a way to bypass any of the checks.
-                const card = await callAdapter(adapter, () => adapter.buildCard(ctx, id));
+                const card = await callAdapter(adapter, () => adapter.buildCard(ctx, id), { trackHealth: false });
                 buffer = Buffer.from(JSON.stringify(card), 'utf8');
                 if (buffer.length > MAX_CARD_BYTES) {
                     fail(response, 422, 'too_large');
@@ -471,13 +524,17 @@ export function createRouter(router, state) {
         try {
             let detail;
             try {
-                detail = await callAdapter(adapter, () => adapter.getDetail(contextFor(adapter), id));
+                detail = await callAdapter(adapter, () => adapter.getDetail(contextFor(adapter), id), { trackHealth: false });
             } catch (error) {
                 if (canReroute(adapter, error) && typeof adapter.buildDetailUrl === 'function') {
                     respondWithDirectPlan(response, adapter, 'detail', null, id);
                     return;
                 }
                 throw error;
+            }
+            if (!isExpectedDetail(adapter, id, detail)) {
+                fail(response, 502, 'bad_json');
+                return;
             }
             response.json(detail);
         } finally {
@@ -494,13 +551,13 @@ export function createRouter(router, state) {
  *
  * @throws {BadCursorError} when the cursor is not one this server minted
  */
-function buildSearchArgs(adapter, body) {
+function buildSearchArgs(adapter, body, { parseCursor = true } = {}) {
     const filters = isPlainObject(own(body, 'filters')) ? own(body, 'filters') : {};
     const rawQuery = own(body, 'query');
     const rawCursor = own(body, 'cursor');
     let cursor = null;
 
-    if (rawCursor !== undefined && rawCursor !== null) {
+    if (parseCursor && rawCursor !== undefined && rawCursor !== null) {
         cursor = verifyCursor(adapter.id, rawCursor);
         if (cursor === null) {
             throw new BadCursorError();
@@ -531,7 +588,9 @@ function shapeSearchResponse(adapter, result, limit) {
         nextCursor: result?.next && typeof result.next === 'object'
             ? mintCursor(adapter.id, result.next)
             : null,
-        items: Array.isArray(result?.items) ? result.items.slice(0, limit) : [],
+        items: Array.isArray(result?.items)
+            ? result.items.filter((item) => item?.source === adapter.id).slice(0, limit)
+            : [],
     };
 }
 
@@ -625,6 +684,7 @@ async function searchMany(request, response, ids) {
     const rawCursor = own(body, 'cursor');
     /** @type {Record<string, unknown> | null} */
     let carried = null;
+    let carriedDedupe = [];
 
     if (rawCursor !== undefined && rawCursor !== null) {
         const parsed = verifyToken(MULTI_CURSOR_SCOPE, rawCursor);
@@ -632,6 +692,16 @@ async function searchMany(request, response, ids) {
         if (!isPlainObject(perSource)) {
             fail(response, 400, 'bad_cursor');
             return;
+        }
+        const priorDedupe = own(parsed, 'd');
+        if (priorDedupe !== undefined) {
+            if (!Array.isArray(priorDedupe)
+                || priorDedupe.length > MAX_CARRIED_DEDUPE
+                || priorDedupe.some((value) => typeof value !== 'string' || !/^[A-Za-z0-9_-]{16}$/.test(value))) {
+                fail(response, 400, 'bad_cursor');
+                return;
+            }
+            carriedDedupe = priorDedupe;
         }
         carried = perSource;
         // Only sources that offered a next page stay in the search. The rest are
@@ -660,7 +730,7 @@ async function searchMany(request, response, ids) {
     const settled = await Promise.all(ids.map(async (id, index) => {
         const adapter = getSource(id);
         const args = {
-            ...buildSearchArgs(adapter, body),
+            ...buildSearchArgs(adapter, body, { parseCursor: false }),
             limit: shares[index],
             // Each source sorts by its own vocabulary; there is no shared one.
             sort: pick(own(sorts, id), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
@@ -685,35 +755,50 @@ async function searchMany(request, response, ids) {
     const groups = [];
     const partial = [];
     const nextBySource = Object.create(null);
-    let total = null;
+    let total = 0;
+    let totalKnown = true;
+    let succeeded = false;
 
     for (const outcome of settled) {
         if (outcome.error) {
             partial.push({ source: outcome.id, error: outcome.error });
+            // Keep the prior cursor (or a null first-page marker) so a transient
+            // failure can rejoin a later page instead of disappearing forever.
+            nextBySource[outcome.id] = carried && own(carried, outcome.id) !== undefined
+                ? own(carried, outcome.id)
+                : null;
+            totalKnown = false;
             continue;
         }
-        const items = Array.isArray(outcome.result?.items) ? outcome.result.items : [];
+        succeeded = true;
+        const items = Array.isArray(outcome.result?.items)
+            ? outcome.result.items.filter((item) => item?.source === outcome.id)
+            : [];
         groups.push({ source: outcome.id, items });
 
-        if (outcome.result?.next && typeof outcome.result.next === 'object') {
+        if (isPlainObject(outcome.result?.next)) {
             nextBySource[outcome.id] = outcome.result.next;
         }
         // A sum across sources counts mirrored cards more than once, so it is
         // reported as what it is: how many the sources between them claim.
         if (typeof outcome.result?.total === 'number' && Number.isFinite(outcome.result.total)) {
-            total = (total ?? 0) + Math.max(0, Math.floor(outcome.result.total));
+            total += Math.max(0, Math.floor(outcome.result.total));
+        } else {
+            totalKnown = false;
         }
     }
 
     // Interleave first, then dedupe, so the surviving copy of a mirrored card is
     // the one from the source the user listed first.
-    const items = dedupe(interleave(groups, limit));
+    const seen = new Set(carriedDedupe);
+    const items = dedupe(interleave(groups, limit), seen, identityFingerprint);
     const remaining = Object.keys(nextBySource);
+    const dedupeState = [...seen].slice(-MAX_CARRIED_DEDUPE);
 
     response.json({
-        total,
+        total: succeeded && totalKnown ? total : null,
         nextCursor: remaining.length > 0
-            ? mintToken(MULTI_CURSOR_SCOPE, { s: nextBySource })
+            ? mintToken(MULTI_CURSOR_SCOPE, { s: nextBySource, d: dedupeState })
             : null,
         items,
         partial,
@@ -783,6 +868,11 @@ function readId(adapter, body) {
     return adapter.idPattern.test(id) ? id : null;
 }
 
+/** Ensures a detail response cannot silently switch the selected source/card. */
+function isExpectedDetail(adapter, id, detail) {
+    return isPlainObject(detail) && detail.source === adapter.id && detail.id === id;
+}
+
 /**
  * A filename the client can hand to the importer. Built from values we control
  * — never from anything upstream sent — so no sanitizer is needed.
@@ -796,16 +886,20 @@ function cardFileName(sourceId, id, kind) {
  * Runs an adapter call and records the outcome with the circuit breaker, so a
  * source that has gone away stops being retried on every keystroke.
  */
-async function callAdapter(adapter, fn) {
+async function callAdapter(adapter, fn, { trackHealth = true } = {}) {
     try {
         const result = await fn();
-        markSuccess(adapter.id);
+        if (trackHealth) {
+            markSuccess(adapter.id);
+        }
         return result;
     } catch (error) {
         if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
             throw error;
         }
-        markFailure(adapter.id, error);
+        if (trackHealth) {
+            markFailure(adapter.id, error);
+        }
         throw error;
     }
 }

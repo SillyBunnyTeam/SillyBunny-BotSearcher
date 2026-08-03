@@ -20,6 +20,10 @@ import { getAvailability } from './api.js';
 
 const PAGE_SIZES = [12, 24, 48];
 
+const MAX_ENABLED_SOURCES = 64;
+const MAX_SORTS = 64;
+const MAX_SOURCE_OPTIONS = 64;
+
 const AVAILABLE_IMAGE_MODES = IMAGE_MODES;
 
 const IMAGE_MODE_LABELS = {
@@ -43,16 +47,13 @@ const DEFAULTS = Object.freeze({
     resultsPerPage: 24,
     sortBySource: Object.freeze({}),
     showTrustPanel: true,
-    /**
-     * Allow requests for a source to move to this browser when the server is
-     * blocked from reaching it. On by default because the alternative is the
-     * source silently disappearing, which is what it used to do; the switch is
-     * always announced in the browse dialog when it happens.
-     */
-    allowDirectRequests: true,
+    /** Browser-direct fallback changes who sees the user's network address. */
+    allowDirectRequests: false,
+    /** Search terms can be sensitive, so persistence is an explicit opt-in. */
+    saveQueryHistory: false,
     /** Most recent first. Search terms only — never a card name or a filter. */
     queryHistory: Object.freeze([]),
-    _v: 3,
+    _v: 4,
 });
 
 /** Enough to be useful as a dropdown, few enough to stay scannable. */
@@ -69,18 +70,38 @@ function context() {
  * Reads settings, repairing anything out of range, so no caller has to re-check.
  */
 export function getSettings() {
-    const store = context().extensionSettings;
+    const ctx = context();
+    const store = ctx.extensionSettings;
     const raw = store && typeof store === 'object' && Object.prototype.hasOwnProperty.call(store, SETTINGS_KEY)
         ? store[SETTINGS_KEY]
         : null;
-    const source = raw && typeof raw === 'object' ? raw : {};
+    let source = raw && typeof raw === 'object' ? raw : {};
     const read = (key) => (Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
+
+    // Versions before opt-in history stored terms automatically. Remove those
+    // terms as soon as the upgraded extension reads the profile, rather than
+    // merely hiding them behind the new default.
+    if (read('saveQueryHistory') !== true && Object.prototype.hasOwnProperty.call(source, 'queryHistory')) {
+        source = { ...source, saveQueryHistory: false, queryHistory: [], _v: DEFAULTS._v };
+        store[SETTINGS_KEY] = source;
+        if (typeof ctx.saveSettingsDebounced === 'function') {
+            ctx.saveSettingsDebounced();
+        }
+    }
 
     const enabled = read('enabledSources');
     const rawSorts = read('sortBySource');
     const sortBySource = Object.create(null);
     if (rawSorts && typeof rawSorts === 'object' && !Array.isArray(rawSorts)) {
-        for (const [sourceId, sort] of Object.entries(rawSorts)) {
+        let visited = 0;
+        for (const sourceId in rawSorts) {
+            if (!Object.prototype.hasOwnProperty.call(rawSorts, sourceId)) {
+                continue;
+            }
+            if (visited++ >= MAX_SORTS) {
+                break;
+            }
+            const sort = rawSorts[sourceId];
             if (/^[a-z0-9-]{1,64}$/.test(sourceId) && typeof sort === 'string') {
                 sortBySource[sourceId] = sort.slice(0, 32);
             }
@@ -96,9 +117,7 @@ export function getSettings() {
     }
 
     return {
-        enabledSources: Array.isArray(enabled)
-            ? enabled.filter((id) => typeof id === 'string' && /^[a-z0-9-]{1,64}$/.test(id))
-            : null,
+        enabledSources: normalizeSourceIds(enabled),
         defaultSource: typeof read('defaultSource') === 'string' ? read('defaultSource').slice(0, 64) : DEFAULTS.defaultSource,
         sfwOnlyDefault: read('sfwOnlyDefault') !== false,
         hideAiDefault: read('hideAiDefault') === true,
@@ -107,12 +126,12 @@ export function getSettings() {
         resultsPerPage: PAGE_SIZES.includes(read('resultsPerPage')) ? read('resultsPerPage') : DEFAULTS.resultsPerPage,
         sortBySource: { ...sortBySource },
         showTrustPanel: read('showTrustPanel') !== false,
-        allowDirectRequests: read('allowDirectRequests') !== false,
-        queryHistory: Array.isArray(read('queryHistory'))
-            ? read('queryHistory')
+        allowDirectRequests: read('allowDirectRequests') === true,
+        saveQueryHistory: read('saveQueryHistory') === true,
+        queryHistory: read('saveQueryHistory') === true && Array.isArray(read('queryHistory'))
+            ? read('queryHistory').slice(0, MAX_QUERY_HISTORY)
                 .filter((entry) => typeof entry === 'string' && entry.trim() !== '')
                 .map((entry) => entry.slice(0, MAX_QUERY_LENGTH))
-                .slice(0, MAX_QUERY_HISTORY)
             : [],
         _v: DEFAULTS._v,
     };
@@ -128,6 +147,9 @@ export function getSettings() {
  * @param {string} query
  */
 export function rememberQuery(query) {
+    if (!getSettings().saveQueryHistory) {
+        return;
+    }
     const trimmed = typeof query === 'string' ? query.trim().slice(0, MAX_QUERY_LENGTH) : '';
     if (trimmed === '') {
         return;
@@ -166,8 +188,10 @@ export function isSourceEnabled(source, enabledSources) {
 export function updateSettings(patch) {
     const ctx = context();
     ctx.extensionSettings[SETTINGS_KEY] = { ...getSettings(), ...patch };
+    const normalized = getSettings();
+    ctx.extensionSettings[SETTINGS_KEY] = normalized;
     ctx.saveSettingsDebounced();
-    return getSettings();
+    return normalized;
 }
 
 /**
@@ -214,6 +238,13 @@ export async function mountSettings() {
             settings.allowDirectRequests,
             (v) => updateSettings({ allowDirectRequests: v }),
             'Some sites refuse connections from servers but not from home connections. With this on, the site sees your browser’s address rather than the server’s. With it off, such a source stays in the list but cannot return results.',
+        ),
+        checkbox(
+            'sbbs_set_history',
+            'Save search history in SillyBunny profile settings',
+            settings.saveQueryHistory,
+            (v) => updateSettings({ saveQueryHistory: v, ...(v ? {} : { queryHistory: [] }) }),
+            'Search terms can be sensitive. With this off, terms are not retained after the current dialog.',
         ),
         select(
             'sbbs_set_images',
@@ -265,7 +296,10 @@ function sourceList(sources) {
 
     const settings = getSettings();
 
-    for (const source of sources) {
+    for (const source of sources.slice(0, MAX_SOURCE_OPTIONS)) {
+        if (!source || typeof source !== 'object' || !/^[a-z0-9-]{1,64}$/.test(source.id)) {
+            continue;
+        }
         const enabled = isSourceEnabled(source, settings.enabledSources);
         const row = el('label', 'checkbox_label sbbs-source-row');
 
@@ -324,9 +358,26 @@ function historyControl() {
     wrapper.append(el(
         'span',
         'sbbs-setting-note',
-        'Terms you searched for are saved on this device so the search box can suggest them again. Card names are not saved.',
+        'Saved terms are stored in your SillyBunny profile settings and may be included in server backups. Card names are not saved.',
     ));
     return wrapper;
+}
+
+function normalizeSourceIds(value) {
+    if (!Array.isArray(value)) {
+        return null;
+    }
+
+    const seen = new Set();
+    const ids = [];
+    for (const id of value.slice(0, MAX_ENABLED_SOURCES)) {
+        if (typeof id !== 'string' || !/^[a-z0-9-]{1,64}$/.test(id) || seen.has(id)) {
+            continue;
+        }
+        seen.add(id);
+        ids.push(id);
+    }
+    return ids;
 }
 
 function checkbox(id, label, checked, onChange, note) {

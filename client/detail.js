@@ -11,7 +11,7 @@
 import { el, setText, setImgSafe, setLinkSafe } from './render.js';
 import { postRouted, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
-import { importCard, importCardBytes, openCharacter } from './importer.js';
+import { commitPreparedCardImport, importCard, openCharacter, prepareCardImport } from './importer.js';
 import {
     additionalImportContents,
     detailErrorMessage,
@@ -23,11 +23,12 @@ import {
 /**
  * @param {HTMLElement} container the #sbbs_detail node
  * @param {any} summary the card as it appeared in the grid
- * @param {{ id: string, label: string, clientHosts: string[], capabilities?: any }} source
+ * @param {{ id: string, label: string, clientHosts: string[], nativeImport?: boolean, capabilities?: any }} source
  * @param {() => void} onBack
- * @param {{ signal?: AbortSignal, onTag?: (tag: string) => void }} [options]
+ * @param {{ signal?: AbortSignal, onTag?: (tag: string) => void, onDirect?: (reason: string) => void, isSourceDirect?: (sourceId: string) => boolean }} [options]
  */
-export async function showDetail(container, summary, source, onBack, { signal, onTag } = {}) {
+export async function showDetail(container, summary, source, onBack, options = {}) {
+    const { signal, onTag, onDirect, isSourceDirect } = options;
     container.replaceChildren();
 
     const settings = getSettings();
@@ -54,6 +55,7 @@ export async function showDetail(container, summary, source, onBack, { signal, o
         card = await postRouted('/detail', { source: source.id, id: summary.id }, source, {
             signal,
             allowDirect: settings.allowDirectRequests,
+            onDirect,
         });
     } catch (error) {
         if (error?.name === 'AbortError' || signal?.aborted) {
@@ -62,7 +64,7 @@ export async function showDetail(container, summary, source, onBack, { signal, o
         setText(loading, detailErrorMessage(error, source.label));
         const retry = el('button', 'menu_button', 'Try again');
         retry.type = 'button';
-        retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, { signal, onTag }));
+        retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, options));
         container.append(retry);
         return;
     }
@@ -71,12 +73,17 @@ export async function showDetail(container, summary, source, onBack, { signal, o
         return;
     }
 
+    if (!isExpectedDetail(card, summary, source)) {
+        setText(loading, 'BotSearcher rejected a mismatched card response. Try searching again.');
+        return;
+    }
+
     loading.remove();
 
     const body = el('div', 'sbbs-detail-body');
 
     // ---- preview ----
-    const previewSrc = thumbSrc(card, source, 'detail', settings.imageMode);
+    const previewSrc = thumbSrc(card, source, 'detail', settings.imageMode, isSourceDirect?.(source.id) === true);
     if (previewSrc) {
         const figure = el('div', 'sbbs-detail-image');
         const img = document.createElement('img');
@@ -180,6 +187,14 @@ export async function showDetail(container, summary, source, onBack, { signal, o
     container.append(actionBar(card, source));
 }
 
+function isExpectedDetail(card, summary, source) {
+    return card
+        && typeof card === 'object'
+        && card.source === source.id
+        && typeof card.id === 'string'
+        && card.id === summary.id;
+}
+
 function ratingOf(card) {
     if (card?.contentRating === 'sfw') {
         return { value: 'sfw', label: 'SFW', reveal: 'SFW' };
@@ -234,19 +249,40 @@ function actionBar(card, source) {
 
     const status = el('span', 'sbbs-import-status');
     status.setAttribute('role', 'status');
+    const inspection = el('div', 'sbbs-import-inspection');
+    let prepared = null;
 
     button.addEventListener('click', async () => {
-        // The button is the lock: one import at a time.
+        const native = source.nativeImport === true;
         button.disabled = true;
-        setText(button, 'Importing...');
         setText(status, '');
 
         try {
-            // Native sources go through SillyBunny's own importer; the rest
-            // need the server to fetch and validate the bytes first.
-            const added = card.nativeImport === true
-                ? await importCard(card, source.clientHosts)
-                : await importCardBytes(card, source);
+            if (!native && !prepared) {
+                setText(button, 'Inspecting...');
+                prepared = await prepareCardImport(card, source);
+                inspection.replaceChildren();
+                const verified = insidePanel(prepared.inside);
+                if (verified) {
+                    verified.open = true;
+                    inspection.append(verified);
+                }
+                const surprise = additionalImportContents(prepared.inside, card.inside);
+                setText(
+                    status,
+                    surprise
+                        ? `${surprise} Review the verified contents, then click again to import.`
+                        : 'Card bytes were validated. Review the verified contents, then click again to import.',
+                );
+                button.disabled = false;
+                setText(button, 'Import inspected card');
+                return;
+            }
+
+            setText(button, 'Importing...');
+            const added = native
+                ? await importCard(card, source)
+                : await commitPreparedCardImport(prepared);
 
             setText(button, 'Imported');
 
@@ -255,23 +291,16 @@ function actionBar(card, source) {
             open.addEventListener('click', () => openCharacter(added.avatar));
             bar.append(open);
 
-            toastr.success(added.name || card.name || 'Character', 'Imported');
-
-            // The bytes are the only honest source for this. If the card turned
-            // out to carry something the listing never mentioned, say so.
-            const surprise = additionalImportContents(added.inside, card.inside);
-            if (surprise) {
-                toastr.info(surprise, 'Additional contents found', { timeOut: 12000 });
-            }
+            toastr.success('Character imported.', 'Imported');
         } catch (error) {
             button.disabled = false;
-            setText(button, 'Try import again');
+            setText(button, prepared ? 'Import inspected card' : 'Try import again');
             setText(status, importErrorMessage(error));
             toastr.error(importErrorMessage(error), 'Import failed');
         }
     });
 
-    bar.append(button, status);
+    bar.append(button, status, inspection);
     bar.append(el('p', 'sbbs-trust-note', 'Cards come from third-party sites. Review the description and card contents before starting a chat.'));
     return bar;
 }

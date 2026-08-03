@@ -11,12 +11,14 @@
         "test:coverage": "node --test --experimental-test-coverage tests/*.test.js",
         "probe": "node scripts/probe-sources.mjs"
     },
+    "dependencies": {
+        "node-fetch": "^3.3.2",
+        "rate-limiter-flexible": "^5.0.5"
+    },
     "devDependencies": {
         "eslint": "^9.39.5",
         "express": "^4.21.0",
-        "jsdom": "^26.1.0",
-        "node-fetch": "^3.3.2",
-        "rate-limiter-flexible": "^5.0.5"
+        "jsdom": "^26.1.0"
     },
     "license": "AGPL-3.0",
     "repository": {
@@ -24,6 +26,6 @@
         "url": "https://github.com/platberlitz/SillyBunny-BotSearcher.git"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22 <27"
     }
 }

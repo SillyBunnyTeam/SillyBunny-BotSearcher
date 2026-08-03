@@ -60,9 +60,9 @@ function assertReachable(adapter, url) {
  *
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  * @param {URL | string} target
- * @param {{ accept: string, maxBytes: number, timeoutMs: number }} options
+ * @param {{ accept: string, maxBytes: number, signal: AbortSignal, timedOut: () => boolean }} options
  */
-async function request(adapter, target, { accept, maxBytes, timeoutMs }) {
+async function request(adapter, target, { accept, maxBytes, signal, timedOut }) {
     let url = target instanceof URL ? target : new URL(String(target));
     const startedAt = Date.now();
 
@@ -75,17 +75,18 @@ async function request(adapter, target, { accept, maxBytes, timeoutMs }) {
                 method: 'GET',
                 redirect: 'manual',
                 size: maxBytes,
-                signal: AbortSignal.timeout(timeoutMs),
+                signal,
                 headers: { ...BASE_HEADERS, Accept: accept },
             });
         } catch (error) {
-            if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
-                throw new UpstreamError('timeout', adapter.id);
+            const aborted = abortCode(error, signal, timedOut);
+            if (aborted) {
+                throw new UpstreamError(aborted, adapter.id);
             }
             if (error?.type === 'max-size') {
                 throw new UpstreamError('too_large', adapter.id);
             }
-            throw new UpstreamError('network', error?.message);
+            throw new UpstreamError('network', safeNetworkDetail(error));
         }
 
         const isRedirect = response.status >= 300 && response.status < 400;
@@ -95,6 +96,7 @@ async function request(adapter, target, { accept, maxBytes, timeoutMs }) {
         }
 
         const location = response.headers.get('location');
+        discard(response);
         if (!location) {
             throw new UpstreamError('bad_redirect', String(response.status));
         }
@@ -110,48 +112,117 @@ async function request(adapter, target, { accept, maxBytes, timeoutMs }) {
     throw new UpstreamError('too_many_redirects', adapter.id);
 }
 
+/** Creates one deadline shared by every redirect hop and response body read. */
+function createDeadline(timeoutMs, externalSignal) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal?.aborted) {
+        onExternalAbort();
+    } else {
+        externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, Math.max(1, timeoutMs));
+    timer.unref?.();
+    return {
+        signal: controller.signal,
+        timedOut: () => timedOut,
+        stop: () => {
+            clearTimeout(timer);
+            externalSignal?.removeEventListener('abort', onExternalAbort);
+        },
+    };
+}
+
+function abortCode(error, signal, timedOut) {
+    if (signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError') {
+        return timedOut() ? 'timeout' : 'aborted';
+    }
+    return null;
+}
+
+/** Never retain dependency messages: node-fetch includes the full request URL. */
+function safeNetworkDetail(error) {
+    const detail = error?.code ?? error?.type ?? error?.name ?? 'network';
+    return typeof detail === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(detail)
+        ? detail
+        : 'network';
+}
+
+function discard(response) {
+    try {
+        response?.body?.destroy();
+    } catch {
+        // The socket is already unusable or closed. There is nothing left to do.
+    }
+}
+
+function declaredTooLarge(response, maxBytes) {
+    const length = Number(response.headers.get('content-length'));
+    return Number.isFinite(length) && length > maxBytes;
+}
+
 /**
  * Fetches and parses JSON, then rejects prototype-poisoning payloads before the
  * caller can walk them.
  *
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  * @param {URL | string} url
- * @param {{ maxBytes?: number, timeoutMs?: number }} [options]
+ * @param {{ maxBytes?: number, timeoutMs?: number, signal?: AbortSignal }} [options]
  * @returns {Promise<any>}
  */
-export async function fetchJson(adapter, url, { maxBytes = 2 << 20, timeoutMs = 8000 } = {}) {
-    const response = await request(adapter, url, {
-        accept: 'application/json,text/plain;q=0.8,*/*;q=0.5',
-        maxBytes,
-        timeoutMs,
-    });
-
-    if (!response.ok) {
-        throw new UpstreamError('http_error', String(response.status));
-    }
-
-    let text;
+export async function fetchJson(adapter, url, { maxBytes = 2 << 20, timeoutMs = 8000, signal } = {}) {
+    const deadline = createDeadline(timeoutMs, signal);
+    let response;
     try {
-        text = await response.text();
-    } catch (error) {
-        if (error?.type === 'max-size') {
+        response = await request(adapter, url, {
+            accept: 'application/json,text/plain;q=0.8,*/*;q=0.5',
+            maxBytes,
+            signal: deadline.signal,
+            timedOut: deadline.timedOut,
+        });
+
+        if (!response.ok) {
+            discard(response);
+            throw new UpstreamError('http_error', String(response.status));
+        }
+        if (declaredTooLarge(response, maxBytes)) {
+            discard(response);
             throw new UpstreamError('too_large', adapter.id);
         }
-        throw new UpstreamError('network', error?.message);
-    }
 
-    let parsed;
-    try {
-        parsed = JSON.parse(text);
-    } catch {
-        throw new UpstreamError('bad_json', adapter.id);
-    }
+        let text;
+        try {
+            text = await response.text();
+        } catch (error) {
+            const aborted = abortCode(error, deadline.signal, deadline.timedOut);
+            if (aborted) {
+                throw new UpstreamError(aborted, adapter.id);
+            }
+            if (error?.type === 'max-size') {
+                throw new UpstreamError('too_large', adapter.id);
+            }
+            throw new UpstreamError('network', safeNetworkDetail(error));
+        }
 
-    if (hasForbiddenKey(parsed)) {
-        throw new UpstreamError('unsafe_json', adapter.id);
-    }
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            throw new UpstreamError('bad_json', adapter.id);
+        }
 
-    return parsed;
+        if (hasForbiddenKey(parsed)) {
+            throw new UpstreamError('unsafe_json', adapter.id);
+        }
+
+        return parsed;
+    } finally {
+        deadline.stop();
+    }
 }
 
 /**
@@ -160,31 +231,51 @@ export async function fetchJson(adapter, url, { maxBytes = 2 << 20, timeoutMs = 
  *
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  * @param {URL | string} url
- * @param {{ accept?: string, maxBytes?: number, timeoutMs?: number }} [options]
+ * @param {{ accept?: string, maxBytes?: number, timeoutMs?: number, signal?: AbortSignal }} [options]
  * @returns {Promise<{ buffer: Buffer, contentType: string, status: number }>}
  */
-export async function fetchBytes(adapter, url, { accept = '*/*', maxBytes = 8 << 20, timeoutMs = 20000 } = {}) {
-    const response = await request(adapter, url, { accept, maxBytes, timeoutMs });
-
-    if (!response.ok) {
-        throw new UpstreamError('http_error', String(response.status));
-    }
-
-    let buffer;
+export async function fetchBytes(adapter, url, { accept = '*/*', maxBytes = 8 << 20, timeoutMs = 20000, signal } = {}) {
+    const deadline = createDeadline(timeoutMs, signal);
+    let response;
     try {
-        buffer = Buffer.from(await response.arrayBuffer());
-    } catch (error) {
-        if (error?.type === 'max-size') {
+        response = await request(adapter, url, {
+            accept,
+            maxBytes,
+            signal: deadline.signal,
+            timedOut: deadline.timedOut,
+        });
+
+        if (!response.ok) {
+            discard(response);
+            throw new UpstreamError('http_error', String(response.status));
+        }
+        if (declaredTooLarge(response, maxBytes)) {
+            discard(response);
             throw new UpstreamError('too_large', adapter.id);
         }
-        throw new UpstreamError('network', error?.message);
-    }
 
-    return {
-        buffer,
-        contentType: String(response.headers.get('content-type') ?? ''),
-        status: response.status,
-    };
+        let buffer;
+        try {
+            buffer = Buffer.from(await response.arrayBuffer());
+        } catch (error) {
+            const aborted = abortCode(error, deadline.signal, deadline.timedOut);
+            if (aborted) {
+                throw new UpstreamError(aborted, adapter.id);
+            }
+            if (error?.type === 'max-size') {
+                throw new UpstreamError('too_large', adapter.id);
+            }
+            throw new UpstreamError('network', safeNetworkDetail(error));
+        }
+
+        return {
+            buffer,
+            contentType: String(response.headers.get('content-type') ?? ''),
+            status: response.status,
+        };
+    } finally {
+        deadline.stop();
+    }
 }
 
 /**

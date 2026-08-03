@@ -19,7 +19,8 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
 import { mintRef } from '../refs.js';
-import { offsetCursor } from '../paging.js';
+import { UpstreamError } from '../guards.js';
+import { offsetCursor, MAX_OFFSET } from '../paging.js';
 
 const BASE = 'https://botbooru.com';
 
@@ -118,7 +119,7 @@ function writerFrom(rawTags) {
 function contentRating(names) {
     // Conservative: only an explicit sfw tag clears a card. Botbooru is mostly
     // adult, so "unknown" must not render unblurred.
-    return names.includes(SFW_TAG) ? 'sfw' : 'sensitive';
+    return names.some((name) => name.toLowerCase() === SFW_TAG) ? 'sfw' : 'sensitive';
 }
 
 /**
@@ -182,7 +183,9 @@ function previewRef(post) {
 
 function idOf(post) {
     const id = own(post, 'id');
-    return typeof id === 'number' && Number.isFinite(id) ? String(Math.floor(id)) : '';
+    return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 && String(id).length <= 12
+        ? String(id)
+        : '';
 }
 
 function toSummary(post) {
@@ -385,10 +388,12 @@ export const botbooru = Object.freeze({
         const total = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? Math.floor(rawTotal) : null;
 
         const items = posts.map(toSummary).filter((item) => item.id !== '');
+        const nextOffset = start + posts.length;
         return {
             total,
-            next: posts.length > 0 && (total === null ? posts.length >= pageSize : start + posts.length < total)
-                ? { o: start + posts.length }
+            next: nextOffset <= MAX_OFFSET && posts.length > 0
+                && (total === null ? posts.length >= pageSize : nextOffset < total)
+                ? { o: nextOffset }
                 : null,
             items,
         };
@@ -429,6 +434,9 @@ export const botbooru = Object.freeze({
     async getDetail(ctx, id) {
         const url = new URL(`/post/${encodeURIComponent(id)}`, BASE);
         const post = await ctx.fetchJson(url, { maxBytes: 4 << 20, timeoutMs: 10000 });
+        if (idOf(post) !== id) {
+            throw new UpstreamError('bad_json', 'detail_id');
+        }
         return toDetail(post, id);
     },
 

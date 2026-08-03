@@ -72,7 +72,8 @@ function loadOrCreateSecret() {
 }
 
 const SIGNATURE_LENGTH = 22;
-const MAX_TOKEN_LENGTH = 512;
+// Merged cursors also carry a bounded set of opaque dedupe fingerprints.
+const MAX_TOKEN_LENGTH = 2048;
 
 function base64url(buffer) {
     return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

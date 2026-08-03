@@ -10,9 +10,8 @@
  * Two things worth carrying faithfully rather than quietly dropping:
  * lorebooks and regex_scripts. Regex scripts rewrite messages as they pass
  * through, which is the closest a card comes to executable content, so they
- * are imported as the author intended AND counted in the trust panel. Silently
- * discarding them would give the user a card that behaves differently from the
- * one they looked at, which is its own kind of dishonesty.
+ * are preserved in a bounded form but disabled until the user explicitly enables
+ * them. Their count remains visible in the trust panel.
  *
  * Avatars are on Cloudflare Images, which accepts a flexible variant: `w=320`
  * returns 28 KB where the default `public` variant returns 82 KB.
@@ -21,7 +20,8 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, own, hostCheckedUrl, isPlainObject } from '../validate.js';
 import { mintRef } from '../refs.js';
-import { pageCursor } from '../paging.js';
+import { pageCursor, MAX_PAGE } from '../paging.js';
+import { UpstreamError } from '../guards.js';
 
 const API = 'https://app.wyvern.chat';
 const IMAGE_HOST = 'imagedelivery.net';
@@ -32,6 +32,10 @@ const ID = /^[A-Za-z0-9_-]{6,64}$/;
 const CF_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
 
 const PREVIEW_WIDTH = Object.freeze({ grid: 320, detail: 640 });
+const MAX_SOURCE_TAGS = 128;
+const MAX_LOREBOOKS = 16;
+const MAX_LOREBOOK_ENTRIES = 128;
+const MAX_REGEX_SCRIPTS = 32;
 
 function idOf(character) {
     const id = own(character, 'id') ?? own(character, '_id');
@@ -40,13 +44,26 @@ function idOf(character) {
 
 function tagsOf(character) {
     const out = [];
+    const seen = new Set();
     for (const key of ['tags', 'community_tags']) {
         const list = own(character, key);
-        if (Array.isArray(list)) {
-            out.push(...list.filter((tag) => typeof tag === 'string'));
+        if (!Array.isArray(list)) {
+            continue;
+        }
+        for (const tag of list) {
+            if (out.length >= MAX_SOURCE_TAGS) {
+                break;
+            }
+            if (typeof tag === 'string' && !seen.has(tag)) {
+                seen.add(tag);
+                out.push(tag);
+            }
+        }
+        if (out.length >= MAX_SOURCE_TAGS) {
+            break;
         }
     }
-    return [...new Set(out)];
+    return out;
 }
 
 function contentRating(character, tags) {
@@ -91,20 +108,103 @@ function imageUrl(ref, size) {
     return `https://${IMAGE_HOST}/${ref.c}/${ref.i}/w=${PREVIEW_WIDTH[size] ?? PREVIEW_WIDTH.grid}`;
 }
 
-function countEntries(lorebooks) {
+function lorebookEntries(lorebooks) {
     if (!Array.isArray(lorebooks)) {
         return null;
     }
-    let total = 0;
-    for (const book of lorebooks) {
+
+    const out = [];
+    for (const book of lorebooks.slice(0, MAX_LOREBOOKS)) {
         const entries = own(book, 'entries');
         if (Array.isArray(entries)) {
-            total += entries.length;
+            for (const entry of entries) {
+                appendLorebookEntry(out, entry);
+                if (out.length >= MAX_LOREBOOK_ENTRIES) {
+                    return out;
+                }
+            }
         } else if (isPlainObject(entries)) {
-            total += Object.keys(entries).length;
+            for (const key in entries) {
+                if (!Object.prototype.hasOwnProperty.call(entries, key)) {
+                    continue;
+                }
+                appendLorebookEntry(out, entries[key]);
+                if (out.length >= MAX_LOREBOOK_ENTRIES) {
+                    return out;
+                }
+            }
         }
     }
-    return total;
+    return out;
+}
+
+function appendLorebookEntry(out, value) {
+    const entry = safeLorebookEntry(value);
+    if (entry !== null) {
+        out.push(entry);
+    }
+}
+
+function safeLorebookEntry(value) {
+    if (!isPlainObject(value)) {
+        return null;
+    }
+
+    const entry = {};
+    const keys = stringList(own(value, 'keys'), 32, 256);
+    const secondaryKeys = stringList(own(value, 'secondary_keys'), 32, 256);
+    if (keys.length > 0) {
+        entry.keys = keys;
+    }
+    if (secondaryKeys.length > 0) {
+        entry.secondary_keys = secondaryKeys;
+    }
+    for (const key of ['content', 'comment']) {
+        const textValue = limitedText(own(value, key), 32768);
+        if (textValue !== '') {
+            entry[key] = textValue;
+        }
+    }
+    for (const key of ['constant', 'selective', 'enabled']) {
+        if (typeof own(value, key) === 'boolean') {
+            entry[key] = own(value, key);
+        }
+    }
+    for (const key of ['insertion_order', 'position']) {
+        const number = own(value, key);
+        if (Number.isSafeInteger(number) && number >= 0 && number <= 100000) {
+            entry[key] = number;
+        }
+    }
+    return Object.keys(entry).length > 0 ? entry : null;
+}
+
+function safeRegexScripts(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    const out = [];
+    for (const raw of value) {
+        if (out.length >= MAX_REGEX_SCRIPTS) {
+            break;
+        }
+        if (!isPlainObject(raw)) {
+            continue;
+        }
+        const findRegex = limitedText(own(raw, 'findRegex'), 2048);
+        if (findRegex === '') {
+            continue;
+        }
+        // Imported regexes are inert until the user explicitly enables them.
+        out.push({
+            scriptName: limitedText(own(raw, 'scriptName'), 128) || 'Imported regex',
+            findRegex,
+            replaceString: limitedText(own(raw, 'replaceString'), 8192),
+            disabled: true,
+        });
+    }
+    return out;
 }
 
 function insideOf(character) {
@@ -113,7 +213,7 @@ function insideOf(character) {
     const gallery = own(character, 'gallery');
 
     return {
-        lorebookEntries: countEntries(own(character, 'lorebooks')),
+        lorebookEntries: lorebookEntries(own(character, 'lorebooks'))?.length ?? null,
         alternateGreetings: Array.isArray(greetings) ? greetings.length : null,
         hasSystemPrompt: reportedNonEmpty(character, 'pre_history_instructions'),
         hasPostHistoryInstructions: reportedNonEmpty(character, 'post_history_instructions'),
@@ -152,7 +252,7 @@ function toRecord(character, build) {
         contentRating: contentRating(character, tags),
         stats: {
             views: undefined,
-            downloads: own(character, 'likes'),
+            downloads: undefined,
             favorites: own(character, 'likes'),
             tokens: own(character, 'token_count'),
         },
@@ -170,12 +270,28 @@ function toRecord(character, build) {
 }
 
 /** Only strings; anything else becomes an empty field rather than a surprise. */
-function text(value) {
-    return typeof value === 'string' ? value : '';
+function limitedText(value, maxLength = 32768) {
+    return typeof value === 'string' ? value.slice(0, maxLength) : '';
 }
 
-function stringList(value, cap = 32) {
-    return Array.isArray(value) ? value.filter((item) => typeof item === 'string').slice(0, cap) : [];
+function text(value) {
+    return limitedText(value);
+}
+
+function stringList(value, cap = 32, maxLength = 4096) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    const out = [];
+    for (const item of value) {
+        if (out.length >= cap) {
+            break;
+        }
+        if (typeof item === 'string') {
+            out.push(item.slice(0, maxLength));
+        }
+    }
+    return out;
 }
 
 export const wyvern = Object.freeze({
@@ -216,7 +332,7 @@ export const wyvern = Object.freeze({
         const items = characters.map((character) => toRecord(character, buildSummary)).filter((item) => item !== null);
         return {
             total,
-            next: characters.length > 0
+            next: page < MAX_PAGE && characters.length > 0
                 && (total === null ? characters.length >= pageSize : page * pageSize < total)
                 ? { p: page + 1 }
                 : null,
@@ -229,8 +345,11 @@ export const wyvern = Object.freeze({
             maxBytes: 8 << 20,
             timeoutMs: 15000,
         });
-        return toRecord(own(character, 'character') ?? character, buildDetail)
-            ?? buildDetail({ source: 'wyvern', id });
+        const raw = own(character, 'character') ?? character;
+        if (idOf(raw) !== id) {
+            throw new UpstreamError('bad_json', 'detail_id');
+        }
+        return toRecord(raw, buildDetail) ?? (() => { throw new UpstreamError('bad_json', 'detail_id'); })();
     },
 
     getImportTarget() {
@@ -248,9 +367,11 @@ export const wyvern = Object.freeze({
             timeoutMs: 15000,
         });
         const character = own(raw, 'character') ?? raw;
+        if (idOf(character) !== id) {
+            throw new UpstreamError('bad_json', 'detail_id');
+        }
 
         const name = text(own(character, 'name')) || 'Unnamed';
-        const regex = own(character, 'regex_scripts');
         const lorebooks = own(character, 'lorebooks');
 
         const data = {
@@ -270,15 +391,17 @@ export const wyvern = Object.freeze({
             extensions: {},
         };
 
-        // Carried through as the author published them, and reported to the
-        // user by the trust panel rather than dropped behind their back.
-        if (Array.isArray(regex) && regex.length > 0) {
+        const depthPrompt = text(own(character, 'character_note'));
+        if (depthPrompt !== '') {
+            data.extensions.depth_prompt = { prompt: depthPrompt };
+        }
+
+        const regex = safeRegexScripts(own(character, 'regex_scripts'));
+        if (regex.length > 0) {
             data.extensions.regex_scripts = regex;
         }
 
-        const entries = Array.isArray(lorebooks)
-            ? lorebooks.flatMap((book) => (Array.isArray(own(book, 'entries')) ? own(book, 'entries') : []))
-            : [];
+        const entries = lorebookEntries(lorebooks) ?? [];
         if (entries.length > 0) {
             data.character_book = { name: `${name} lorebook`, entries };
         }

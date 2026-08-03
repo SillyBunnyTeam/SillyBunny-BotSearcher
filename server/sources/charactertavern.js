@@ -18,30 +18,45 @@
 
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, own } from '../validate.js';
-import { pageCursor } from '../paging.js';
+import { pageCursor, MAX_PAGE } from '../paging.js';
+import { UpstreamError } from '../guards.js';
 
 const SITE = 'https://character-tavern.com';
 const SEARCH = '/api/search/cards';
 
-/** "author/slug", the stable identifier and the page path in one. */
-const PATH = /^(?=[^/]*[A-Za-z0-9])[A-Za-z0-9._~-]{1,64}\/(?=[^/]*[A-Za-z0-9])[A-Za-z0-9._~-]{1,160}$/;
+/** "author/slug", the stable identifier and page path in one. */
+const PATH = /^(?=.{3,226}$)(?!.*[\u0000-\u001F\u007F])(?!\.{1,2}\/)(?![^/]+\/\.{1,2}$)(?!\s*\/)(?![^/]+\/\s*$)[^/]{1,64}\/[^/]{1,160}$/u;
 
 /** Internal id, used only for the lorebook lookup. */
-const CT_ID = /^CT_[0-9a-f]{16,64}$/;
+const CT_ID = /^CT_[0-9a-f]{16,64}(?:_\d{10,16})?$/i;
 
 function pathOf(hit) {
     const path = own(hit, 'path');
     return typeof path === 'string' && PATH.test(path) ? path : null;
 }
 
+function pageUrl(path) {
+    return `${SITE}/character/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
 function tagsOf(hit) {
-    const tags = own(hit, 'tags');
-    const warnings = own(hit, 'contentWarnings');
-    const all = [
-        ...(Array.isArray(tags) ? tags : []),
-        ...(Array.isArray(warnings) ? warnings : []),
-    ].filter((tag) => typeof tag === 'string');
-    return [...new Set(all)];
+    const out = [];
+    const seen = new Set();
+    for (const source of [own(hit, 'tags'), own(hit, 'contentWarnings')]) {
+        if (!Array.isArray(source)) {
+            continue;
+        }
+        for (const tag of source) {
+            if (out.length >= 128) {
+                return out;
+            }
+            if (typeof tag === 'string' && !seen.has(tag)) {
+                seen.add(tag);
+                out.push(tag);
+            }
+        }
+    }
+    return out;
 }
 
 /** Character Tavern rates its own content, which beats guessing from tags. */
@@ -49,13 +64,11 @@ function contentRating(hit, tags) {
     if (own(hit, 'isNSFW') === true) {
         return 'sensitive';
     }
-    if (own(hit, 'isNSFW') === false) {
-        return 'sfw';
-    }
     const lowered = tags.map((tag) => tag.toLowerCase());
-    return ['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag))
-        ? 'sensitive'
-        : 'unknown';
+    if (['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag))) {
+        return 'sensitive';
+    }
+    return own(hit, 'isNSFW') === false ? 'sfw' : 'unknown';
 }
 
 /** Unix seconds. */
@@ -64,7 +77,8 @@ function epochToIso(value) {
     if (!Number.isFinite(seconds) || seconds <= 0) {
         return null;
     }
-    return new Date(seconds * 1000).toISOString();
+    const date = new Date(seconds * 1000);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 function insideOf(hit) {
@@ -120,7 +134,7 @@ function toRecord(hit, build) {
         // The image CDN blocks us; the letter tile stands in.
         thumbUrl: null,
         thumbRef: null,
-        pageUrl: `${SITE}/character/${path}`,
+        pageUrl: pageUrl(path),
         importUrl: null,
         nativeImport: false,
         description: own(hit, 'characterDefinition'),
@@ -135,7 +149,19 @@ function text(value) {
 }
 
 function stringList(value, cap = 32) {
-    return Array.isArray(value) ? value.filter((item) => typeof item === 'string').slice(0, cap) : [];
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    const out = [];
+    for (const item of value) {
+        if (out.length >= cap) {
+            break;
+        }
+        if (typeof item === 'string') {
+            out.push(item.slice(0, 4096));
+        }
+    }
+    return out;
 }
 
 /**
@@ -196,7 +222,8 @@ export const charactertavern = Object.freeze({
 
         return {
             total,
-            next: hits.length > 0 && (total === null ? hits.length >= perPage : page * perPage < total)
+            next: page < MAX_PAGE && hits.length > 0
+                && (total === null ? hits.length >= perPage : page * perPage < total)
                 ? { p: page + 1 }
                 : null,
             items,
@@ -217,7 +244,7 @@ export const charactertavern = Object.freeze({
     async buildCard(ctx, id) {
         const hit = await findByPath(ctx, id);
         if (hit === null) {
-            throw Object.assign(new Error('http_error'), { code: 'http_error', detail: '404' });
+            throw new UpstreamError('http_error', '404');
         }
 
         const data = {
@@ -270,8 +297,11 @@ async function fetchLorebook(ctx, internalId) {
         }
         const entries = own(book, 'entries');
         return Array.isArray(entries) ? entries : [];
-    } catch {
-        // A missing lorebook must not fail the whole import.
-        return [];
+    } catch (error) {
+        // Character Tavern sometimes advertises a lorebook that was deleted.
+        if (error instanceof UpstreamError && error.code === 'http_error' && error.detail === '404') {
+            return [];
+        }
+        throw error;
     }
 }

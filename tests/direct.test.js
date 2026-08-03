@@ -257,7 +257,7 @@ test('a merged search reports a blocked source without losing the others', async
         ['botbooru', 'chub'],
     );
     assert.ok(body.partial.every((entry) => entry.error === 'source_down'));
-    assert.equal(body.nextCursor, null, 'no source offered a next page');
+    assert.equal(typeof body.nextCursor, 'string', 'failed sources retain a retry cursor');
 });
 
 test('a merged search caps its fan-out and ignores unknown sources', async (t) => {
@@ -301,6 +301,45 @@ test('a merged cursor cannot be replayed as a single-source one', async (t) => {
     const asSingle = await app.post('/search', { source: 'chub', cursor: multi });
     assert.equal(asSingle.status, 400);
     assert.equal(asSingle.body.error, 'bad_cursor');
+});
+
+test('an active merged cursor is not re-parsed as a single-source cursor', async (t) => {
+    clearAll();
+    const app = mount();
+    t.after(async () => {
+        await app.close();
+        clearAll();
+    });
+
+    // This is the normal second-page shape. Before the fix, searchMany() passed
+    // this multi cursor through buildSearchArgs(), which tried to verify it under
+    // cursor:chub and returned an internal error before checking source health.
+    block('chub');
+    const cursor = mintToken('cursor:multi', { s: { chub: { p: 2 } } });
+    const { status, body } = await app.post('/search', {
+        sources: ['chub'],
+        cursor,
+        limit: 12,
+    });
+
+    assert.equal(status, 200);
+    assert.deepEqual(body.items, []);
+    assert.deepEqual(body.partial, [{ source: 'chub', error: 'source_down' }]);
+    assert.equal(typeof body.nextCursor, 'string', 'the carried cursor is retained for retry');
+});
+
+test('a signed merged cursor still rejects malformed carried dedupe state', async (t) => {
+    const app = mount();
+    t.after(() => app.close());
+
+    const cursor = mintToken('cursor:multi', {
+        s: { chub: { p: 2 } },
+        d: ['not-a-16-character-fingerprint'],
+    });
+    const { status, body } = await app.post('/search', { sources: ['chub'], cursor });
+
+    assert.equal(status, 400);
+    assert.equal(body.error, 'bad_cursor');
 });
 
 test('an exhausted merged search stops rather than restarting its sources', async (t) => {

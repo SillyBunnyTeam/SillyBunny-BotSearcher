@@ -57,12 +57,12 @@ test('v1 settings migrate their sort to the saved source', async () => {
     const { getSettings } = await import('../client/settings.js?settings-migration');
     const settings = getSettings();
 
-    assert.equal(settings._v, 3);
+    assert.equal(settings._v, 4);
     assert.deepEqual(settings.sortBySource, { chub: 'trending' });
     assert.equal(settings.hideAiDefault, false);
-    // Settings saved before direct routing existed still get it, so a source the
-    // server cannot reach keeps working after an upgrade without being touched.
-    assert.equal(settings.allowDirectRequests, true);
+    // Browser-direct routing exposes the browser network address, so upgrades
+    // require an explicit opt-in rather than silently enabling it.
+    assert.equal(settings.allowDirectRequests, false);
 });
 
 test('search history keeps what was searched for, newest first and without repeats', async () => {
@@ -73,6 +73,11 @@ test('search history keeps what was searched for, newest first and without repea
 
     const { getSettings, rememberQuery, clearQueryHistory, MAX_QUERY_HISTORY } =
         await import('../client/settings.js?query-history');
+
+    // Search history is intentionally off unless the user opts in.
+    assert.deepEqual(getSettings().queryHistory, []);
+    const settings = globalThis.SillyTavern.getContext().extensionSettings;
+    settings.SillyBunnyBotSearcher = { saveQueryHistory: true };
 
     rememberQuery('elf');
     rememberQuery('orc');
@@ -97,9 +102,28 @@ test('search history keeps what was searched for, newest first and without repea
     assert.deepEqual(getSettings().queryHistory, []);
 });
 
+test('legacy search history is erased when the new opt-in is disabled', async () => {
+    let saves = 0;
+    const settingsStore = {
+        SillyBunnyBotSearcher: { _v: 3, queryHistory: ['sensitive search'] },
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings: settingsStore,
+            saveSettingsDebounced() { saves++; },
+        }),
+    };
+
+    const { getSettings } = await import('../client/settings.js?query-history-migration');
+    assert.deepEqual(getSettings().queryHistory, []);
+    assert.deepEqual(settingsStore.SillyBunnyBotSearcher.queryHistory, []);
+    assert.equal(settingsStore.SillyBunnyBotSearcher.saveQueryHistory, false);
+    assert.equal(saves, 1);
+});
+
 test('a corrupt stored history is repaired rather than trusted', async () => {
     const settingsStore = {
-        SillyBunnyBotSearcher: { queryHistory: ['ok', 42, null, '', { evil: true }, 'x'.repeat(500)] },
+        SillyBunnyBotSearcher: { saveQueryHistory: true, queryHistory: ['ok', 42, null, '', { evil: true }, 'x'.repeat(500)] },
     };
     globalThis.SillyTavern = {
         getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
@@ -434,7 +458,7 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         // tagline, tags and stats all arrived in the summary already; before
         // this they were fetched and then dropped on the floor.
         assert.match(popup.content.textContent, /A short summary from the source/);
-        assert.match(popup.content.textContent, /1,200 downloads/);
+        assert.match(popup.content.textContent, /1,200 stars/);
         assert.match(popup.content.textContent, /34 favorites/);
 
         const cardTags = [...popup.content.querySelectorAll('.sbbs-card-tag')];
@@ -566,24 +590,32 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         );
         assert.equal(searches.length, beforeReturn, 'a repeated search must not hit the network again');
 
-        // And back to All, which was answered a moment ago too.
+        // Partial merged results are deliberately not cached: a source can
+        // recover before the user returns to the same query.
         source.value = '__all__';
         source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-        await waitFor(
-            () => popup.content.querySelectorAll('.sbbs-card').length === 2,
-            'the repeated merged search did not render',
-        );
-        assert.equal(searches.length, beforeReturn, 'still no network request');
+        await waitFor(() => searches.length === beforeReturn + 1, 'partial merged result must be refreshed');
+        searches.at(-1).resolve(jsonResponse({
+            total: 2,
+            nextCursor: null,
+            items: [
+                card('botbooru', 'b1', 'From Botbooru'),
+                card('chub', 'author/c1', 'From Chub'),
+            ],
+        }));
+        await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 2, 'the refreshed merged search did not render');
+        assert.equal(searches.length, beforeReturn + 1, 'the recovered source must be retried');
         assert.match(popup.content.textContent, /From Botbooru/);
 
         // ---- typing does not fire a request per keystroke ----
         const queryBox = popup.content.querySelector('#sbbs_query');
+        const beforeTyping = searches.length;
         for (const value of ['e', 'el', 'elf', 'elfn']) {
             queryBox.value = value;
             queryBox.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
         }
         await tick();
-        assert.equal(searches.length, beforeReturn, 'typing must be debounced, not sent per keystroke');
+        assert.equal(searches.length, beforeTyping, 'typing must be debounced, not sent per keystroke');
 
         popup.complete();
         await firstOpen;

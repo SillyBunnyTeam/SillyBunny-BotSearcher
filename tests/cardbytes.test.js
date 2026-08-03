@@ -105,11 +105,11 @@ test('a v3 card wins when both chunks are present', () => {
     assert.equal(validateCardBytes(png, 'png').spec, 'chara_card_v3');
 });
 
-test('a compressed zTXt card chunk is inflated and accepted', () => {
+test('a compressed zTXt card chunk is rejected to match the host importer', () => {
     const base64 = Buffer.from(JSON.stringify(V2_CARD)).toString('base64');
     const png = Buffer.concat([SIGNATURE, IHDR, compressedTextChunk('chara', base64), IDAT, IEND]);
 
-    assert.equal(validateCardBytes(png, 'png').spec, 'chara_card_v2');
+    assert.throws(() => validateCardBytes(png, 'png'), (error) => error.code === 'png_malformed');
 });
 
 // ---- what must be refused ----
@@ -182,6 +182,17 @@ test('a zlib bomb in a zTXt chunk is refused', () => {
         assert.equal(error.code, 'png_malformed');
         return true;
     });
+});
+
+test('IDAT output is bounded and has valid scanline filters', () => {
+    const card = textChunk('chara', Buffer.from(JSON.stringify(V2_CARD)).toString('base64'));
+    const compressedBomb = chunk('IDAT', zlib.deflateSync(Buffer.alloc(65 * 1024 * 1024)));
+    const invalidFilter = chunk('IDAT', zlib.deflateSync(Buffer.from([5, 0, 0, 0, 0])));
+
+    for (const imageData of [compressedBomb, invalidFilter]) {
+        const png = Buffer.concat([SIGNATURE, IHDR, card, imageData, IEND]);
+        assert.throws(() => validateCardBytes(png, 'png'), (error) => error.code === 'png_malformed');
+    }
 });
 
 test('a card chunk that is not base64 is refused rather than silently truncated', () => {

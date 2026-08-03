@@ -18,7 +18,8 @@ import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
 import { mintRef } from '../refs.js';
 import { readSvelteKitData } from '../devalue.js';
-import { indexedPageCursor } from '../paging.js';
+import { indexedPageCursor, MAX_INDEXED_PAGE } from '../paging.js';
+import { UpstreamError } from '../guards.js';
 
 const SITE = 'https://realm.risuai.net';
 const IMAGES = 'https://sv.risuai.xyz';
@@ -196,7 +197,7 @@ export const risurealm = Object.freeze({
         if (root === null) {
             // The encoding changed, or we were served the HTML shell. Say so
             // plainly so the breaker retires the source.
-            throw Object.assign(new Error('bad_json'), { code: 'bad_json', detail: 'risurealm' });
+            throw new UpstreamError('bad_json', 'risurealm');
         }
 
         const allCards = cardsFrom(root).slice(0, 256);
@@ -205,7 +206,9 @@ export const risurealm = Object.freeze({
         const consumed = index + cards.length;
         const next = cards.length === 0 && allCards.length === 0
             ? null
-            : (consumed < allCards.length ? { p: page, i: consumed } : { p: page + 1, i: 0 });
+            : (consumed < allCards.length
+                ? { p: page, i: consumed }
+                : (page < MAX_INDEXED_PAGE ? { p: page + 1, i: 0 } : null));
 
         return {
             // RisuRealm reports no total.
@@ -224,10 +227,13 @@ export const risurealm = Object.freeze({
         const payload = await ctx.fetchJson(url, { maxBytes: 6 << 20, timeoutMs: 12000 });
         const root = readSvelteKitData(payload);
         if (root === null) {
-            throw Object.assign(new Error('bad_json'), { code: 'bad_json', detail: 'risurealm' });
+            throw new UpstreamError('bad_json', 'risurealm');
         }
 
         const card = own(root, 'card') ?? own(root, 'character') ?? root;
+        if (own(card, 'id') !== id) {
+            throw new UpstreamError('bad_json', 'detail_id');
+        }
         return toDetail(card, id);
     },
 

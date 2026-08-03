@@ -11,7 +11,11 @@
  */
 
 import { el, setText } from './render.js';
-import { FILTER_LIMITS } from '../shared/schema.js';
+import { FILTER_LIMITS, FILTER_TYPES } from '../shared/schema.js';
+
+const MAX_FILTERS = 16;
+const MAX_VOCABULARY = 1_000;
+const FILTER_KEY = /^[a-z][a-zA-Z0-9_-]{0,63}$/;
 
 /**
  * Builds the controls for one source and returns a handle for reading them.
@@ -24,16 +28,12 @@ import { FILTER_LIMITS } from '../shared/schema.js';
 export function buildFilters(host, declared, onChange) {
     host.replaceChildren();
 
-    const specs = Array.isArray(declared) ? declared : [];
+    const specs = normalizeSpecs(declared);
     let vocabulary = [];
     /** @type {Map<string, { spec: any, input: HTMLInputElement, tags: Set<string>, chips: HTMLElement | null, datalist: HTMLDataListElement | null }>} */
     const fields = new Map();
 
     for (const spec of specs) {
-        if (!spec?.key || !spec?.type) {
-            continue;
-        }
-
         const wrap = el('div', `sbbs-filter sbbs-filter-${spec.type}`);
         const id = `sbbs_filter_${spec.key}`;
         const input = document.createElement('input');
@@ -61,7 +61,10 @@ export function buildFilters(host, declared, onChange) {
                 input.min = String(FILTER_LIMITS.numberMin);
                 input.max = String(FILTER_LIMITS.numberMax);
                 input.step = '1';
-                input.addEventListener('change', () => onChange());
+                input.addEventListener('change', () => {
+                    normalizeNumberInput(input);
+                    onChange();
+                });
             } else if (spec.type === 'date') {
                 input.type = 'date';
                 input.addEventListener('change', () => onChange());
@@ -85,9 +88,10 @@ export function buildFilters(host, declared, onChange) {
                     input.addEventListener('keydown', (event) => {
                         if (event.key === 'Enter' || event.key === ',') {
                             event.preventDefault();
-                            if (commitTags(field, input.value)) {
-                                input.value = '';
-                                renderSuggestions(field, vocabulary);
+                            const changed = commitTags(field, input.value);
+                            input.value = '';
+                            renderSuggestions(field, vocabulary);
+                            if (changed) {
                                 renderChips(field, onChange);
                                 onChange();
                             }
@@ -100,9 +104,12 @@ export function buildFilters(host, declared, onChange) {
                     });
                     // Pasting "a, b, c" should not need three keystrokes to commit.
                     input.addEventListener('blur', () => {
-                        if (commitTags(field, input.value)) {
+                        const changed = commitTags(field, input.value);
+                        if (input.value !== '') {
                             input.value = '';
                             renderSuggestions(field, vocabulary);
+                        }
+                        if (changed) {
                             renderChips(field, onChange);
                             onChange();
                         }
@@ -130,19 +137,19 @@ export function buildFilters(host, declared, onChange) {
 
     return {
         read() {
-            const out = {};
+            const out = Object.create(null);
             for (const [key, field] of fields) {
                 if (field.spec.type === 'tags') {
                     // Anything typed but not yet committed still counts: a user
                     // who types a tag and hits Search means it.
                     const pending = splitTags(field.input.value);
-                    const all = [...field.tags, ...pending];
+                    const all = uniqueTags([...field.tags, ...pending]);
                     if (all.length > 0) {
-                        out[key] = all.slice(0, FILTER_LIMITS.tagCount);
+                        out[key] = all;
                     }
                 } else if (field.spec.type === 'number') {
-                    const value = Number(field.input.value);
-                    if (field.input.value !== '' && Number.isFinite(value)) {
+                    const value = normalizeNumberInput(field.input);
+                    if (value !== null) {
                         out[key] = value;
                     }
                 } else if (field.spec.type === 'boolean') {
@@ -156,7 +163,10 @@ export function buildFilters(host, declared, onChange) {
                     }
                 }
             }
-            return out;
+            // The internal map is null-prototype so an untrusted filter key cannot
+            // alter it. Specs admit only ordinary identifiers, so expose the
+            // backwards-compatible plain object callers expect.
+            return { ...out };
         },
 
         count() {
@@ -193,12 +203,15 @@ export function buildFilters(host, declared, onChange) {
                 field.input.checked = value === true;
             } else {
                 field.input.value = String(value);
+                if (field.spec.type === 'number') {
+                    normalizeNumberInput(field.input);
+                }
             }
             return true;
         },
 
         setVocabulary(tags) {
-            vocabulary = Array.isArray(tags) ? tags : [];
+            vocabulary = Array.isArray(tags) ? tags.slice(0, MAX_VOCABULARY) : [];
             for (const field of fields.values()) {
                 renderSuggestions(field, vocabulary);
             }
@@ -225,7 +238,7 @@ function renderSuggestions(field, vocabulary) {
         const name = tag && typeof tag === 'object' ? tag.n : null;
         const category = tag && typeof tag === 'object' ? tag.c : null;
         const count = tag && typeof tag === 'object' ? tag.k : null;
-        if (typeof name !== 'string' || name === '' || typeof count !== 'number' || !Number.isFinite(count)) {
+        if (typeof name !== 'string' || name === '' || name.length > FILTER_LIMITS.tagLength || typeof count !== 'number' || !Number.isFinite(count)) {
             continue;
         }
         const candidate = name.toLowerCase();
@@ -244,11 +257,64 @@ function renderSuggestions(field, vocabulary) {
     }
 }
 
+function normalizeSpecs(declared) {
+    if (!Array.isArray(declared)) {
+        return [];
+    }
+
+    const specs = [];
+    const keys = new Set();
+    for (const value of declared.slice(0, MAX_FILTERS)) {
+        if (!value || typeof value !== 'object' || !FILTER_KEY.test(value.key) || !FILTER_TYPES.includes(value.type) || keys.has(value.key)) {
+            continue;
+        }
+        keys.add(value.key);
+        specs.push({
+            key: value.key,
+            type: value.type,
+            label: typeof value.label === 'string' ? value.label.slice(0, 80) : value.key,
+            placeholder: typeof value.placeholder === 'string' ? value.placeholder.slice(0, 80) : undefined,
+        });
+    }
+    return specs;
+}
+
 function splitTags(raw) {
     return String(raw ?? '')
         .split(',')
         .map((tag) => tag.trim().slice(0, FILTER_LIMITS.tagLength))
         .filter((tag) => tag !== '');
+}
+
+function uniqueTags(tags) {
+    const seen = new Set();
+    const result = [];
+    for (const tag of tags) {
+        const normalized = tag.toLowerCase();
+        if (seen.has(normalized)) {
+            continue;
+        }
+        seen.add(normalized);
+        result.push(tag);
+        if (result.length >= FILTER_LIMITS.tagCount) {
+            break;
+        }
+    }
+    return result;
+}
+
+function normalizeNumberInput(input) {
+    if (input.value === '') {
+        return null;
+    }
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) {
+        input.value = '';
+        return null;
+    }
+    const normalized = Math.min(FILTER_LIMITS.numberMax, Math.max(FILTER_LIMITS.numberMin, Math.round(value)));
+    input.value = String(normalized);
+    return normalized;
 }
 
 /** @returns {boolean} whether anything was added */

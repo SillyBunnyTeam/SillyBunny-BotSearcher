@@ -84,7 +84,11 @@ export const FIELD_LIMITS = Object.freeze({
     itemsPerPage: 48,
 });
 
-/** Request body cap. Anything larger is rejected with 413 before parsing. */
+/**
+ * Request body cap enforced by the plugin after host parsing. Deployments must
+ * also enforce this limit before the host's global parser at their proxy/host
+ * boundary.
+ */
 export const MAX_REQUEST_BYTES = 8192;
 
 /**
@@ -94,6 +98,9 @@ export const MAX_REQUEST_BYTES = 8192;
  * a payload the server-side path would have refused.
  */
 export const MAX_INGEST_BYTES = 6 << 20;
+
+/** Maximum card file size accepted by both the server route and browser importer. */
+export const MAX_CARD_BYTES = 8 << 20;
 
 /**
  * Kinds of upstream payload /ingest will normalize. Each maps to an adapter

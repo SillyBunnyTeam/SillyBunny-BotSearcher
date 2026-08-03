@@ -28,24 +28,31 @@ const limiters = {
     /** Per user: fetching card bytes is the expensive path. */
     card: new RateLimiterMemory({ points: 10, duration: 60 }),
     /** Per user: one 24-tile grid fires 24 of these at once. */
-    thumb: new RateLimiterMemory({ points: 300, duration: 60 }),
+    thumbUser: new RateLimiterMemory({ points: 300, duration: 60 }),
+    /** Bounds total thumbnail egress even when many users are active. */
+    thumbGlobal: new RateLimiterMemory({ points: 600, duration: 60 }),
+    /** Stops one upstream from receiving a full-server thumbnail burst. */
+    thumbSource: new RateLimiterMemory({ points: 120, duration: 60 }),
 };
 
 /**
  * @param {keyof typeof limiters} name
  * @param {string} key
+ * @param {{ failClosed?: boolean }} [options]
  * @returns {Promise<{ allowed: true } | { allowed: false, retryAfterSeconds: number }>}
  */
-export async function consume(name, key) {
+export async function consume(name, key, { failClosed = false } = {}) {
     try {
         await limiters[name].consume(key, 1);
         return { allowed: true };
     } catch (rejection) {
-        // A real Error means the limiter itself broke; fail open rather than
-        // taking the feature down, but say so.
+        // Ordinary metadata/search requests can stay available if the limiter
+        // fails. Expensive byte egress must fail closed instead.
         if (rejection instanceof Error) {
             console.error('[BotSearcher] rate limiter error:', rejection.message);
-            return { allowed: true };
+            return failClosed
+                ? { allowed: false, retryAfterSeconds: 1 }
+                : { allowed: true };
         }
 
         const ms = typeof rejection?.msBeforeNext === 'number' ? rejection.msBeforeNext : 1000;
@@ -64,18 +71,21 @@ export async function consume(name, key) {
  */
 const inFlight = new Map();
 
-/** @type {Map<string, Array<{ resolve: (v: unknown) => void, timer: NodeJS.Timeout }>>} */
+/** @type {Map<string, Array<{ resolve: (granted: boolean) => void, timer: NodeJS.Timeout, signal?: AbortSignal, onAbort?: () => void }>>} */
 const waiting = new Map();
 
 const CONCURRENCY = Object.freeze({
     source: 2,
-    // Bounds peak memory. A source without a preview endpoint may be capped at
-    // 5 MB per image, so four in flight is ~20 MB.
-    thumb: 4,
+    // Bounds process-wide buffered thumbnail memory. A source without a preview
+    // endpoint may serve 6 MB images, so this must not be per caller.
+    thumbGlobal: 8,
+    thumbSource: 2,
+    thumbUser: 4,
 });
 
 /** Longer than any single thumbnail fetch, short enough not to pile up. */
 const DEFAULT_WAIT_MS = 20000;
+const MAX_WAITERS_PER_SLOT = 64;
 
 function releaseSlot(slot) {
     const queue = waiting.get(slot);
@@ -85,7 +95,6 @@ function releaseSlot(slot) {
         if (queue.length === 0) {
             waiting.delete(slot);
         }
-        clearTimeout(next.timer);
         next.resolve(true);
         return;
     }
@@ -112,12 +121,20 @@ function makeRelease(slot) {
 /**
  * Waits for a slot rather than refusing one.
  *
- * @param {'source' | 'thumb'} kind
+ * @param {'source' | 'thumbGlobal' | 'thumbSource' | 'thumbUser'} kind
  * @param {string} key
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, maxWaiters?: number }} [options]
  * @returns {Promise<(() => void) | null>} a release function, or null if the wait timed out
  */
-export async function acquire(kind, key, { timeoutMs = DEFAULT_WAIT_MS } = {}) {
+export async function acquire(kind, key, {
+    timeoutMs = DEFAULT_WAIT_MS,
+    signal,
+    maxWaiters = MAX_WAITERS_PER_SLOT,
+} = {}) {
+    if (signal?.aborted) {
+        return null;
+    }
+
     const slot = `${kind}:${key}`;
     const current = inFlight.get(slot) ?? 0;
 
@@ -126,35 +143,93 @@ export async function acquire(kind, key, { timeoutMs = DEFAULT_WAIT_MS } = {}) {
         return makeRelease(slot);
     }
 
+    const queue = waiting.get(slot);
+    if ((queue?.length ?? 0) >= maxWaiters) {
+        return null;
+    }
+
     const granted = await new Promise((resolve) => {
+        let settled = false;
+        const remove = () => {
+            const queued = waiting.get(slot);
+            if (!queued) {
+                return;
+            }
+            const index = queued.indexOf(entry);
+            if (index >= 0) {
+                queued.splice(index, 1);
+            }
+            if (queued.length === 0) {
+                waiting.delete(slot);
+            }
+        };
+        const finish = (granted) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearTimeout(entry.timer);
+            entry.signal?.removeEventListener('abort', entry.onAbort);
+            remove();
+            resolve(granted);
+        };
         const entry = {
-            resolve,
-            timer: setTimeout(() => {
-                const queue = waiting.get(slot);
-                if (queue) {
-                    const index = queue.indexOf(entry);
-                    if (index >= 0) {
-                        queue.splice(index, 1);
-                    }
-                    if (queue.length === 0) {
-                        waiting.delete(slot);
-                    }
-                }
-                resolve(false);
-            }, timeoutMs),
+            resolve: finish,
+            timer: setTimeout(() => finish(false), timeoutMs),
+            signal,
+            onAbort: () => finish(false),
         };
         // Never hold the process open waiting on a queued request.
         entry.timer.unref?.();
+        signal?.addEventListener('abort', entry.onAbort, { once: true });
 
-        const queue = waiting.get(slot);
-        if (queue) {
-            queue.push(entry);
+        const pending = waiting.get(slot);
+        if (pending) {
+            pending.push(entry);
         } else {
             waiting.set(slot, [entry]);
         }
     });
 
     return granted ? makeRelease(slot) : null;
+}
+
+/**
+ * Acquires thumbnail limits from narrowest to broadest. A request waiting on a
+ * busy source must not occupy one of the process-wide thumbnail slots.
+ *
+ * @param {string} caller
+ * @param {string} source
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, maxWaiters?: number }} [options]
+ * @returns {Promise<(() => void) | null>}
+ */
+export async function acquireThumbnail(caller, source, options = {}) {
+    const releases = [];
+    for (const [kind, key] of [
+        ['thumbUser', caller],
+        ['thumbSource', source],
+        ['thumbGlobal', 'all'],
+    ]) {
+        const release = await acquire(kind, key, options);
+        if (!release) {
+            while (releases.length > 0) {
+                releases.pop()();
+            }
+            return null;
+        }
+        releases.push(release);
+    }
+
+    let released = false;
+    return () => {
+        if (released) {
+            return;
+        }
+        released = true;
+        while (releases.length > 0) {
+            releases.pop()();
+        }
+    };
 }
 
 /**

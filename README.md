@@ -9,20 +9,26 @@ The frontend extension and server plugin are both required. Search requests go t
 - A working SillyBunny installation
 - Server plugins enabled in SillyBunny
 - The BotSearcher frontend extension and server plugin from this repository
+- Node.js 22, 24, or 26 for the server plugin
+- A reverse proxy or host configuration that rejects oversized plugin requests before JSON or multipart parsing
 
 ## Installation
 
-Install the frontend extension from SillyBunny's extension manager. Use this repository URL:
-
-```text
-https://github.com/platberlitz/SillyBunny-BotSearcher
-```
-
-From your SillyBunny directory, install the server plugin:
+Install both components from the same verified immutable release tag or full commit. Do not track a mutable branch for either privileged component.
 
 ```bash
-bun plugins.js install https://github.com/platberlitz/SillyBunny-BotSearcher
+RELEASE=<verified-release-tag-or-full-commit>
+REPO=https://github.com/platberlitz/SillyBunny-BotSearcher.git
+
+git clone "$REPO" data/default-user/extensions/SillyBunny-BotSearcher
+git -C data/default-user/extensions/SillyBunny-BotSearcher checkout "$RELEASE"
+
+git clone "$REPO" plugins/SillyBunny-BotSearcher
+git -C plugins/SillyBunny-BotSearcher checkout "$RELEASE"
+npm --prefix plugins/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts
 ```
+
+Adjust the frontend extension path for the SillyBunny user you run. If you use the extension manager or plugin installer initially, immediately check out the same verified release in both resulting directories and install the server package's production dependencies as above.
 
 Set these values in `config.yaml`:
 
@@ -33,7 +39,11 @@ enableServerPluginsAutoUpdate: false
 
 Restart SillyBunny after installing or updating either component.
 
-`enableServerPluginsAutoUpdate` controls updates for server plugins. It defaults to `true`, which runs `git pull` for each plugin when SillyBunny starts. Setting it to `false` lets you review and apply server-plugin updates yourself. The frontend extension has its own update setting.
+`enableServerPluginsAutoUpdate` controls updates for server plugins. It defaults to `true`, which runs `git pull` for each plugin when SillyBunny starts. Setting it to `false` lets you review and apply server-plugin updates yourself. BotSearcher's manifest disables frontend auto-update too; update both checkouts transactionally to the same verified release.
+
+### Deployment limits
+
+The plugin validates its own request shapes and byte limits, but SillyBunny's global body parsers run before plugin routes. Configure the reverse proxy or host to authenticate and reject oversized, chunked, and decompressed bodies before parsing the BotSearcher route prefix. Plugin-level limits are a secondary control, not protection against parser memory or disk exhaustion.
 
 ## Usage
 
@@ -65,7 +75,7 @@ Botbooru sends ordinary words to its name and description search. Its exact quer
 
 Results update shortly after you stop typing, from three characters onward; pressing Enter or the search button skips the wait. Repeating a search you already ran — clearing a filter, switching back to a source you were just looking at — is answered from memory rather than by asking the site again. That memory lasts five minutes and is discarded when the dialog closes.
 
-Terms you searched for are saved so the search box can suggest them again. Card names are not saved. Clear them under **Extensions > BotSearcher > Search history**.
+Search history is off by default. If you enable it, terms are stored in SillyBunny profile settings and may be included in server backups; card names and filters are not stored. Clear saved terms under **Extensions > BotSearcher > Search history**.
 
 Each result shows the name, creator, token count, the source's own one-line summary, the popularity figures that source reported, and up to four tags. Where the source supports tag filtering, clicking a tag adds it to the filters; on other sources the tags are shown but are not clickable. Figures a source does not report are omitted rather than shown as zero, and the labels follow that source's own meaning — Chub's download count is its star count.
 
@@ -96,7 +106,7 @@ Opening BotSearcher immediately requests the selected source's default catalog, 
 
 Some sites accept connections from home networks but refuse them from hosting providers. A SillyBunny running on a VPS or cloud instance can receive a refusal from such a site on every request, while the same request from your own browser succeeds.
 
-If the selected source supports it, BotSearcher then requests that source from your browser instead of from the server, and sends the response back to the server to be read. This is controlled by **Request a source from this browser when the server cannot reach it**, which is on by default.
+If the selected source supports it, BotSearcher can request that source from your browser instead of from the server, and sends the response back to the server to be read. This is controlled by **Request a source from this browser when the server cannot reach it**, which is off by default and requires an explicit opt-in.
 
 | | Through SillyBunny server | From this browser |
 |---|---|---|
@@ -107,9 +117,9 @@ If the selected source supports it, BotSearcher then requests that source from y
 
 Details that apply to both:
 
-- The URL is built by the server from the adapter's fixed base. The frontend does not construct it, and re-checks its host against the source's allowed hosts before requesting it.
+- The URL is built by the server from the adapter's fixed base. The frontend does not construct it, re-checks it against the source's browser-direct host list, rejects redirects, and applies a time and byte limit.
 - The response is read, filtered and normalized by the server in both cases. Moving the request does not change what reaches the page.
-- The request carries no SillyBunny cookies, credentials, or referrer.
+- Browser-direct API requests carry no SillyBunny cookies, credentials, or referrer.
 - The browse dialog states which source has moved to this route, and why, while it is in effect.
 - Turning the setting off does not make such a source work through the server. It stays in the source list and reports that the server was refused, with a **Reload** option.
 
@@ -122,6 +132,8 @@ Thumbnail routing depends on the **Thumbnails** setting:
 | No thumbnails | BotSearcher shows letter tiles and does not request thumbnail images. |
 
 Opening a source-page link leaves SillyBunny and contacts that site in the browser. Importing can also make additional requests through SillyBunny's importer or the BotSearcher server, depending on the import mode.
+
+Direct browser thumbnails can follow image-host redirects and use browser image-fetch behavior. Use **Through SillyBunny server** or **No thumbnails** when final-hop image routing or third-party cookie behavior must not leave the server.
 
 ## Sources and imports
 
@@ -149,7 +161,7 @@ Character cards are third-party documents. In addition to visible fields, a card
 
 The **Card contents** panel reports what the source says about a listing. "Not reported" means BotSearcher does not have enough information to claim that a field is present or absent.
 
-For downloaded and assembled imports, BotSearcher validates the actual card bytes and reports additional contents found during import. Native imports use SillyBunny's importer and do not receive the same byte-derived report from BotSearcher.
+For downloaded and assembled imports, BotSearcher first validates the actual card bytes and shows any additional contents before the separate import confirmation. Native imports use SillyBunny's importer and do not receive the same byte-derived report from BotSearcher.
 
 Review the card description and contents before starting a chat. Structural validation confirms that downloaded data is a supported card format; it does not determine whether the card's instructions are safe or appropriate.
 
@@ -160,7 +172,7 @@ BotSearcher applies the following controls:
 - Server requests are limited to hosts declared by each source adapter.
 - Source records are rebuilt from an allowed set of fields and normalized before they reach the frontend.
 - Untrusted source text is not parsed as HTML. The frontend writes it through text properties and uses safe properties or attributes where needed.
-- Source links, image URLs, and native import URLs are checked against the source's allowed client hosts before use.
+- Source links and native import URLs are checked against source-specific hosts before use. Browser-direct API requests use a narrower direct-fetch host list.
 - Card files downloaded by the BotSearcher server are size-limited and structurally validated before import.
 - Card descriptions are shown as plain text, not rendered as Markdown or HTML.
 
@@ -176,9 +188,9 @@ These controls do not make third-party card instructions safe. They also do not 
 | Hide AI-generated cards | Off | Requests this filter only from Botbooru, the source that supports it. |
 | Blur sensitive and unrated thumbnails | On | Blurs thumbnails marked sensitive or lacking a reported rating until revealed. Rating labels remain visible when blur is off. |
 | Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
-| Request a source from this browser when the server cannot reach it | On | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source stays listed but cannot return results. |
+| Request a source from this browser when the server cannot reach it | Off | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source stays listed but cannot return results. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
-| Search history | — | Clears the search terms saved for the search box's suggestions. |
+| Save search history in SillyBunny profile settings | Off | Stores search terms for suggestions. Disable it to clear saved terms. |
 
 ## Troubleshooting
 
@@ -220,7 +232,7 @@ Some sources do not provide a reliable SFW filter. BotSearcher disables the cont
 
 ## Development
 
-Node.js 20 or newer is required. Development dependencies are self-contained in this package.
+Node.js 22, 24, or 26 is supported. Runtime dependencies are installed separately from development tooling.
 
 ```bash
 npm ci
@@ -231,7 +243,7 @@ npm run probe
 npm run probe -- chub wyvern
 ```
 
-The tests use Node's built-in test runner plus jsdom for browser interaction coverage. CI runs lint and tests on Node.js 20 and 22.
+The tests use Node's built-in test runner plus jsdom for browser interaction coverage. CI runs lint, tests, and a production dependency audit on Node.js 22, 24, and 26.
 
 The source probe contacts live external services. It exits with a nonzero status if a required source in tiers 0, 1, or 2 fails. Run it deliberately before a release.
 

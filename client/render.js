@@ -9,6 +9,7 @@
  */
 
 import { PLUGIN_BASE } from './constants.js';
+import { THUMB_SIZES } from '../shared/schema.js';
 
 /**
  * Writes untrusted text. Cannot create elements, however hostile the input.
@@ -35,13 +36,49 @@ export function setText(element, value) {
  * @returns {boolean}
  */
 export function isAllowedImageUrl(raw, allowedHosts) {
-    // Our own proxy endpoint. Anchored to the full base so a scheme-relative
-    // "//evil.example" or a bare "/apiX" cannot slip through.
-    if (typeof raw === 'string' && raw.startsWith(`${PLUGIN_BASE}/`)) {
-        return true;
+    return isAllowedProxyThumbnailUrl(raw) || isAllowedUpstreamUrl(raw, allowedHosts);
+}
+
+/**
+ * Validates the one same-origin URL an image may use. Parsing before comparing
+ * pathname closes dot-segment and percent-encoded traversal escapes.
+ *
+ * @param {unknown} raw
+ * @returns {boolean}
+ */
+export function isAllowedProxyThumbnailUrl(raw) {
+    if (typeof raw !== 'string' || raw === '') {
+        return false;
     }
 
-    return isAllowedUpstreamUrl(raw, allowedHosts);
+    let url;
+    try {
+        url = new URL(raw, window.location.origin);
+    } catch {
+        return false;
+    }
+
+    if (url.origin !== window.location.origin || url.pathname !== `${PLUGIN_BASE}/thumb` || url.hash !== '') {
+        return false;
+    }
+
+    const expected = ['source', 'ref', 'size'];
+    const entries = [...url.searchParams.entries()];
+    if (entries.length !== expected.length || entries.some(([key]) => !expected.includes(key))) {
+        return false;
+    }
+    if (expected.some((key) => url.searchParams.getAll(key).length !== 1)) {
+        return false;
+    }
+
+    const source = url.searchParams.get('source');
+    const ref = url.searchParams.get('ref');
+    const size = url.searchParams.get('size');
+    return /^[a-z0-9-]{1,64}$/.test(source ?? '')
+        && typeof ref === 'string'
+        && ref.length > 0
+        && ref.length <= 2048
+        && THUMB_SIZES.includes(size);
 }
 
 /**
@@ -120,7 +157,7 @@ export function setLinkSafe(anchor, url, allowedHosts) {
         return false;
     }
 
-    if (!isAllowedImageUrl(url, allowedHosts)) {
+    if (!isAllowedUpstreamUrl(url, allowedHosts)) {
         anchor.removeAttribute('href');
         anchor.setAttribute('aria-disabled', 'true');
         return false;

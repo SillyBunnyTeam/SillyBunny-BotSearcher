@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 
-import { fetchJson } from '../server/http.js';
+import { fetchBytes, fetchJson } from '../server/http.js';
 import { mintRef, verifyRef } from '../server/refs.js';
 import { detectImageType } from '../server/imagetype.js';
 import { markFailure, markSuccess, isDown, stateOf, clearAll, classify } from '../server/health.js';
@@ -37,6 +37,15 @@ async function upstream(handler) {
 
 function testAdapter(hosts) {
     return { id: 'test', allowedHosts: hosts, allowInsecureForTests: true };
+}
+
+function waitFor(value, timeoutMs = 1000) {
+    return Promise.race([
+        value,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('timed out waiting for upstream cleanup')), timeoutMs).unref?.();
+        }),
+    ]);
 }
 
 test('a response larger than maxBytes is refused without buffering it', async () => {
@@ -136,6 +145,100 @@ test('a server that never answers is abandoned at the timeout', async () => {
     } finally {
         await server.close();
     }
+});
+
+test('one deadline covers a redirect and a stalled response body', async () => {
+    const server = await upstream((req, res) => {
+        if (req.url === '/start') {
+            setTimeout(() => {
+                res.writeHead(302, { Location: '/body' });
+                res.end();
+            }, 120).unref?.();
+            return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.write('{"still":');
+    });
+
+    try {
+        const startedAt = Date.now();
+        await assert.rejects(
+            () => fetchJson(testAdapter(['127.0.0.1']), `http://127.0.0.1:${server.port}/start`, { timeoutMs: 180 }),
+            (error) => error.code === 'timeout',
+        );
+        // A fresh timeout per hop would wait for roughly 300ms here.
+        assert.ok(Date.now() - startedAt < 270, 'the redirect must consume the same deadline as the body');
+    } finally {
+        await server.close();
+    }
+});
+
+test('redirect and error bodies are destroyed before the next request or error', async () => {
+    let redirectClosed;
+    let errorClosed;
+    const server = await upstream((req, res) => {
+        if (req.url === '/redirect') {
+            redirectClosed = new Promise((resolve) => res.once('close', resolve));
+            res.writeHead(302, { Location: '/final' });
+            res.write('body that never ends');
+            return;
+        }
+        if (req.url === '/final') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end('{"ok":true}');
+            return;
+        }
+
+        errorClosed = new Promise((resolve) => res.once('close', resolve));
+        res.writeHead(503, { 'Content-Type': 'text/plain' });
+        res.write('error body that never ends');
+    });
+
+    try {
+        const adapter = testAdapter(['127.0.0.1']);
+        assert.deepEqual(
+            await fetchJson(adapter, `http://127.0.0.1:${server.port}/redirect`, { timeoutMs: 1000 }),
+            { ok: true },
+        );
+        await waitFor(redirectClosed);
+
+        await assert.rejects(
+            () => fetchBytes(adapter, `http://127.0.0.1:${server.port}/error`, { timeoutMs: 1000 }),
+            (error) => error.code === 'http_error' && error.detail === '503',
+        );
+        await waitFor(errorClosed);
+    } finally {
+        await server.close();
+    }
+});
+
+test('caller cancellation is distinct from a deadline and network detail never includes a query', async () => {
+    const server = await upstream(() => { /* deliberately never responds */ });
+
+    try {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 20).unref?.();
+        await assert.rejects(
+            () => fetchJson(testAdapter(['127.0.0.1']), `http://127.0.0.1:${server.port}/abort`, {
+                timeoutMs: 1000,
+                signal: controller.signal,
+            }),
+            (error) => error.code === 'aborted',
+        );
+    } finally {
+        await server.close();
+    }
+
+    const closed = await upstream((_req, res) => res.end());
+    const url = `http://127.0.0.1:${closed.port}/?secret=must-not-reach-logs`;
+    await closed.close();
+    await assert.rejects(
+        () => fetchJson(testAdapter(['127.0.0.1']), url, { timeoutMs: 1000 }),
+        (error) => error.code === 'network'
+            && !String(error.detail).includes('must-not-reach-logs')
+            && /^[A-Za-z0-9_.-]{1,64}$/.test(String(error.detail)),
+    );
 });
 
 test('outbound requests carry no cookie, authorization or referer', async () => {

@@ -46,7 +46,9 @@ export function getSource(id) {
  *
  * `clientHosts` is included deliberately: the client re-checks every image and
  * link URL against it before touching the DOM, so a bug on the server side
- * still cannot point an <img> or an <a> at an arbitrary host.
+ * still cannot point an <img> or an <a> at an arbitrary host. `directHosts` is
+ * deliberately separate: browser API fallback may only fetch hosts explicitly
+ * approved for that API operation, never an image or link-only host.
  *
  * It is the union of two DIFFERENT lists, which must not be conflated:
  *   allowedHosts — hosts this server may make a request to (the egress rule)
@@ -67,6 +69,9 @@ export function describeSources(stateOf, reasonOf = () => null) {
             label: adapter.label,
             homepage: adapter.homepage,
             clientHosts: [...new Set([...adapter.allowedHosts, ...(adapter.linkHosts ?? [])])],
+            directHosts: adapter.corsDirect === true
+                ? [...new Set(adapter.directHosts ?? adapter.allowedHosts)]
+                : [],
             tier: adapter.tier,
             state: stateOf(id),
             // Why the last request failed, so the UI can distinguish a refusal

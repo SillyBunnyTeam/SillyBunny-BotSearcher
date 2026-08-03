@@ -18,24 +18,24 @@
  * attacker-controlled and 0xFFFFFFFF is free to write.
  */
 
-import zlib from 'node:zlib';
-
 import { hasForbiddenKey, isPlainObject, own } from './validate.js';
+import { inflateSync } from 'node:zlib';
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
 /** A real card has a few dozen chunks; this only bounds a hostile file. */
 const MAX_CHUNKS = 4096;
 
-/** Ceiling on an inflated zTXt payload, so a compression bomb cannot expand into memory. */
-const MAX_INFLATED_BYTES = 4 * 1024 * 1024;
-
 /** Card JSON larger than this is not a card. */
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
+
+/** Card metadata remains bounded before Base64 decoding. */
+const MAX_CARD_METADATA_BYTES = 4 * 1024 * 1024;
 
 /** Bounds the image decoder work a tiny compressed PNG can request. */
 const MAX_IMAGE_DIMENSION = 16_384;
 const MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+const MAX_DECODED_IMAGE_BYTES = 64 * 1024 * 1024;
 
 /** Legal PNG bit depths for each colour type from the PNG specification. */
 const BIT_DEPTHS_BY_COLOR_TYPE = Object.freeze({
@@ -45,6 +45,18 @@ const BIT_DEPTHS_BY_COLOR_TYPE = Object.freeze({
     4: Object.freeze([8, 16]),
     6: Object.freeze([8, 16]),
 });
+
+const CHANNELS_BY_COLOR_TYPE = Object.freeze({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 });
+const KNOWN_CRITICAL_CHUNKS = new Set(['IHDR', 'PLTE', 'IDAT', 'IEND']);
+const ADAM7_PASSES = Object.freeze([
+    Object.freeze([0, 0, 8, 8]),
+    Object.freeze([4, 0, 8, 8]),
+    Object.freeze([0, 4, 4, 8]),
+    Object.freeze([2, 0, 4, 4]),
+    Object.freeze([0, 2, 2, 4]),
+    Object.freeze([1, 0, 2, 2]),
+    Object.freeze([0, 1, 1, 2]),
+]);
 
 /** Keywords SillyTavern and the card specs use for embedded card data. */
 const CARD_KEYWORDS = new Set(['chara', 'ccv3']);
@@ -78,6 +90,55 @@ export class CardBytesError extends Error {
     }
 }
 
+function validateImageBudget(width, height, bitDepth, colorType, interlace) {
+    const channels = CHANNELS_BY_COLOR_TYPE[colorType];
+    const passes = imagePasses(width, height, channels, bitDepth, interlace);
+    const decodedBytes = passes.reduce((total, pass) => total + (pass.rowBytes + 1) * pass.height, 0);
+    if (!Number.isSafeInteger(decodedBytes) || decodedBytes > MAX_DECODED_IMAGE_BYTES) {
+        throw new CardBytesError('png_malformed', 'decoded image exceeds budget');
+    }
+    return { decodedBytes, passes };
+}
+
+function imagePasses(width, height, channels, bitDepth, interlace) {
+    if (interlace === 0) {
+        return [{ width, height, rowBytes: Math.ceil((width * channels * bitDepth) / 8) }];
+    }
+
+    return ADAM7_PASSES.flatMap(([x, y, xStep, yStep]) => {
+        const passWidth = width <= x ? 0 : Math.ceil((width - x) / xStep);
+        const passHeight = height <= y ? 0 : Math.ceil((height - y) / yStep);
+        return passWidth > 0 && passHeight > 0
+            ? [{ width: passWidth, height: passHeight, rowBytes: Math.ceil((passWidth * channels * bitDepth) / 8) }]
+            : [];
+    });
+}
+
+function validateImageData(chunks, layout) {
+    let inflated;
+    try {
+        inflated = inflateSync(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks), {
+            maxOutputLength: layout.decodedBytes,
+        });
+    } catch {
+        throw new CardBytesError('png_malformed', 'invalid or oversized IDAT');
+    }
+
+    if (inflated.length !== layout.decodedBytes) {
+        throw new CardBytesError('png_malformed', 'IDAT scanline length mismatch');
+    }
+
+    let offset = 0;
+    for (const pass of layout.passes) {
+        for (let row = 0; row < pass.height; row++) {
+            if (inflated[offset] > 4) {
+                throw new CardBytesError('png_malformed', 'invalid PNG filter type');
+            }
+            offset += pass.rowBytes + 1;
+        }
+    }
+}
+
 /**
  * Walks a PNG's chunk table, returning the decoded text chunks that carry card
  * data. Rejects rather than repairs: a malformed table means we do not
@@ -101,6 +162,9 @@ function readPngTextChunks(buffer) {
     let sawHeader = false;
     let sawImageData = false;
     let imageDataEnded = false;
+    let cardMetadataBytes = 0;
+    let imageLayout = null;
+    const imageDataChunks = [];
 
     while (offset + 8 <= buffer.length) {
         if (++chunks > MAX_CHUNKS) {
@@ -124,6 +188,12 @@ function readPngTextChunks(buffer) {
         const type = buffer.toString('latin1', offset + 4, offset + 8);
         if (!/^[A-Za-z]{4}$/.test(type)) {
             throw new CardBytesError('png_malformed', 'invalid chunk type');
+        }
+        if (type.charCodeAt(0) >= 65 && type.charCodeAt(0) <= 90 && !KNOWN_CRITICAL_CHUNKS.has(type)) {
+            throw new CardBytesError('png_malformed', `unknown critical chunk ${type}`);
+        }
+        if (type === 'acTL') {
+            throw new CardBytesError('png_malformed', 'animated PNGs are not supported');
         }
 
         const expectedCrc = buffer.readUInt32BE(dataEnd);
@@ -151,6 +221,7 @@ function readPngTextChunks(buffer) {
                 || buffer[dataStart + 12] > 1) {
                 throw new CardBytesError('png_malformed', 'invalid IHDR');
             }
+            imageLayout = validateImageBudget(width, height, bitDepth, colorType, buffer[dataStart + 12]);
             sawHeader = true;
         } else if (type === 'IHDR') {
             throw new CardBytesError('png_malformed', 'duplicate IHDR');
@@ -161,22 +232,36 @@ function readPngTextChunks(buffer) {
                 throw new CardBytesError('png_malformed', 'non-consecutive IDAT');
             }
             sawImageData = true;
+            imageDataChunks.push(buffer.subarray(dataStart, dataEnd));
         } else if (sawImageData) {
             imageDataEnded = true;
         }
 
-        if (type === 'tEXt' || type === 'zTXt') {
+        if (type === 'tEXt' || type === 'zTXt' || type === 'iTXt') {
             const data = buffer.subarray(dataStart, dataEnd);
             const separator = data.indexOf(0);
 
             // A keyword is 1-79 bytes and must be followed by a null.
             if (separator > 0 && separator <= 79) {
                 const keyword = data.toString('latin1', 0, separator);
+                const normalizedKeyword = keyword.toLowerCase();
 
-                if (CARD_KEYWORDS.has(keyword) && !found.has(keyword)) {
-                    found.set(keyword, type === 'tEXt'
-                        ? data.subarray(separator + 1)
-                        : inflateZtxt(data.subarray(separator + 1)));
+                if (CARD_KEYWORDS.has(normalizedKeyword)) {
+                    // SillyBunny reads only case-insensitive tEXt carriers. A
+                    // zTXt/iTXt or mixed-case twin could make our inspection and
+                    // its import select different card data, so reject it.
+                    if (type !== 'tEXt' || keyword !== normalizedKeyword) {
+                        throw new CardBytesError('png_malformed', 'ambiguous card metadata');
+                    }
+                    const text = data.subarray(separator + 1);
+                    cardMetadataBytes += text.length;
+                    if (cardMetadataBytes > MAX_CARD_METADATA_BYTES) {
+                        throw new CardBytesError('png_malformed', 'card metadata exceeds budget');
+                    }
+                    if (found.has(normalizedKeyword)) {
+                        throw new CardBytesError('png_malformed', 'duplicate card metadata');
+                    }
+                    found.set(normalizedKeyword, text);
                 }
             }
         }
@@ -202,28 +287,9 @@ function readPngTextChunks(buffer) {
         throw new CardBytesError('png_malformed', 'truncated: no IEND chunk');
     }
 
+    validateImageData(imageDataChunks, imageLayout);
+
     return found;
-}
-
-/**
- * zTXt payload: one compression-method byte then a zlib stream.
- * maxOutputLength is the bomb guard — without it a few KB can inflate to
- * gigabytes and take the server with it.
- */
-function inflateZtxt(payload) {
-    if (payload.length < 2) {
-        throw new CardBytesError('png_malformed', 'short zTXt');
-    }
-    if (payload[0] !== 0) {
-        throw new CardBytesError('png_malformed', 'unknown zTXt compression');
-    }
-
-    try {
-        return zlib.inflateSync(payload.subarray(1), { maxOutputLength: MAX_INFLATED_BYTES });
-    } catch (error) {
-        // node throws ERR_BUFFER_TOO_LARGE when maxOutputLength is exceeded.
-        throw new CardBytesError('png_malformed', `zTXt inflate failed: ${error?.code ?? error?.message ?? 'unknown'}`);
-    }
 }
 
 /**
@@ -231,19 +297,27 @@ function inflateZtxt(payload) {
  * @param {Buffer} raw
  */
 function decodeCardPayload(raw) {
-    const text = raw.toString('latin1').trim();
+    const text = raw.toString('latin1').trim().replace(/[\r\n]/g, '');
     if (text === '') {
         throw new CardBytesError('card_invalid', 'empty card chunk');
     }
 
-    // Base64 with a strict alphabet check: Buffer.from ignores junk silently,
-    // which would let malformed data through as a shorter buffer.
-    if (!/^[A-Za-z0-9+/\r\n=]+$/.test(text)) {
+    // Strict Base64: Buffer.from otherwise skips junk silently and could allocate
+    // before we know whether the decoded payload fits the card budget.
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2,3})?$/.test(text)) {
         throw new CardBytesError('card_invalid', 'card chunk is not base64');
     }
 
+    const padding = text.endsWith('==') ? 2 : (text.endsWith('=') ? 1 : 0);
+    const unpaddedLength = text.length - padding;
+    const remainder = unpaddedLength % 4;
+    const decodedLength = Math.floor(unpaddedLength / 4) * 3 + (remainder === 2 ? 1 : (remainder === 3 ? 2 : 0));
+    if (decodedLength === 0 || decodedLength > MAX_JSON_BYTES) {
+        throw new CardBytesError('card_invalid', 'card payload size out of range');
+    }
+
     const decoded = Buffer.from(text, 'base64');
-    if (decoded.length === 0 || decoded.length > MAX_JSON_BYTES) {
+    if (decoded.length !== decodedLength) {
         throw new CardBytesError('card_invalid', 'card payload size out of range');
     }
 
@@ -316,8 +390,6 @@ export function describeCard(parsed) {
     const assets = own(data, 'assets');
     const extensions = own(data, 'extensions');
 
-    const description = typeof own(data, 'description') === 'string' ? own(data, 'description') : '';
-
     // Regex scripts rewrite messages as they pass through. They are the closest
     // thing to executable content a card can carry, so they get counted.
     const regex = own(extensions, 'regex_scripts');
@@ -331,9 +403,8 @@ export function describeCard(parsed) {
         regexScripts: Array.isArray(regex) ? regex.length : 0,
         embeddedAssets: Array.isArray(assets) ? assets.length : 0,
         specVersion: parsed.spec,
-        // External URLs in the description may be requested after import, so
-        // report their count without trying to infer what each URL serves.
-        externalImages: countExternalUrls(description),
+        // Strings anywhere in a card can be rendered or injected after import.
+        externalImages: countExternalUrls(data),
         originSite: null,
     };
 }
@@ -342,12 +413,47 @@ function nonEmptyString(value) {
     return typeof value === 'string' && value.trim() !== '';
 }
 
-function countExternalUrls(text) {
-    if (typeof text !== 'string' || text === '') {
-        return 0;
+function countExternalUrls(value) {
+    const urls = new Set();
+    const seen = new Set();
+    const stack = [value];
+    let nodes = 0;
+    let textBytes = 0;
+
+    while (stack.length > 0 && nodes < 10_000 && urls.size < 256 && textBytes < 512 * 1024) {
+        const current = stack.pop();
+        nodes++;
+        if (typeof current === 'string') {
+            textBytes += Buffer.byteLength(current);
+            const matches = current.match(/https?:\/\/[^\s)"'<>]+/gi);
+            if (matches) {
+                for (const url of matches) {
+                    urls.add(url);
+                    if (urls.size >= 256) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if (!current || typeof current !== 'object' || seen.has(current)) {
+            continue;
+        }
+        seen.add(current);
+        if (Array.isArray(current)) {
+            for (let index = 0; index < current.length && index < 256; index++) {
+                stack.push(current[index]);
+            }
+            continue;
+        }
+        let keys = 0;
+        for (const key in current) {
+            if (Object.prototype.hasOwnProperty.call(current, key) && keys++ < 256) {
+                stack.push(current[key]);
+            }
+        }
     }
-    const matches = text.match(/https?:\/\/[^\s)"'<>]+/gi);
-    return matches ? new Set(matches).size : 0;
+    return urls.size;
 }
 
 /**

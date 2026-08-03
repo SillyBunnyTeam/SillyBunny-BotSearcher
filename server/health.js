@@ -67,7 +67,7 @@ export function classify(error) {
 
     if (code === 'network') {
         const detail = String(error.detail ?? '');
-        if (/ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED/i.test(detail)) {
+        if (/ENOTFOUND|ERR_NAME_NOT_RESOLVED/i.test(detail)) {
             return 'dns';         // The host no longer resolves at all.
         }
         return 'transient';
@@ -169,6 +169,9 @@ export function reset(sourceId) {
     if (record) {
         record.cooldownUntil = 0;
         record.failures = 0;
+        record.downSince = null;
+        record.step = 0;
+        record.lastKind = null;
     }
 }
 

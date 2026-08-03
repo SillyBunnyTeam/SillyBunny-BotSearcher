@@ -21,6 +21,7 @@ import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own, hostCheckedUrl } from '../validate.js';
 import { mintRef } from '../refs.js';
 import { pageCursor } from '../paging.js';
+import { UpstreamError } from '../guards.js';
 
 const API = 'https://server.pygmalion.chat';
 const SERVICE = 'galatea.v1.PublicCharacterService';
@@ -81,7 +82,8 @@ function epochToIso(value) {
     if (!Number.isFinite(seconds) || seconds <= 0) {
         return null;
     }
-    return new Date(seconds * 1000).toISOString();
+    const date = new Date(seconds * 1000);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 function tagsOf(character) {
@@ -91,14 +93,14 @@ function tagsOf(character) {
 
 /**
  * Pygmalion has no per-card adult flag on the public listing; `includeSensitive`
- * is a request-side filter only. Positive tags are sensitive; otherwise only
- * a search that asked the source for safe content may claim SFW.
+ * is a request-side filter only. Positive tags are sensitive; untagged cards
+ * remain unknown because the source can misapply or ignore a request filter.
  */
-function contentRating(tags, assumeSfw = false) {
+function contentRating(tags) {
     const lowered = tags.map((tag) => tag.toLowerCase());
     return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut'].some((flag) => lowered.includes(flag))
         ? 'sensitive'
-        : (assumeSfw ? 'sfw' : 'unknown');
+        : 'unknown';
 }
 
 function creatorOf(character) {
@@ -106,7 +108,7 @@ function creatorOf(character) {
     return own(owner, 'displayName') ?? own(owner, 'username') ?? '';
 }
 
-function toSummary(character, assumeSfw = false) {
+function toSummary(character) {
     const id = own(character, 'id');
     if (typeof id !== 'string' || !UUID.test(id)) {
         return null;
@@ -122,7 +124,7 @@ function toSummary(character, assumeSfw = false) {
         tagline: own(character, 'description'),
         creator: creatorOf(character),
         tags,
-        contentRating: contentRating(tags, assumeSfw),
+        contentRating: contentRating(tags),
         stats: {
             views: own(character, 'views'),
             downloads: own(character, 'stars'),
@@ -144,7 +146,6 @@ function toDetail(payload, id) {
     const personality = own(character, 'personality');
     const tags = tagsOf(character);
     const assetId = assetIdOf(character);
-    const versions = own(payload, 'versions');
 
     return buildDetail({
         source: 'pygmalion',
@@ -174,7 +175,8 @@ function toDetail(payload, id) {
             // Pygmalion's public API exposes no lorebook or prompt-override
             // fields, so these are reported as unknown rather than guessed at.
             lorebookEntries: null,
-            alternateGreetings: Array.isArray(versions) ? Math.max(0, versions.length - 1) : null,
+            // `versions` contains revision metadata, not alternative greetings.
+            alternateGreetings: null,
             hasSystemPrompt: null,
             hasPostHistoryInstructions: null,
             hasDepthPrompt: null,
@@ -237,11 +239,11 @@ export const pygmalion = Object.freeze({
         const totalRaw = Number(own(data, 'totalItems'));
         const total = Number.isFinite(totalRaw) && totalRaw >= 0 ? Math.floor(totalRaw) : null;
 
-        const items = characters.map((character) => toSummary(character, sfwOnly === true)).filter((item) => item !== null);
+        const items = characters.map(toSummary).filter((item) => item !== null);
 
         return {
             total,
-            next: characters.length > 0
+            next: pageNumber < 999 && characters.length > 0
                 && (total === null ? characters.length >= pageSize : (pageNumber + 1) * pageSize < total)
                 ? { p: pageNumber + 1 }
                 : null,
@@ -252,6 +254,10 @@ export const pygmalion = Object.freeze({
     async getDetail(ctx, id) {
         const url = rpcUrl('Character', { characterMetaId: id, characterVersionId: '' });
         const data = await ctx.fetchJson(url, { maxBytes: 6 << 20, timeoutMs: 12000 });
+        const character = own(data, 'character') ?? data;
+        if (own(character, 'id') !== id) {
+            throw new UpstreamError('bad_json', 'detail_id');
+        }
         return toDetail(data, id);
     },
 

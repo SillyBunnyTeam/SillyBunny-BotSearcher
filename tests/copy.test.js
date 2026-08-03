@@ -79,7 +79,7 @@ test('detail statistics use each source field meaning', () => {
     ].join(', '));
     assert.equal(sourceStatLine('wyvern', stats), [
         formatCount(1, 'token'),
-        formatCount(3, 'like'),
+        formatCount(4, 'like'),
     ].join(', '));
     assert.equal(sourceStatLine('charactertavern', stats), [
         formatCount(1, 'token'),

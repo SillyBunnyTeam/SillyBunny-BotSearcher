@@ -55,6 +55,12 @@ export function createVocabularyCache({ ttlMs = VOCABULARY_TTL_MS, now = () => D
             return pending;
         },
 
+        /** True only for a fresh value that needs no outbound work. */
+        has(adapter) {
+            const cached = entries.get(adapter?.id);
+            return Array.isArray(cached?.tags) && now() < cached.expiresAt;
+        },
+
         clear() {
             entries.clear();
         },
@@ -65,6 +71,10 @@ const sharedCache = createVocabularyCache();
 
 export function getVocabulary(adapter, load) {
     return sharedCache.get(adapter, load);
+}
+
+export function hasVocabulary(adapter) {
+    return sharedCache.has(adapter);
 }
 
 export function clearVocabularyCache() {

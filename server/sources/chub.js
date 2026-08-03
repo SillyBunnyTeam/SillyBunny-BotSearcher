@@ -27,7 +27,8 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
 import { mintRef } from '../refs.js';
-import { pageCursor } from '../paging.js';
+import { UpstreamError } from '../guards.js';
+import { pageCursor, MAX_PAGE } from '../paging.js';
 
 const API = 'https://gateway.chub.ai';
 const AVATARS = 'https://avatars.charhub.io';
@@ -87,7 +88,7 @@ function previewRef(fullPath) {
 /**
  * Chub exposes `nsfw_image` plus a topic list. Either signal is enough to blur.
  */
-function contentRating(node, topics, assumeSfw = false) {
+function contentRating(node, topics) {
     if (own(node, 'nsfw_image') === true) {
         return 'sensitive';
     }
@@ -95,7 +96,7 @@ function contentRating(node, topics, assumeSfw = false) {
     if (['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag))) {
         return 'sensitive';
     }
-    return assumeSfw ? 'sfw' : 'unknown';
+    return 'unknown';
 }
 
 function topicsOf(node) {
@@ -103,7 +104,7 @@ function topicsOf(node) {
     return Array.isArray(topics) ? topics.filter((topic) => typeof topic === 'string') : [];
 }
 
-function toSummary(node, assumeSfw = false) {
+function toSummary(node) {
     const fullPath = fullPathOf(node);
     if (fullPath === null) {
         return null;
@@ -118,7 +119,7 @@ function toSummary(node, assumeSfw = false) {
         tagline: own(node, 'tagline') || own(node, 'description'),
         creator: creatorOf(fullPath),
         tags: topics,
-        contentRating: contentRating(node, topics, assumeSfw),
+        contentRating: contentRating(node, topics),
         stats: {
             views: own(node, 'nChats'),
             downloads: own(node, 'starCount'),
@@ -215,6 +216,8 @@ export const chub = Object.freeze({
     label: 'Chub',
     homepage: SITE,
     allowedHosts: Object.freeze(['gateway.chub.ai', 'avatars.charhub.io']),
+    /** Browser API fallback may only reach the GraphQL/API host. */
+    directHosts: Object.freeze(['gateway.chub.ai']),
     /** Rendered and imported, never fetched by this plugin. */
     linkHosts: Object.freeze(['chub.ai']),
     idPattern: FULL_PATH,
@@ -291,22 +294,21 @@ export const chub = Object.freeze({
         return url;
     },
 
-    parseSearch(data, { cursor, limit, sfwOnly }) {
+    parseSearch(data, { cursor, limit }) {
         const perPage = clampInt(limit, 1, 48, 24);
         const page = pageCursor(cursor);
-        const safe = sfwOnly === true;
-
         const payload = own(data, 'data');
         const rawNodes = own(payload, 'nodes');
         const nodes = Array.isArray(rawNodes) ? rawNodes.slice(0, perPage) : [];
         const rawCount = own(payload, 'count');
         const total = typeof rawCount === 'number' && Number.isFinite(rawCount) ? Math.floor(rawCount) : null;
 
-        const items = nodes.map((node) => toSummary(node, safe)).filter((item) => item !== null && item.id !== '');
+        const items = nodes.map(toSummary).filter((item) => item !== null && item.id !== '');
 
         return {
             total,
-            next: nodes.length > 0 && (total === null ? nodes.length >= perPage : page * perPage < total)
+            next: page < MAX_PAGE && nodes.length > 0
+                && (total === null ? nodes.length >= perPage : page * perPage < total)
                 ? { p: page + 1 }
                 : null,
             items,
@@ -326,6 +328,9 @@ export const chub = Object.freeze({
 
     parseDetail(data, id) {
         const node = own(data, 'node') ?? data;
+        if (fullPathOf(node) !== id) {
+            throw new UpstreamError('bad_json', 'detail_id');
+        }
         return toDetail(node, id);
     },
 

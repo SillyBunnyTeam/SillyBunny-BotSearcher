@@ -2,6 +2,10 @@
 
 import { own } from './validate.js';
 
+export const MAX_OFFSET = 5000;
+export const MAX_PAGE = 1000;
+export const MAX_INDEXED_PAGE = 1000;
+
 export class BadCursorError extends Error {
     constructor() {
         super('bad_cursor');
@@ -27,13 +31,13 @@ export function offsetCursor(cursor) {
         return 0;
     }
     const offset = own(cursor, 'o');
-    if (!exactKeys(cursor, ['o']) || !safeInteger(offset, 0, 5000)) {
+    if (!exactKeys(cursor, ['o']) || !safeInteger(offset, 0, MAX_OFFSET)) {
         throw new BadCursorError();
     }
     return offset;
 }
 
-export function pageCursor(cursor, { first = 1, max = 1000 } = {}) {
+export function pageCursor(cursor, { first = 1, max = MAX_PAGE } = {}) {
     if (cursor === null || cursor === undefined) {
         return first;
     }
@@ -51,7 +55,7 @@ export function indexedPageCursor(cursor) {
     const page = own(cursor, 'p');
     const index = own(cursor, 'i');
     if (!exactKeys(cursor, ['p', 'i'])
-        || !safeInteger(page, 1, 1000)
+        || !safeInteger(page, 1, MAX_INDEXED_PAGE)
         || !safeInteger(index, 0, 256)) {
         throw new BadCursorError();
     }

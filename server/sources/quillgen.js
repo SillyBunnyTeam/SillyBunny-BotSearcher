@@ -16,7 +16,8 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, own } from '../validate.js';
 import { mintRef } from '../refs.js';
-import { offsetCursor } from '../paging.js';
+import { offsetCursor, MAX_OFFSET } from '../paging.js';
+import { UpstreamError } from '../guards.js';
 
 const BASE = 'https://quillgen.app';
 const API = '/v1/public/api/browse/characters';
@@ -137,10 +138,12 @@ export const quillgen = Object.freeze({
         const total = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? Math.floor(rawTotal) : null;
 
         const items = cards.map((card) => toRecord(card, buildSummary)).filter((item) => item !== null);
+        const nextOffset = start + cards.length;
         return {
             total,
-            next: cards.length > 0 && (total === null ? cards.length >= pageSize : start + cards.length < total)
-                ? { o: start + cards.length }
+            next: nextOffset <= MAX_OFFSET && cards.length > 0
+                && (total === null ? cards.length >= pageSize : nextOffset < total)
+                ? { o: nextOffset }
                 : null,
             items,
         };
@@ -153,9 +156,12 @@ export const quillgen = Object.freeze({
 
         const data = await ctx.fetchJson(url, { maxBytes: 2 << 20, timeoutMs: 10000 });
         const cards = own(data, 'cards');
-        const card = Array.isArray(cards) && cards.length > 0 ? cards[0] : { id };
+        const card = Array.isArray(cards) ? cards.find((candidate) => own(candidate, 'id') === id) : null;
+        if (card === undefined || card === null) {
+            throw new UpstreamError('http_error', '404');
+        }
 
-        return toRecord(card, buildDetail) ?? buildDetail({ source: 'quillgen', id });
+        return toRecord(card, buildDetail) ?? (() => { throw new UpstreamError('bad_json', 'detail_id'); })();
     },
 
     getImportTarget(_ctx, id) {

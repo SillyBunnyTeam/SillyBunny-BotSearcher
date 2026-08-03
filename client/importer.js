@@ -6,8 +6,13 @@
  * SillyBunny's file importer.
  */
 
-import { isAllowedImageUrl } from './render.js';
+import { isAllowedUpstreamUrl } from './render.js';
 import { PLUGIN_BASE } from './constants.js';
+import { MAX_CARD_BYTES } from '../shared/schema.js';
+import { readResponseBytes } from './api.js';
+
+/** Serializes host imports because the host only reports success via a global list diff. */
+let importTail = Promise.resolve();
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -15,107 +20,133 @@ function context() {
 
 /**
  * @param {any} card a normalized CardSummary/CardDetail
- * @param {readonly string[]} clientHosts the source's display hosts, from /healthz
+ * @param {{ nativeImport?: boolean, clientHosts?: readonly string[] }} source immutable source metadata
  * @returns {Promise<{ avatar: string, name: string }>} the newly added character
  */
-export async function importCard(card, clientHosts) {
-    if (card?.nativeImport !== true || typeof card.importUrl !== 'string') {
+export async function importCard(card, source) {
+    if (source?.nativeImport !== true || typeof card?.importUrl !== 'string') {
         throw new Error('import_unsupported');
     }
 
     // Belt and braces: the server built this URL, but re-check scheme and host
     // here too, so a server-side mistake still cannot send the host importer
     // somewhere unexpected.
-    if (!isAllowedImageUrl(card.importUrl, clientHosts)) {
+    if (!isAllowedUpstreamUrl(card.importUrl, source.clientHosts)) {
         throw new Error('import_url_rejected');
     }
 
-    const before = new Set(snapshotAvatars());
-
-    // importFromExternalUrl resolves with undefined on both success and failure.
-    // on error it fires a toast and returns (public/scripts/utils.js:3036).
-    // So its return value cannot drive the button state; diffing the character
-    // list is the only reliable success signal.
-    await context().importFromExternalUrl(card.importUrl);
-    await context().getCharacters();
-
-    const added = snapshotCharacters().filter((entry) => !before.has(entry.avatar));
-    if (added.length === 0) {
-        throw new Error('import_failed');
-    }
-
-    return added[added.length - 1];
+    return serializeImport(async () => {
+        // importFromExternalUrl resolves with undefined on both success and
+        // failure. The host list diff is therefore the only success signal.
+        const before = new Set(snapshotAvatars());
+        await context().importFromExternalUrl(card.importUrl);
+        return addedCharacter(before);
+    });
 }
 
 /**
- * Import path for a source SillyBunny cannot fetch by URL itself.
+ * Fetches and inspects a byte-card without adding it to SillyBunny. The caller
+ * retains the returned object until the user explicitly confirms the import.
  *
- * The server downloads and structurally validates the bytes; this only carries
- * them to the host's own importer. Note that /api/characters/import answers 200
- * with `{ error: true }` on failure rather than an error status, so the status
- * code alone cannot be trusted. As with the native path, the character
- * list diff is the real success signal.
+ * @param {any} card
+ * @param {{ id: string }} source
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<{ file: File, kind: 'json' | 'png', inside: object | null }>}
+ */
+export async function prepareCardImport(card, source, { signal } = {}) {
+    const ctx = context();
+    const requestSignal = signal ?? AbortSignal.timeout(20_000);
+    const cardResponse = await fetch(`${PLUGIN_BASE}/card`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify({ source: source?.id, id: card?.id }),
+        signal: requestSignal,
+    });
+
+    if (!cardResponse.ok) {
+        throw await cardResponseError(cardResponse);
+    }
+
+    const kind = cardResponse.headers.get('X-SBBS-Card-Kind') === 'json' ? 'json' : 'png';
+    const inside = readInside(cardResponse.headers.get('X-SBBS-Card-Inside'));
+    const bytes = await readResponseBytes(cardResponse, MAX_CARD_BYTES, requestSignal);
+    const fileName = `${source.id}-${String(card.id).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64)}.${kind}`;
+    const type = kind === 'json' ? 'application/json' : 'image/png';
+    return { file: new File([bytes], fileName, { type }), kind, inside };
+}
+
+/**
+ * Commits byte-card bytes that `prepareCardImport()` already inspected.
+ *
+ * @param {{ file: File, kind: 'json' | 'png', inside: object | null }} prepared
+ * @returns {Promise<{ avatar: string, name: string, inside: object | null }>}
+ */
+export async function commitPreparedCardImport(prepared) {
+    if (!prepared?.file || (prepared.kind !== 'json' && prepared.kind !== 'png')) {
+        throw new Error('card_invalid');
+    }
+
+    return serializeImport(async () => {
+        const ctx = context();
+        const form = new FormData();
+        form.append('avatar', prepared.file);
+        form.append('file_type', prepared.kind);
+
+        const before = new Set(snapshotAvatars());
+        // omitContentType so the browser sets the multipart boundary itself.
+        const importResponse = await fetch('/api/characters/import', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: ctx.getRequestHeaders({ omitContentType: true }),
+            body: form,
+        });
+        if (!importResponse.ok) {
+            throw new Error('import_failed');
+        }
+
+        const added = await addedCharacter(before);
+        return { ...added, inside: prepared.inside };
+    });
+}
+
+/**
+ * Compatibility helper for callers that do not need an inspection pause.
  *
  * @param {any} card
  * @param {{ id: string }} source
  * @returns {Promise<{ avatar: string, name: string, inside: object | null }>}
  */
 export async function importCardBytes(card, source) {
-    const ctx = context();
+    return commitPreparedCardImport(await prepareCardImport(card, source));
+}
 
-    const cardResponse = await fetch(`${PLUGIN_BASE}/card`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: ctx.getRequestHeaders(),
-        body: JSON.stringify({ source: source.id, id: card.id }),
-    });
+function serializeImport(operation) {
+    const run = importTail.then(operation, operation);
+    importTail = run.catch(() => {});
+    return run;
+}
 
-    if (!cardResponse.ok) {
-        let code = `http_${cardResponse.status}`;
-        try {
-            const payload = await cardResponse.json();
-            if (typeof payload?.error === 'string') {
-                code = payload.error;
-            }
-        } catch {
-            // Not JSON; the status is enough.
-        }
-        throw new Error(code);
-    }
-
-    const kind = cardResponse.headers.get('X-SBBS-Card-Kind') === 'json' ? 'json' : 'png';
-    const inside = readInside(cardResponse.headers.get('X-SBBS-Card-Inside'));
-    const blob = await cardResponse.blob();
-
-    const fileName = `${source.id}-${String(card.id).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64)}.${kind}`;
-    const file = new File([blob], fileName, { type: kind === 'json' ? 'application/json' : 'image/png' });
-
-    const form = new FormData();
-    form.append('avatar', file);
-    form.append('file_type', kind);
-
-    const before = new Set(snapshotAvatars());
-
-    // omitContentType so the browser sets the multipart boundary itself.
-    const importResponse = await fetch('/api/characters/import', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: ctx.getRequestHeaders({ omitContentType: true }),
-        body: form,
-    });
-
-    if (!importResponse.ok) {
-        throw new Error('import_failed');
-    }
-
+async function addedCharacter(before) {
     await context().getCharacters();
-
     const added = snapshotCharacters().filter((entry) => !before.has(entry.avatar));
     if (added.length === 0) {
         throw new Error('import_failed');
     }
+    return added[added.length - 1];
+}
 
-    return { ...added[added.length - 1], inside };
+async function cardResponseError(response) {
+    let code = `http_${response.status}`;
+    try {
+        const payload = await response.json();
+        if (typeof payload?.error === 'string') {
+            code = payload.error;
+        }
+    } catch {
+        // Not JSON; the status is enough.
+    }
+    return new Error(code);
 }
 
 /** The server sends the trust summary URI-encoded so it survives as a header. */

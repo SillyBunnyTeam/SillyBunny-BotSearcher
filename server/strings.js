@@ -76,12 +76,16 @@ export function intOrNull(value, max = Number.MAX_SAFE_INTEGER) {
         return null;
     }
 
-    const parsed = typeof value === 'number' ? value : Number(value);
-    if (!Number.isFinite(parsed) || parsed < 0) {
+    if (type === 'string' && !/^(?:0|[1-9]\d*)$/.test(value)) {
         return null;
     }
 
-    return Math.min(Math.floor(parsed), max);
+    const parsed = type === 'number' ? value : Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        return null;
+    }
+
+    return Math.min(parsed, max);
 }
 
 /**

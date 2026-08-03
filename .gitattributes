@@ -1,0 +1,3 @@
+server/merge.js text diff
+tests/normalize.test.js text diff
+tests/sources.test.js text diff

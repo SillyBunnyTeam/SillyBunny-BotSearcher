@@ -19,8 +19,18 @@ test('accepts an https URL whose host is exactly allow-listed', () => {
     assert.equal(isAllowedImageUrl('HTTPS://BOTBOORU.COM/images/a.png', HOSTS), true, 'host compare is case-insensitive');
 });
 
-test('accepts our own same-origin proxy path', () => {
-    assert.equal(isAllowedImageUrl('/api/plugins/sillybunny-botsearcher/thumb?ref=x', HOSTS), true);
+test('accepts only canonical same-origin proxy thumbnail URLs', () => {
+    assert.equal(isAllowedImageUrl('/api/plugins/sillybunny-botsearcher/thumb?source=botbooru&ref=x&size=grid', HOSTS), true);
+
+    for (const url of [
+        '/api/plugins/sillybunny-botsearcher/thumb?ref=x',
+        '/api/plugins/sillybunny-botsearcher/../logout?source=botbooru&ref=x&size=grid',
+        '/api/plugins/sillybunny-botsearcher/%2e%2e/logout?source=botbooru&ref=x&size=grid',
+        '/api/plugins/sillybunny-botsearcher/thumb?source=botbooru&ref=x&size=grid&size=detail',
+        '/api/plugins/sillybunny-botsearcher/thumb?source=botbooru&ref=x&size=grid&extra=1',
+    ]) {
+        assert.equal(isAllowedImageUrl(url, HOSTS), false, `must reject ${url}`);
+    }
 });
 
 test('rejects look-alike hosts that a suffix or substring check would accept', () => {

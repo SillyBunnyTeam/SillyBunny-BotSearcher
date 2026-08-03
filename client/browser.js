@@ -24,6 +24,7 @@ import {
     formatResultCount,
     searchErrorMessage,
     sortLabel,
+    sourceStatLine,
     unreachableReason,
 } from './copy.js';
 import { buildFilters } from './filters.js';
@@ -188,8 +189,11 @@ function wireBrowser(popup, health, options) {
     /** Card element -> record and immutable source snapshot. */
     const records = new Map();
 
+    const initialSource = settings.defaultSource === ALL_SOURCES && usable.length > 1
+        ? mergedSourceEntry(usable)
+        : (usable.find((entry) => entry.id === settings.defaultSource) ?? usable[0]);
     const state = {
-        source: usable.find((entry) => entry.id === settings.defaultSource) ?? usable[0],
+        source: initialSource,
         nextCursor: null,
         loading: false,
         requestGeneration: 0,
@@ -200,6 +204,8 @@ function wireBrowser(popup, health, options) {
         itemKeys: new Set(),
         /** Sources already told the user they are being fetched by the browser. */
         directNoted: new Set(),
+        /** Sources successfully fetched directly during this dialog only. */
+        directSources: new Set(),
         /** Per-source filter panel handle; null when the source declares none. */
         filters: null,
         /** Answers to questions already asked, so toggling a control is free. */
@@ -300,10 +306,26 @@ function wireBrowser(popup, health, options) {
      */
     dom.query.addEventListener('input', () => {
         clearTimeout(state.typingTimer);
+        // Invalidate immediately, not after the debounce: a fetch implementation
+        // can ignore abort, and its completed old response must never render for
+        // the text now visible in the box.
+        state.searchController?.abort();
+        state.requestGeneration++;
+        state.loading = false;
+        dom.body?.setAttribute('aria-busy', 'false');
+        dom.more.disabled = false;
         const value = dom.query.value.trim();
         // Below this a search is mostly noise, but clearing the box back to the
         // catalogue view is a real intent.
         if (value !== '' && value.length < MIN_TYPEAHEAD_LENGTH) {
+            state.nextCursor = null;
+            state.items = [];
+            state.itemKeys.clear();
+            records.clear();
+            dom.grid.replaceChildren();
+            dom.more.hidden = true;
+            setText(dom.count, '');
+            setText(dom.state, 'Keep typing to search.');
             return;
         }
         state.typingTimer = setTimeout(() => void runSearch({ append: false }), TYPEAHEAD_DELAY_MS);
@@ -387,7 +409,9 @@ function wireBrowser(popup, health, options) {
 
     /** Resolves a result's own source, which in a merged search is not the selection. */
     function sourceOf(item) {
-        return usable.find((entry) => entry.id === item?.source) ?? state.source;
+        const candidates = mergedSources();
+        const allowed = candidates.length > 0 ? candidates : [state.source];
+        return allowed.find((entry) => entry.id === item?.source) ?? null;
     }
 
     function onFilterChange() {
@@ -438,15 +462,18 @@ function wireBrowser(popup, health, options) {
         dom.more.hidden = true;
 
         const members = mergedSources();
+        const requestFilters = {
+            ...filters,
+            hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
+        };
+        if (source.capabilities?.sfwToggle === true) {
+            requestFilters.sfwOnly = dom.sfw.checked;
+        }
         const body = {
             query,
             limit: getSettings().resultsPerPage,
             cursor,
-            filters: {
-                sfwOnly: dom.sfw.checked,
-                hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
-                ...filters,
-            },
+            filters: requestFilters,
         };
 
         if (members.length > 0) {
@@ -471,14 +498,15 @@ function wireBrowser(popup, health, options) {
                 // A merged search has no single source to reroute, and the
                 // per-source failures it reports are handled below instead.
                 allowDirect: members.length === 0 && getSettings().allowDirectRequests,
-                onDirect: (reason) => noteDirectRouting(source, reason),
+                onDirect: (reason) => useDirectRouting(source, reason),
             });
 
             if (state.disposed || generation !== state.requestGeneration) {
                 return;
             }
 
-            if (!cached) {
+            const partial = Array.isArray(result.partial) ? result.partial : [];
+            if (!cached && partial.length === 0) {
                 state.cache.set(body, result);
             }
 
@@ -486,10 +514,14 @@ function wireBrowser(popup, health, options) {
 
             const items = Array.isArray(result.items) ? result.items : [];
             const fresh = items.filter((item) => {
+                const itemSource = sourceOf(item);
                 // Keyed by the item's OWN source, which in a merged search is
                 // not the selection.
-                const key = `${item?.source ?? source.id}:${String(item?.id ?? '')}`;
-                if (!item?.id || state.itemKeys.has(key)) {
+                if (!itemSource || typeof item?.id !== 'string' || item.id === '') {
+                    return false;
+                }
+                const key = `${itemSource.id}:${item.id}`;
+                if (state.itemKeys.has(key)) {
                     return false;
                 }
                 state.itemKeys.add(key);
@@ -511,7 +543,7 @@ function wireBrowser(popup, health, options) {
             // Which sources in a merged search did not answer. Stated rather
             // than hidden: a short list of results has a reason, and silently
             // dropping a site would look like it simply had nothing.
-            showPartialFailures(Array.isArray(result.partial) ? result.partial : []);
+            showPartialFailures(partial);
 
             setText(dom.count, formatResultCount(state.items.length, result.total));
             dom.more.hidden = state.nextCursor === null;
@@ -595,6 +627,11 @@ function wireBrowser(popup, health, options) {
         dom.state.after(notice);
     }
 
+    function useDirectRouting(source, reason) {
+        state.directSources.add(source.id);
+        noteDirectRouting(source, reason);
+    }
+
     /**
      * Reports a source that could not be reached, and offers to try it again.
      *
@@ -661,7 +698,16 @@ function wireBrowser(popup, health, options) {
             // In a merged search each card belongs to its own source: that is
             // what supplies its image hosts, its filters and its importer.
             const source = merged ? sourceOf(item) : selection;
-            const { card, open, tags } = buildCard(item, source, settingsNow, merged);
+            if (!source) {
+                continue;
+            }
+            const { card, open, tags } = buildCard(
+                item,
+                source,
+                settingsNow,
+                merged,
+                state.directSources.has(source.id),
+            );
             records.set(open, { item, source });
 
             // Clicking a tag narrows the search instead of opening the card.
@@ -713,6 +759,8 @@ function wireBrowser(popup, health, options) {
                         dom.filtersToggle.setAttribute('aria-expanded', 'true');
                         onFilterChange();
                     },
+                    onDirect: (reason) => useDirectRouting(record.source, reason),
+                    isSourceDirect: (sourceId) => state.directSources.has(sourceId),
                 });
             });
             const li = document.createElement('li');
@@ -764,9 +812,10 @@ function wireBrowser(popup, health, options) {
  * @param {{ label: string, clientHosts: string[], capabilities?: any }} source
  * @param {ReturnType<typeof getSettings>} settings
  * @param {boolean} showSource whether results came from more than one site
+ * @param {boolean} sourceDirect whether this dialog fetched the source directly
  * @returns {{ card: HTMLElement, open: HTMLButtonElement, tags: {button: HTMLElement, tag: string}[] }}
  */
-function buildCard(item, source, settings, showSource = false) {
+function buildCard(item, source, settings, showSource = false, sourceDirect = false) {
     const card = el('div', 'sbbs-card');
 
     const open = el('button', 'sbbs-card-open');
@@ -782,7 +831,7 @@ function buildCard(item, source, settings, showSource = false) {
 
     const rating = ratingOf(item);
 
-    const src = thumbSrc(item, source, 'grid', settings.imageMode);
+    const src = thumbSrc(item, source, 'grid', settings.imageMode, sourceDirect);
     if (src) {
         const img = document.createElement('img');
         img.alt = '';
@@ -824,7 +873,7 @@ function buildCard(item, source, settings, showSource = false) {
         footer.append(el('span', 'sbbs-card-source', source.label ?? item.source ?? ''));
     }
 
-    const popularity = popularityOf(item);
+    const popularity = popularityOf(item, source.id);
     if (popularity !== '') {
         footer.append(el('div', 'sbbs-card-stats', popularity));
     }
@@ -849,12 +898,12 @@ function buildCard(item, source, settings, showSource = false) {
 
     card.append(open);
 
-    const tags = buildCardTags(item, source, card);
+    const tags = buildCardTags(item, source, card, !showSource);
     return { card, open, tags };
 }
 
 /** Up to four tags, as filter buttons where the source supports tag filtering. */
-function buildCardTags(item, source, card) {
+function buildCardTags(item, source, card, allowFilter) {
     const list = Array.isArray(item.tags)
         ? item.tags.filter((tag) => typeof tag === 'string' && tag.trim() !== '').slice(0, 4)
         : [];
@@ -862,7 +911,7 @@ function buildCardTags(item, source, card) {
         return [];
     }
 
-    const canFilter = (source.capabilities?.filters ?? []).some((filter) => filter.key === 'tags');
+    const canFilter = allowFilter && (source.capabilities?.filters ?? []).some((filter) => filter.key === 'tags');
     const row = el('div', 'sbbs-card-tags');
     const handles = [];
 
@@ -891,19 +940,8 @@ function buildCardTags(item, source, card) {
  * its star count — so each is labelled rather than shown as a bare number, and
  * a figure the source did not report is omitted rather than shown as zero.
  */
-function popularityOf(item) {
-    const stats = item?.stats;
-    const parts = [];
-    if (stats?.downloads) {
-        parts.push(formatCount(stats.downloads, 'download'));
-    }
-    if (stats?.favorites) {
-        parts.push(formatCount(stats.favorites, 'favorite'));
-    }
-    if (stats?.views) {
-        parts.push(formatCount(stats.views, 'chat'));
-    }
-    return parts.slice(0, 2).join(' · ');
+function popularityOf(item, sourceId) {
+    return sourceStatLine(sourceId, item?.stats);
 }
 
 function ratingOf(item) {

@@ -22,6 +22,7 @@ import { isAllowedUpstreamUrl } from './render.js';
 
 const POSITIVE_TTL_MS = 60_000;
 const NEGATIVE_TTL_MS = 5_000;
+const DIRECT_TIMEOUT_MS = 15_000;
 
 /** Statuses that mean "the route isn't there", as opposed to "the call failed". */
 const MISSING_STATUSES = new Set([404, 405, 501]);
@@ -35,21 +36,6 @@ export const AVAILABILITY = Object.freeze({
 
 /** @type {{ at: number, value: any } | null} */
 let cached = null;
-
-/**
- * Sources this session has had to fetch from the browser.
- *
- * Thumbnails have to follow the same route. A server that cannot reach a
- * source's API is almost never able to reach its image host either — they sit
- * behind the same edge — so leaving images on the proxy would replace every card
- * with a letter tile while the results themselves loaded fine.
- */
-const directSources = new Set();
-
-/** @param {string} sourceId */
-export function isSourceDirect(sourceId) {
-    return directSources.has(sourceId);
-}
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -117,16 +103,17 @@ export async function getAvailability({ force = false } = {}) {
  * @param {{ id: string }} source
  * @param {'grid' | 'detail'} size
  * @param {'proxy' | 'direct' | 'off'} imageMode
+ * @param {boolean} [sourceDirect] whether this dialog fetched this source directly
  * @returns {string | null}
  */
-export function thumbSrc(card, source, size, imageMode) {
+export function thumbSrc(card, source, size, imageMode, sourceDirect = false) {
     if (imageMode === 'off') {
         return null;
     }
 
     // 'off' still means off: a blocked server is a reason to change the route,
     // never a reason to start loading images the user asked not to load.
-    if (imageMode === 'proxy' && !directSources.has(source?.id)) {
+    if (imageMode === 'proxy' && !sourceDirect) {
         if (typeof card?.thumbRef !== 'string' || card.thumbRef === '') {
             return null;
         }
@@ -143,15 +130,15 @@ export function thumbSrc(card, source, size, imageMode) {
  *
  * @param {string} path e.g. '/search'
  * @param {Record<string, unknown>} body
- * @param {{ signal?: AbortSignal }} [options]
+ * @param {{ signal?: AbortSignal, bodyText?: string }} [options]
  * @returns {Promise<any>}
  */
-export async function post(path, body, { signal } = {}) {
+export async function post(path, body, { signal, bodyText } = {}) {
     const response = await fetch(`${PLUGIN_BASE}${path}`, {
         method: 'POST',
         credentials: 'same-origin',
         headers: context().getRequestHeaders(),
-        body: JSON.stringify(body ?? {}),
+        body: typeof bodyText === 'string' ? bodyText : JSON.stringify(body ?? {}),
         signal,
     });
 
@@ -198,7 +185,7 @@ export async function post(path, body, { signal } = {}) {
  *
  * @param {string} path
  * @param {Record<string, unknown>} body
- * @param {{ id: string, clientHosts: string[] }} source
+ * @param {{ id: string, directHosts?: string[] }} source
  * @param {{ signal?: AbortSignal, allowDirect?: boolean, onDirect?: (reason: string) => void }} [options]
  */
 export async function postRouted(path, body, source, options = {}) {
@@ -217,55 +204,140 @@ export async function postRouted(path, body, source, options = {}) {
         throw declined;
     }
 
-    if (!isAllowedUpstreamUrl(first.url, source?.clientHosts)) {
+    if (!isAllowedUpstreamUrl(first.url, source?.directHosts)) {
         const error = new Error('bad_direct_url');
         error.code = 'bad_direct_url';
         throw error;
     }
 
-    directSources.add(source.id);
-    onDirect?.(typeof first.reason === 'string' ? first.reason : 'forbidden');
-
-    let upstream;
+    const direct = timedSignal(signal, DIRECT_TIMEOUT_MS);
     try {
-        upstream = await fetch(String(first.url), {
+        const upstream = await fetch(String(first.url), {
             method: 'GET',
             credentials: 'omit',
             referrerPolicy: 'no-referrer',
+            redirect: 'error',
+            cache: 'no-store',
             headers: { Accept: 'application/json' },
-            signal,
+            signal: direct.signal,
         });
+        if (!upstream.ok) {
+            const failure = codedError('direct_blocked');
+            failure.status = upstream.status;
+            throw failure;
+        }
+
+        const bytes = await readResponseBytes(upstream, MAX_INGEST_BYTES, direct.signal);
+        let payload;
+        try {
+            payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        } catch {
+            throw codedError('bad_json');
+        }
+
+        const ingest = { ...body, kind: first.kind, payload };
+        const bodyText = JSON.stringify(ingest);
+        if (new TextEncoder().encode(bodyText).byteLength > MAX_INGEST_BYTES) {
+            throw codedError('too_large');
+        }
+
+        const result = await post('/ingest', ingest, { signal, bodyText });
+        onDirect?.(typeof first.reason === 'string' ? first.reason : 'forbidden');
+        return result;
     } catch (error) {
-        if (error?.name === 'AbortError') {
+        if (signal?.aborted) {
+            throw abortError();
+        }
+        if (direct.timedOut()) {
+            throw codedError('timeout');
+        }
+        if (error?.code || error?.name === 'AbortError') {
             throw error;
         }
-        const failure = new Error('direct_blocked');
-        failure.code = 'direct_blocked';
-        throw failure;
+        throw codedError('direct_blocked');
+    } finally {
+        direct.dispose();
+    }
+}
+
+/** Reads a response stream without allowing an unbounded browser allocation. */
+export async function readResponseBytes(response, maxBytes, signal) {
+    const declared = response?.headers?.get?.('content-length');
+    if (typeof declared === 'string' && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+        throw codedError('too_large');
     }
 
-    if (!upstream.ok) {
-        const failure = new Error('direct_blocked');
-        failure.code = 'direct_blocked';
-        failure.status = upstream.status;
-        throw failure;
+    const reader = response?.body?.getReader?.();
+    if (!reader) {
+        throw codedError('direct_blocked');
     }
 
-    const text = await upstream.text();
-    if (text.length > MAX_INGEST_BYTES) {
-        const failure = new Error('too_large');
-        failure.code = 'too_large';
-        throw failure;
-    }
-
-    let payload;
+    let bytes = new Uint8Array(Math.min(maxBytes, 64 * 1024));
+    let total = 0;
     try {
-        payload = JSON.parse(text);
-    } catch {
-        const failure = new Error('bad_json');
-        failure.code = 'bad_json';
-        throw failure;
+        while (true) {
+            if (signal?.aborted) {
+                throw abortError();
+            }
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            if (!(value instanceof Uint8Array) || value.byteLength > maxBytes - total) {
+                await reader.cancel();
+                throw codedError('too_large');
+            }
+            const nextTotal = total + value.byteLength;
+            if (nextTotal > bytes.byteLength) {
+                const nextLength = Math.min(maxBytes, Math.max(nextTotal, bytes.byteLength * 2));
+                const expanded = new Uint8Array(nextLength);
+                expanded.set(bytes.subarray(0, total));
+                bytes = expanded;
+            }
+            bytes.set(value, total);
+            total = nextTotal;
+        }
+    } catch (error) {
+        await reader.cancel().catch(() => {});
+        throw error;
+    } finally {
+        reader.releaseLock?.();
     }
 
-    return post('/ingest', { ...body, kind: first.kind, payload }, { signal });
+    return bytes.slice(0, total);
+}
+
+function timedSignal(external, timeoutMs) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = () => controller.abort();
+    if (external?.aborted) {
+        abort();
+    } else {
+        external?.addEventListener('abort', abort, { once: true });
+    }
+    const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, timeoutMs);
+    return {
+        signal: controller.signal,
+        timedOut: () => timedOut,
+        dispose() {
+            clearTimeout(timer);
+            external?.removeEventListener('abort', abort);
+        },
+    };
+}
+
+function codedError(code) {
+    const error = new Error(code);
+    error.code = code;
+    return error;
+}
+
+function abortError() {
+    const error = new Error('aborted');
+    error.name = 'AbortError';
+    return error;
 }
