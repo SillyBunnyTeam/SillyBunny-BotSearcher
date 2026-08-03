@@ -53,10 +53,15 @@ Sort and filter controls are hidden while searching all sources. The sites share
 
 | Source | Filters |
 |---|---|
+| Botbooru | Included tags, excluded tags, writer, character, franchise, minimum and maximum tokens, upload date range, original characters only |
 | Chub | Tags, excluded tags, creator, minimum and maximum tokens |
-| All others | None yet |
+| All other sources | None yet |
 
 In a tag box, press Enter or type a comma to commit a tag, and Backspace on an empty box to remove the last one. Multiple tags narrow to cards carrying *all* of them.
+
+Botbooru tag boxes also suggest matching names from its tag catalogue. Suggestions are loaded once when that source is selected, kept only for the open dialog, and are not required for manual tag entry.
+
+Botbooru sends ordinary words to its name and description search. Its exact query syntax can be used in the main search box too: for example, `-male` excludes a tag and `writer:name` selects a writer. Exact values entered through filter controls have spaces converted to underscores.
 
 Results update shortly after you stop typing, from three characters onward; pressing Enter or the search button skips the wait. Repeating a search you already ran — clearing a filter, switching back to a source you were just looking at — is answered from memory rather than by asking the site again. That memory lasts five minutes and is discarded when the dialog closes.
 
@@ -187,7 +192,7 @@ Restart SillyBunny and check the server-plugin logs. If the plugin route exists 
 
 ### Frontend and server are incompatible
 
-Update both components from the same release, then restart SillyBunny. Updating only the frontend extension or only the server plugin can leave their protocol versions out of sync.
+The frontend extension and server plugin are one protocol release and must be updated together. Install both components from the same release, then restart SillyBunny; deploying either component by itself can make the browser refuse the mismatched server.
 
 ### A source is unavailable
 

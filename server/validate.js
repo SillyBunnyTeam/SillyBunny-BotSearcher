@@ -180,7 +180,7 @@ export function hostCheckedUrl(raw, hosts) {
  *
  * @param {unknown} raw the client's `filters` object
  * @param {readonly {key: string, type: string}[]} declared
- * @returns {Record<string, string[] | string | number>} own-keys-only, null prototype
+ * @returns {Record<string, string[] | string | number | boolean>} own-keys-only, null prototype
  */
 export function readFilters(raw, declared) {
     const out = Object.create(null);
@@ -224,10 +224,31 @@ export function readFilters(raw, declared) {
                     Math.max(FILTER_LIMITS.numberMin, Math.floor(parsed)),
                 );
             }
+            continue;
+        }
+
+        if (spec.type === 'boolean') {
+            if (value === true) {
+                out[spec.key] = true;
+            }
+            continue;
+        }
+
+        if (spec.type === 'date' && validCalendarDate(value)) {
+            out[spec.key] = value;
         }
     }
 
     return out;
+}
+
+function validCalendarDate(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return false;
+    }
+
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 /**

@@ -9,10 +9,11 @@
  * discovery and a server-built URL rather than another download path.
  *
  * Endpoints, all verified live:
- *   GET /posts/?q=&limit=&offset=&sort=&sfw_only=&hide_ai=  -> { total, posts[] }
- *   GET /post/<id>                                          -> full card metadata
- *   GET /images/preview/<320|640>/<filename>                -> thumbnail
- *   GET /api/post-count                                     -> { total }
+ *   GET /posts/?q=&qtext=&limit=&offset=&sort=...  -> { total, posts[] }
+ *   GET /tags/                                    -> tag vocabulary
+ *   GET /post/<id>                                -> full card metadata
+ *   GET /images/preview/<320|640>/<filename>      -> thumbnail
+ *   GET /api/post-count                           -> { total }
  */
 
 import { buildSummary, buildDetail } from '../normalize.js';
@@ -32,8 +33,56 @@ const PREVIEW_SIZES = Object.freeze({ grid: 320, detail: 640 });
 
 const SORTS = Object.freeze(['latest', 'curated', 'downloads', 'favorites', 'views', 'random']);
 
+const QUERY_PREFIXES = Object.freeze([
+    'writer', 'character', 'artist', 'copyright', 'scenario', 'language', 'meta',
+]);
+
+const MAX_VOCABULARY_TAGS = 10_000;
+
+const FILTERS = Object.freeze([
+    Object.freeze({ key: 'tags', type: 'tags', label: 'Has all of these tags', placeholder: 'dragon_ball' }),
+    Object.freeze({ key: 'excludeTags', type: 'tags', label: 'Without these tags', placeholder: 'male' }),
+    Object.freeze({ key: 'writer', type: 'text', label: 'Writer', placeholder: 'Name' }),
+    Object.freeze({ key: 'character', type: 'text', label: 'Character', placeholder: 'Name' }),
+    Object.freeze({ key: 'franchise', type: 'text', label: 'Franchise', placeholder: 'Name' }),
+    Object.freeze({ key: 'minTokens', type: 'number', label: 'Min tokens' }),
+    Object.freeze({ key: 'maxTokens', type: 'number', label: 'Max tokens' }),
+    Object.freeze({ key: 'uploadedAfter', type: 'date', label: 'Uploaded after' }),
+    Object.freeze({ key: 'uploadedBefore', type: 'date', label: 'Uploaded before' }),
+    Object.freeze({ key: 'ocOnly', type: 'boolean', label: 'Original characters only' }),
+]);
+
 /** Botbooru's own Meta taxonomy marks safe cards; absence means assume adult. */
 const SFW_TAG = 'sfw';
+
+/**
+ * Botbooru separates exact tag syntax from ordinary name/description text.
+ * Unknown colon syntax such as "Re:Zero" remains ordinary text.
+ */
+function splitQuery(raw) {
+    const exact = [];
+    const text = [];
+    const tokens = typeof raw === 'string' ? raw.slice(0, 128).trim().split(/\s+/) : [];
+
+    for (const token of tokens) {
+        if (token === '') {
+            continue;
+        }
+        const hasKnownPrefix = QUERY_PREFIXES.some((prefix) => token.startsWith(`${prefix}:`));
+        if (hasKnownPrefix || token.startsWith('-')) {
+            exact.push(token);
+        } else {
+            text.push(token);
+        }
+    }
+
+    return { exact, text };
+}
+
+/** One filter value must remain one exact-tag token in Botbooru's syntax. */
+function tagTerm(value) {
+    return typeof value === 'string' ? value.trim().replace(/\s+/g, '_') : '';
+}
 
 /**
  * @param {unknown} rawTags Botbooru tag objects: { id, name, category }
@@ -260,9 +309,11 @@ export const botbooru = Object.freeze({
         sfwToggle: true,
         hideAiToggle: true,
         detail: true,
+        tagVocabulary: true,
+        filters: FILTERS,
     }),
 
-    async search(ctx, { query, cursor, limit, sort, sfwOnly, hideAi }) {
+    buildSearchUrl({ query, cursor, limit, sort, sfwOnly, hideAi, filters }) {
         const pageSize = clampInt(limit, 1, 48, 24);
         const start = offsetCursor(cursor);
         const url = new URL('/posts/', BASE);
@@ -270,8 +321,34 @@ export const botbooru = Object.freeze({
         url.searchParams.set('offset', String(start));
         url.searchParams.set('sort', pick(sort, SORTS, 'latest'));
 
-        if (typeof query === 'string' && query !== '') {
-            url.searchParams.set('q', query.slice(0, 128));
+        const split = splitQuery(query);
+        const exact = [...split.exact];
+
+        const tags = own(filters, 'tags');
+        if (Array.isArray(tags)) {
+            exact.push(...tags.map(tagTerm).filter((term) => term !== ''));
+        }
+        const excludeTags = own(filters, 'excludeTags');
+        if (Array.isArray(excludeTags)) {
+            exact.push(...excludeTags.map(tagTerm).filter((term) => term !== '').map((term) => `-${term}`));
+        }
+
+        for (const [key, prefix] of [
+            ['writer', 'writer'],
+            ['character', 'character'],
+            ['franchise', 'copyright'],
+        ]) {
+            const value = tagTerm(own(filters, key));
+            if (value !== '') {
+                exact.push(`${prefix}:${value}`);
+            }
+        }
+
+        if (exact.length > 0) {
+            url.searchParams.set('q', exact.join(' '));
+        }
+        if (split.text.length > 0) {
+            url.searchParams.set('qtext', split.text.join(' '));
         }
         if (sfwOnly) {
             url.searchParams.set('sfw_only', 'true');
@@ -280,7 +357,27 @@ export const botbooru = Object.freeze({
             url.searchParams.set('hide_ai', 'true');
         }
 
-        const data = await ctx.fetchJson(url, { maxBytes: 2 << 20, timeoutMs: 8000 });
+        for (const [key, parameter] of [
+            ['minTokens', 'min_tokens'],
+            ['maxTokens', 'max_tokens'],
+            ['uploadedAfter', 'uploaded_after'],
+            ['uploadedBefore', 'uploaded_before'],
+        ]) {
+            const value = own(filters, key);
+            if (typeof value === 'number' || typeof value === 'string') {
+                url.searchParams.set(parameter, String(value));
+            }
+        }
+        if (own(filters, 'ocOnly') === true) {
+            url.searchParams.set('oc_only', 'true');
+        }
+
+        return url;
+    },
+
+    parseSearch(data, { cursor, limit }) {
+        const pageSize = clampInt(limit, 1, 48, 24);
+        const start = offsetCursor(cursor);
 
         const rawPosts = own(data, 'posts');
         const posts = Array.isArray(rawPosts) ? rawPosts.slice(0, pageSize) : [];
@@ -295,6 +392,38 @@ export const botbooru = Object.freeze({
                 : null,
             items,
         };
+    },
+
+    async search(ctx, args) {
+        const data = await ctx.fetchJson(this.buildSearchUrl(args), { maxBytes: 2 << 20, timeoutMs: 8000 });
+        return this.parseSearch(data, args);
+    },
+
+    async fetchVocabulary(ctx) {
+        const data = await ctx.fetchJson(new URL('/tags/', BASE), { maxBytes: 4 << 20, timeoutMs: 10000 });
+        if (!Array.isArray(data)) {
+            return [];
+        }
+
+        const tags = [];
+        for (const raw of data) {
+            if (tags.length >= MAX_VOCABULARY_TAGS) {
+                break;
+            }
+            if (!raw || typeof raw !== 'object' || own(raw, 'alias_of') !== undefined) {
+                continue;
+            }
+
+            const name = own(raw, 'name');
+            const category = own(raw, 'category');
+            const count = own(raw, 'count');
+            if (typeof name !== 'string' || name === '' || typeof category !== 'string'
+                || typeof count !== 'number' || !Number.isFinite(count) || count < 5) {
+                continue;
+            }
+            tags.push({ n: name, c: category, k: Math.floor(count) });
+        }
+        return tags;
     },
 
     async getDetail(ctx, id) {

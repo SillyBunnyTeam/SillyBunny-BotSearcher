@@ -189,6 +189,22 @@
     width: 100%;
 }
 
+.sbbs-filter-boolean {
+    justify-content: center;
+}
+
+.sbbs-filter-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: var(--input-height, 36px);
+}
+
+.sbbs-filter-checkbox input {
+    flex: 0 0 auto;
+    width: auto;
+}
+
 .sbbs-filter-chips {
     display: flex;
     flex-wrap: wrap;

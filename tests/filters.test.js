@@ -18,6 +18,8 @@ const DECLARED = [
     { key: 'excludeTags', type: 'tags', label: 'Without these tags' },
     { key: 'creator', type: 'text', label: 'Creator' },
     { key: 'minTokens', type: 'number', label: 'Min tokens' },
+    { key: 'uploadedAfter', type: 'date', label: 'Uploaded after' },
+    { key: 'ocOnly', type: 'boolean', label: 'Original characters only' },
 ];
 
 /** Installs a DOM and returns the panel plus a change counter. */
@@ -44,6 +46,8 @@ test('a control appears for each declared filter, and none for a source with non
     assert.equal(withFilters.host.querySelectorAll('.sbbs-filter').length, DECLARED.length);
     assert.ok(withFilters.host.querySelector('#sbbs_filter_tags'));
     assert.equal(withFilters.host.querySelector('#sbbs_filter_minTokens').type, 'number');
+    assert.equal(withFilters.host.querySelector('#sbbs_filter_uploadedAfter').type, 'date');
+    assert.equal(withFilters.host.querySelector('#sbbs_filter_ocOnly').type, 'checkbox');
 
     const without = await panel([]);
     assert.equal(without.host.children.length, 0, 'a source that declares nothing shows nothing');
@@ -157,6 +161,48 @@ test('numbers come back as numbers and text as trimmed text', async () => {
 
     assert.deepEqual(handle.read(), { creator: 'Aremmm', minTokens: 1200 });
     assert.equal(handle.count(), 2);
+});
+
+test('date and boolean controls participate in read, count, set, and clear', async () => {
+    const { host, handle, changes } = await panel();
+    const checkbox = host.querySelector('#sbbs_filter_ocOnly');
+
+    assert.ok(checkbox.closest('.checkbox_label'), 'the checkbox uses the host checkbox control row');
+    assert.equal(handle.set('uploadedAfter', '2024-02-29'), true);
+    assert.equal(handle.set('ocOnly', true), true);
+    assert.deepEqual(handle.read(), { uploadedAfter: '2024-02-29', ocOnly: true });
+    assert.equal(handle.count(), 2);
+
+    checkbox.dispatchEvent(new globalThis.window.Event('change', { bubbles: true }));
+    assert.equal(changes.count, 1);
+
+    handle.clear();
+    assert.deepEqual(handle.read(), {});
+    assert.equal(host.querySelector('#sbbs_filter_uploadedAfter').value, '');
+    assert.equal(checkbox.checked, false);
+});
+
+test('tag fields expose ranked vocabulary suggestions with space normalization', async () => {
+    const { host, handle } = await panel();
+    const input = host.querySelector('#sbbs_filter_tags');
+    const vocabulary = Array.from({ length: 25 }, (_, index) => ({
+        n: `dragon_ball_${index}`,
+        c: index === 24 ? 'Copyright' : 'Character',
+        k: index + 1,
+    }));
+    vocabulary.push({ n: 'unrelated', c: 'Other', k: 1000 });
+    handle.setVocabulary(vocabulary);
+
+    input.value = 'dragon bal';
+    input.dispatchEvent(new globalThis.window.Event('input', { bubbles: true }));
+
+    const datalist = host.querySelector(`#${input.getAttribute('list')}`);
+    const options = [...datalist.querySelectorAll('option')];
+    assert.equal(host.querySelectorAll('datalist').length, 2, 'each declared tag field gets a datalist');
+    assert.equal(options.length, 20, 'suggestions are capped');
+    assert.equal(options[0].value, 'dragon_ball_24', 'highest-count match comes first');
+    assert.equal(options[0].label, 'Copyright · 25');
+    assert.equal(options.some((option) => option.value === 'unrelated'), false);
 });
 
 test('clear empties every control at once', async () => {

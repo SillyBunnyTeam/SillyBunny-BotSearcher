@@ -19,13 +19,14 @@ import { FILTER_LIMITS } from '../shared/schema.js';
  * @param {HTMLElement} host the container to fill
  * @param {readonly {key: string, type: string, label: string, placeholder?: string}[]} declared
  * @param {() => void} onChange fired when a value changes, for re-running the search
- * @returns {{ read: () => Record<string, unknown>, count: () => number, clear: () => void, set: (key: string, value: string) => boolean }}
+ * @returns {{ read: () => Record<string, unknown>, count: () => number, clear: () => void, set: (key: string, value: unknown) => boolean, setVocabulary: (tags: unknown) => void }}
  */
 export function buildFilters(host, declared, onChange) {
     host.replaceChildren();
 
     const specs = Array.isArray(declared) ? declared : [];
-    /** @type {Map<string, { spec: any, input: HTMLInputElement, tags: Set<string>, chips: HTMLElement | null }>} */
+    let vocabulary = [];
+    /** @type {Map<string, { spec: any, input: HTMLInputElement, tags: Set<string>, chips: HTMLElement | null, datalist: HTMLDataListElement | null }>} */
     const fields = new Map();
 
     for (const spec of specs) {
@@ -35,70 +36,92 @@ export function buildFilters(host, declared, onChange) {
 
         const wrap = el('div', `sbbs-filter sbbs-filter-${spec.type}`);
         const id = `sbbs_filter_${spec.key}`;
-
-        const label = el('label', 'sbbs-filter-label', spec.label ?? spec.key);
-        label.htmlFor = id;
-        wrap.append(label);
-
         const input = document.createElement('input');
         input.id = id;
-        input.className = 'text_pole';
-        input.autocomplete = 'off';
+        const field = { spec, input, tags: new Set(), chips: null, datalist: null };
 
-        const field = { spec, input, tags: new Set(), chips: null };
-
-        if (spec.type === 'number') {
-            input.type = 'number';
-            input.min = String(FILTER_LIMITS.numberMin);
-            input.max = String(FILTER_LIMITS.numberMax);
-            input.step = '1';
+        if (spec.type === 'boolean') {
+            input.type = 'checkbox';
             input.addEventListener('change', () => onChange());
-        } else {
-            input.type = 'text';
-            input.maxLength = spec.type === 'tags'
-                ? FILTER_LIMITS.tagLength * FILTER_LIMITS.tagCount
-                : FILTER_LIMITS.textLength;
-            if (spec.placeholder) {
-                input.placeholder = spec.placeholder;
-            }
 
-            if (spec.type === 'tags') {
-                // Enter and comma both commit a tag. Enter must not reach the
-                // form, or every tag would also submit a search.
-                input.addEventListener('keydown', (event) => {
-                    if (event.key === 'Enter' || event.key === ',') {
-                        event.preventDefault();
-                        if (commitTags(field, input.value)) {
-                            input.value = '';
+            const checkbox = el('label', 'checkbox_label sbbs-filter-checkbox');
+            checkbox.htmlFor = id;
+            checkbox.append(input, el('span', undefined, spec.label ?? spec.key));
+            wrap.append(checkbox);
+        } else {
+            const label = el('label', 'sbbs-filter-label', spec.label ?? spec.key);
+            label.htmlFor = id;
+            wrap.append(label);
+
+            input.className = 'text_pole';
+            input.autocomplete = 'off';
+
+            if (spec.type === 'number') {
+                input.type = 'number';
+                input.min = String(FILTER_LIMITS.numberMin);
+                input.max = String(FILTER_LIMITS.numberMax);
+                input.step = '1';
+                input.addEventListener('change', () => onChange());
+            } else if (spec.type === 'date') {
+                input.type = 'date';
+                input.addEventListener('change', () => onChange());
+            } else {
+                input.type = 'text';
+                input.maxLength = spec.type === 'tags'
+                    ? FILTER_LIMITS.tagLength * FILTER_LIMITS.tagCount
+                    : FILTER_LIMITS.textLength;
+                if (spec.placeholder) {
+                    input.placeholder = spec.placeholder;
+                }
+
+                if (spec.type === 'tags') {
+                    field.datalist = document.createElement('datalist');
+                    field.datalist.id = `${id}_suggestions`;
+                    input.setAttribute('list', field.datalist.id);
+                    input.addEventListener('input', () => renderSuggestions(field, vocabulary));
+
+                    // Enter and comma both commit a tag. Enter must not reach the
+                    // form, or every tag would also submit a search.
+                    input.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter' || event.key === ',') {
+                            event.preventDefault();
+                            if (commitTags(field, input.value)) {
+                                input.value = '';
+                                renderSuggestions(field, vocabulary);
+                                renderChips(field, onChange);
+                                onChange();
+                            }
+                        } else if (event.key === 'Backspace' && input.value === '' && field.tags.size > 0) {
+                            const last = [...field.tags].pop();
+                            field.tags.delete(last);
                             renderChips(field, onChange);
                             onChange();
                         }
-                    } else if (event.key === 'Backspace' && input.value === '' && field.tags.size > 0) {
-                        const last = [...field.tags].pop();
-                        field.tags.delete(last);
-                        renderChips(field, onChange);
-                        onChange();
-                    }
-                });
-                // Pasting "a, b, c" should not need three keystrokes to commit.
-                input.addEventListener('blur', () => {
-                    if (commitTags(field, input.value)) {
-                        input.value = '';
-                        renderChips(field, onChange);
-                        onChange();
-                    }
-                });
-            } else {
-                input.addEventListener('change', () => onChange());
+                    });
+                    // Pasting "a, b, c" should not need three keystrokes to commit.
+                    input.addEventListener('blur', () => {
+                        if (commitTags(field, input.value)) {
+                            input.value = '';
+                            renderSuggestions(field, vocabulary);
+                            renderChips(field, onChange);
+                            onChange();
+                        }
+                    });
+                } else {
+                    input.addEventListener('change', () => onChange());
+                }
             }
-        }
 
-        wrap.append(input);
+            wrap.append(input);
+            if (field.datalist) {
+                wrap.append(field.datalist);
+            }
 
-        if (spec.type === 'tags') {
-            field.chips = el('div', 'sbbs-filter-chips');
-            field.chips.setAttribute('role', 'list');
-            wrap.append(field.chips);
+            if (spec.type === 'tags') {
+                field.chips = el('div', 'sbbs-filter-chips');
+                field.chips.setAttribute('role', 'list');
+                wrap.append(field.chips);
+            }
         }
 
         fields.set(spec.key, field);
@@ -122,6 +145,10 @@ export function buildFilters(host, declared, onChange) {
                     if (field.input.value !== '' && Number.isFinite(value)) {
                         out[key] = value;
                     }
+                } else if (field.spec.type === 'boolean') {
+                    if (field.input.checked) {
+                        out[key] = true;
+                    }
                 } else {
                     const text = field.input.value.trim();
                     if (text !== '') {
@@ -138,8 +165,13 @@ export function buildFilters(host, declared, onChange) {
 
         clear() {
             for (const field of fields.values()) {
-                field.input.value = '';
+                if (field.spec.type === 'boolean') {
+                    field.input.checked = false;
+                } else {
+                    field.input.value = '';
+                }
                 field.tags.clear();
+                renderSuggestions(field, vocabulary);
                 if (field.chips) {
                     renderChips(field, onChange);
                 }
@@ -157,12 +189,59 @@ export function buildFilters(host, declared, onChange) {
                     return false;
                 }
                 renderChips(field, onChange);
+            } else if (field.spec.type === 'boolean') {
+                field.input.checked = value === true;
             } else {
                 field.input.value = String(value);
             }
             return true;
         },
+
+        setVocabulary(tags) {
+            vocabulary = Array.isArray(tags) ? tags : [];
+            for (const field of fields.values()) {
+                renderSuggestions(field, vocabulary);
+            }
+        },
     };
+}
+
+const SUGGESTION_LIMIT = 20;
+
+function renderSuggestions(field, vocabulary) {
+    if (!field.datalist) {
+        return;
+    }
+    field.datalist.replaceChildren();
+
+    const typed = field.input.value.split(',').pop().trim().toLowerCase();
+    if (typed === '') {
+        return;
+    }
+    const underscored = typed.replace(/\s+/g, '_');
+
+    const matches = [];
+    for (const tag of vocabulary) {
+        const name = tag && typeof tag === 'object' ? tag.n : null;
+        const category = tag && typeof tag === 'object' ? tag.c : null;
+        const count = tag && typeof tag === 'object' ? tag.k : null;
+        if (typeof name !== 'string' || name === '' || typeof count !== 'number' || !Number.isFinite(count)) {
+            continue;
+        }
+        const candidate = name.toLowerCase();
+        if (!candidate.includes(typed) && !candidate.includes(underscored)) {
+            continue;
+        }
+        matches.push({ name, category: typeof category === 'string' ? category : '', count: Math.floor(count) });
+    }
+
+    matches.sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+    for (const match of matches.slice(0, SUGGESTION_LIMIT)) {
+        const option = document.createElement('option');
+        option.value = match.name;
+        option.label = match.category === '' ? String(match.count) : `${match.category} · ${match.count}`;
+        field.datalist.append(option);
+    }
 }
 
 function splitTags(raw) {

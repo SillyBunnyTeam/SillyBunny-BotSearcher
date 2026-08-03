@@ -11,7 +11,7 @@
  */
 
 /** Bumped only when the request/response contract changes incompatibly. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /**
  * How many sources one search may fan out to.
@@ -110,7 +110,7 @@ export const IMAGE_MODES = Object.freeze(['proxy', 'direct', 'off']);
  * follows. A source that declares nothing shows nothing, rather than showing a
  * control that quietly does nothing.
  */
-export const FILTER_TYPES = Object.freeze(['tags', 'text', 'number']);
+export const FILTER_TYPES = Object.freeze(['tags', 'text', 'number', 'boolean', 'date']);
 
 /** Caps applied to filter values server-side, before any adapter sees them. */
 export const FILTER_LIMITS = Object.freeze({

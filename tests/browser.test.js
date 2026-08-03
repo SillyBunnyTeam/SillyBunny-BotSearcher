@@ -128,7 +128,7 @@ test('a setting note sits beside its label, not inside it', async () => {
         window: dom.window,
         requestAnimationFrame: (callback) => setTimeout(callback, 0),
     });
-    globalThis.fetch = async () => jsonResponse({ protocol: 3, version: '0.2.0', sources: [] });
+    globalThis.fetch = async () => jsonResponse({ protocol: 4, version: '0.2.0', sources: [] });
     const settingsStore = {};
     globalThis.SillyTavern = {
         getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
@@ -192,7 +192,7 @@ test('a source that fails stays in the picker and offers a reload', async () => 
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 3,
+                protocol: 4,
                 version: '0.2.0',
                 sources: [
                     // Reported down before the dialog even opens. It must still
@@ -332,7 +332,7 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 3,
+                protocol: 4,
                 version: '0.2.0',
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, hideAiToggle: true, detail: true } },

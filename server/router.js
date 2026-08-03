@@ -43,6 +43,7 @@ import {
     REROUTABLE_FAILURES,
 } from './health.js';
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
+import { getVocabulary } from './vocabulary.js';
 
 /** A character card is text plus one image; well past anything legitimate. */
 const MAX_CARD_BYTES = 8 * 1024 * 1024;
@@ -90,6 +91,32 @@ export function createRouter(router, state) {
         }
         reset(resolved.adapter.id);
         response.json({ ok: true, state: stateOf(resolved.adapter.id) });
+    }));
+
+    router.post('/tags', jsonGuard, wrap(async (request, response) => {
+        const resolved = resolveSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const { adapter } = resolved;
+
+        const limited = await consume('search', callerKey(request));
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+
+        if (adapter.capabilities.tagVocabulary !== true || typeof adapter.fetchVocabulary !== 'function') {
+            response.json({ tags: [] });
+            return;
+        }
+
+        const tags = await getVocabulary(
+            adapter,
+            () => callAdapter(adapter, () => adapter.fetchVocabulary(contextFor(adapter))),
+        );
+        response.json({ tags });
     }));
 
     /**

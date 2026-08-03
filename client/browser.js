@@ -27,6 +27,7 @@ import {
     unreachableReason,
 } from './copy.js';
 import { buildFilters } from './filters.js';
+import { createVocabularyLoader } from './vocabulary.js';
 import { PROTOCOL_VERSION, VERSION, MAX_FANOUT } from '../shared/schema.js';
 
 /**
@@ -205,6 +206,8 @@ function wireBrowser(popup, health, options) {
         cache: createResultCache(),
         /** Pending as-you-type search. */
         typingTimer: null,
+        /** Tag names are fetched once per source for this dialog only. */
+        vocabulary: createVocabularyLoader(),
     };
 
     // "All sources" is a synthetic entry, not a source. It is only worth
@@ -354,6 +357,7 @@ function wireBrowser(popup, health, options) {
         state.filters = declared.length > 0
             ? buildFilters(dom.filterFields, declared, onFilterChange)
             : null;
+        void loadVocabulary(state.source, state.filters);
         // The panel itself always stays reachable: it also holds the content
         // controls, which apply to every source. Only the per-source fields go,
         // and "Clear filters" with them, since it would have nothing to clear.
@@ -362,6 +366,18 @@ function wireBrowser(popup, health, options) {
         }
         dom.filterActions.hidden = declared.length === 0;
         updateFilterBadge();
+    }
+
+    async function loadVocabulary(source, filters) {
+        if (!filters || source.capabilities?.tagVocabulary !== true) {
+            return;
+        }
+        const tags = await state.vocabulary.load(source);
+        // A slow response for the previous source must not populate the newly
+        // rebuilt controls, even if both sources happen to use tag filters.
+        if (!state.disposed && state.source === source && state.filters === filters) {
+            filters.setVocabulary(tags);
+        }
     }
 
     /** The real sources behind the current selection, or [] when it is one source. */
@@ -732,6 +748,7 @@ function wireBrowser(popup, health, options) {
         // Cached pages hold listing text from adult catalogues. They live as long
         // as the dialog and no longer.
         state.cache.clear();
+        state.vocabulary.clear();
     };
 }
 
