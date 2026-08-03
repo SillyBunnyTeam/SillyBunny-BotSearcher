@@ -45,6 +45,10 @@ Open the character import screen and select **Find cards online**, or use the sl
 
 The browser immediately loads the saved or default source's catalog. Enter a search term to narrow it, then open a result to review its details. Each source remembers its own sort choice.
 
+**All sources** in the source list searches several sites at once, up to four, and interleaves the results one from each site in turn. Results are not ranked against each other: no source returns a relevance score, and the counts they do return mean different things, so any merged ordering would be invented. Each card shows which site it came from, and a card that exists on more than one of them is shown once, from whichever site is listed first.
+
+Sort and filter controls are hidden while searching all sources. The sites share no sort vocabulary, and a filter only some of them support would silently narrow part of the list. Each source keeps the sort it was last given individually. If a site does not answer, it is named below the search bar and the other sites' results are still shown.
+
 **Filters** opens the additional controls the selected source supports. These vary by source, because they are the filters that source's own API accepts; a source that offers none shows no Filters button rather than controls that would be ignored. Filters are cleared when you change source, since the same tag rarely means the same thing on two different sites.
 
 | Source | Filters |

@@ -31,7 +31,7 @@ export class UpstreamError extends Error {
  * distinct, actionable message. Anything else collapses to 'upstream_failed' so
  * an internal detail cannot leak through an error string.
  */
-const SAFE_UPSTREAM_CODES = new Set(['timeout', 'too_large', 'http_error', 'bad_json', 'unsafe_json']);
+export const SAFE_UPSTREAM_CODES = new Set(['timeout', 'too_large', 'http_error', 'bad_json', 'unsafe_json']);
 
 /**
  * Wraps an async route handler so nothing can escape as an unhandled rejection.

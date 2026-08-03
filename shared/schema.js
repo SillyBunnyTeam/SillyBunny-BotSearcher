@@ -11,7 +11,17 @@
  */
 
 /** Bumped only when the request/response contract changes incompatibly. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+
+/**
+ * How many sources one search may fan out to.
+ *
+ * Each source in a search is another upstream request, and the reference
+ * deployment is a single-core box sharing its memory with several other apps.
+ * Four is enough to be worth doing and few enough that a merged search costs
+ * about what a single-source one did.
+ */
+export const MAX_FANOUT = 4;
 
 /** Release version. `tests/invariants.test.js` asserts this matches package.json and manifest.json. */
 export const VERSION = '0.2.0';

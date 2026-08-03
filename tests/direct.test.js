@@ -20,6 +20,8 @@ import { createRouter } from '../server/router.js';
 import { chub } from '../server/sources/chub.js';
 import { SOURCES } from '../server/registry.js';
 import { markFailure, clearAll } from '../server/health.js';
+import { mintCursor, mintToken } from '../server/refs.js';
+import { MAX_FANOUT } from '../shared/schema.js';
 import { readFileSync } from 'node:fs';
 
 function fixture(name) {
@@ -226,6 +228,97 @@ test('only sources whose CORS was actually checked declare the browser path', ()
         assert.equal(typeof adapter.parseSearch, 'function', `${id}: corsDirect needs parseSearch`);
         assert.equal(id, 'chub', `${id}: verify its CORS headers and update this test before enabling`);
     }
+});
+
+test('a merged search reports a blocked source without losing the others', async (t) => {
+    clearAll();
+    const app = mount();
+    t.after(async () => {
+        await app.close();
+        clearAll();
+    });
+
+    // Every source in this list is down, so nothing goes to the network — but
+    // the shape of the answer is the point: partial failures are reported
+    // alongside results rather than replacing them.
+    block('chub');
+    block('botbooru');
+
+    const { status, body } = await app.post('/search', {
+        sources: ['chub', 'botbooru'],
+        query: 'elf',
+        limit: 12,
+    });
+
+    assert.equal(status, 200, 'a failed source must not fail the query');
+    assert.deepEqual(body.items, []);
+    assert.deepEqual(
+        body.partial.map((entry) => entry.source).sort(),
+        ['botbooru', 'chub'],
+    );
+    assert.ok(body.partial.every((entry) => entry.error === 'source_down'));
+    assert.equal(body.nextCursor, null, 'no source offered a next page');
+});
+
+test('a merged search caps its fan-out and ignores unknown sources', async (t) => {
+    clearAll();
+    const app = mount();
+    t.after(async () => {
+        await app.close();
+        clearAll();
+    });
+
+    for (const id of Object.keys(SOURCES)) {
+        block(id);
+    }
+
+    const { body } = await app.post('/search', {
+        // Seven real sources, one that does not exist, and a duplicate.
+        sources: [...Object.keys(SOURCES), 'chub', 'not-a-source'],
+        limit: 12,
+    });
+
+    assert.equal(body.partial.length, MAX_FANOUT, 'the fan-out must be bounded on a small box');
+    assert.ok(body.partial.every((entry) => SOURCES[entry.source]), 'an unknown id must not reach an adapter');
+});
+
+test('a merged cursor cannot be replayed as a single-source one', async (t) => {
+    clearAll();
+    const app = mount();
+    t.after(async () => {
+        await app.close();
+        clearAll();
+    });
+
+    // Minted for one source, offered to a merged search.
+    const single = mintCursor('chub', { p: 2 });
+    const asMulti = await app.post('/search', { sources: ['chub'], cursor: single });
+    assert.equal(asMulti.status, 400);
+    assert.equal(asMulti.body.error, 'bad_cursor');
+
+    // And a merged cursor offered to a single-source search.
+    const multi = mintToken('cursor:multi', { s: { chub: { p: 2 } } });
+    const asSingle = await app.post('/search', { source: 'chub', cursor: multi });
+    assert.equal(asSingle.status, 400);
+    assert.equal(asSingle.body.error, 'bad_cursor');
+});
+
+test('an exhausted merged search stops rather than restarting its sources', async (t) => {
+    clearAll();
+    const app = mount();
+    t.after(async () => {
+        await app.close();
+        clearAll();
+    });
+
+    // The cursor names only chub, so botbooru is finished. Asking it again would
+    // hand back its first page a second time.
+    const cursor = mintToken('cursor:multi', { s: { chub: { p: 2 } } });
+    const { body } = await app.post('/search', { sources: ['botbooru'], cursor, limit: 12 });
+
+    assert.deepEqual(body.items, []);
+    assert.equal(body.nextCursor, null);
+    assert.deepEqual(body.partial, [], 'a finished source is not a failure');
 });
 
 test('the browser path can be asked for, but only for a source that has it', async (t) => {

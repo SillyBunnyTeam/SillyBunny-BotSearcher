@@ -26,7 +26,42 @@ import {
     unreachableReason,
 } from './copy.js';
 import { buildFilters } from './filters.js';
-import { PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
+import { PROTOCOL_VERSION, VERSION, MAX_FANOUT } from '../shared/schema.js';
+
+/**
+ * The value of the synthetic "All sources" entry in the picker.
+ *
+ * Not a source id: no adapter answers to it, and the server is never sent it.
+ * A merged search sends the real ids in `sources`.
+ */
+const ALL_SOURCES = '__all__';
+
+/**
+ * Builds the pseudo-source that stands for a merged search.
+ *
+ * Its capabilities are the INTERSECTION of the sources behind it, not the union.
+ * A sort or a filter that only some of them honour would quietly apply to part
+ * of the list, which is exactly the kind of silent half-filtering the per-source
+ * controls exist to avoid.
+ */
+function mergedSourceEntry(usable) {
+    const members = usable.slice(0, MAX_FANOUT);
+    return {
+        id: ALL_SOURCES,
+        label: 'All sources',
+        merged: members,
+        clientHosts: [...new Set(members.flatMap((entry) => entry.clientHosts ?? []))],
+        capabilities: {
+            search: true,
+            paging: 'cursor',
+            sorts: [],
+            sfwToggle: members.every((entry) => entry.capabilities?.sfwToggle === true),
+            hideAiToggle: false,
+            detail: true,
+            filters: [],
+        },
+    };
+}
 
 let openingPromise = null;
 
@@ -116,6 +151,7 @@ function wireBrowser(popup, health, options) {
         filtersClear: root.querySelector('#sbbs_filters_clear'),
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
+        partial: root.querySelector('#sbbs_partial'),
         body: root.querySelector('.sbbs-body'),
         grid: root.querySelector('#sbbs_grid'),
         more: root.querySelector('#sbbs_more'),
@@ -159,6 +195,14 @@ function wireBrowser(popup, health, options) {
         filters: null,
     };
 
+    // "All sources" is a synthetic entry, not a source. It is only worth
+    // offering when there is more than one thing to merge.
+    if (usable.length > 1) {
+        const option = document.createElement('option');
+        option.value = ALL_SOURCES;
+        setText(option, `All sources (${Math.min(usable.length, MAX_FANOUT)})`);
+        dom.source.append(option);
+    }
     for (const source of usable) {
         const option = document.createElement('option');
         option.value = source.id;
@@ -178,7 +222,9 @@ function wireBrowser(popup, health, options) {
     // ---- events ----
 
     dom.source.addEventListener('change', () => {
-        const next = usable.find((entry) => entry.id === dom.source.value);
+        const next = dom.source.value === ALL_SOURCES
+            ? mergedSourceEntry(usable)
+            : usable.find((entry) => entry.id === dom.source.value);
         if (!next) {
             return;
         }
@@ -242,12 +288,17 @@ function wireBrowser(popup, health, options) {
         if (sorts.includes(savedSort)) {
             dom.sort.value = savedSort;
         }
+        // Hidden for a merged search too: the sources share no sort vocabulary,
+        // so one control could not set the same thing on all of them. Each keeps
+        // the sort it was last given on its own.
         dom.sort.hidden = sorts.length <= 1;
 
         // Never imply filtering that the source cannot actually do.
         const canFilter = state.source.capabilities?.sfwToggle === true;
         dom.sfw.disabled = !canFilter;
-        setText(dom.sfwNote, canFilter ? '' : `${state.source.label} does not provide a reliable SFW filter.`);
+        setText(dom.sfwNote, canFilter ? '' : mergedSources().length > 0
+            ? 'Some of these sources do not provide a reliable SFW filter.'
+            : `${state.source.label} does not provide a reliable SFW filter.`);
         if (canFilter) {
             dom.sfw.removeAttribute('aria-describedby');
         } else {
@@ -270,6 +321,16 @@ function wireBrowser(popup, health, options) {
             dom.filterFields.replaceChildren();
         }
         updateFilterBadge();
+    }
+
+    /** The real sources behind the current selection, or [] when it is one source. */
+    function mergedSources() {
+        return Array.isArray(state.source.merged) ? state.source.merged : [];
+    }
+
+    /** Resolves a result's own source, which in a merged search is not the selection. */
+    function sourceOf(item) {
+        return usable.find((entry) => entry.id === item?.source) ?? state.source;
     }
 
     function onFilterChange() {
@@ -318,21 +379,38 @@ function wireBrowser(popup, health, options) {
         }
         dom.more.hidden = true;
 
+        const members = mergedSources();
+        const body = {
+            query,
+            limit: getSettings().resultsPerPage,
+            cursor,
+            filters: {
+                sfwOnly: dom.sfw.checked,
+                hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
+                ...filters,
+            },
+        };
+
+        if (members.length > 0) {
+            body.sources = members.map((entry) => entry.id);
+            // Each source keeps its own saved sort; there is no vocabulary they
+            // share, so there is nothing sensible for one control to set.
+            const saved = getSettings().sortBySource;
+            body.sorts = Object.fromEntries(members.map((entry) => [
+                entry.id,
+                saved[entry.id] ?? entry.capabilities?.sorts?.[0],
+            ]));
+        } else {
+            body.source = source.id;
+            body.sort = sort;
+        }
+
         try {
-            const result = await postRouted('/search', {
-                source: source.id,
-                query,
-                sort,
-                limit: getSettings().resultsPerPage,
-                cursor,
-                filters: {
-                    sfwOnly: dom.sfw.checked,
-                    hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
-                    ...filters,
-                },
-            }, source, {
+            const result = await postRouted('/search', body, source, {
                 signal: controller.signal,
-                allowDirect: getSettings().allowDirectRequests,
+                // A merged search has no single source to reroute, and the
+                // per-source failures it reports are handled below instead.
+                allowDirect: members.length === 0 && getSettings().allowDirectRequests,
                 onDirect: (reason) => noteDirectRouting(source, reason),
             });
 
@@ -344,7 +422,9 @@ function wireBrowser(popup, health, options) {
 
             const items = Array.isArray(result.items) ? result.items : [];
             const fresh = items.filter((item) => {
-                const key = `${source.id}:${String(item?.id ?? '')}`;
+                // Keyed by the item's OWN source, which in a merged search is
+                // not the selection.
+                const key = `${item?.source ?? source.id}:${String(item?.id ?? '')}`;
                 if (!item?.id || state.itemKeys.has(key)) {
                     return false;
                 }
@@ -363,6 +443,11 @@ function wireBrowser(popup, health, options) {
             } else {
                 setText(dom.state, '');
             }
+
+            // Which sources in a merged search did not answer. Stated rather
+            // than hidden: a short list of results has a reason, and silently
+            // dropping a site would look like it simply had nothing.
+            showPartialFailures(Array.isArray(result.partial) ? result.partial : []);
 
             setText(dom.count, formatResultCount(state.items.length, result.total));
             dom.more.hidden = state.nextCursor === null;
@@ -390,6 +475,24 @@ function wireBrowser(popup, health, options) {
                 dom.body?.setAttribute('aria-busy', 'false');
                 dom.more.disabled = false;
             }
+        }
+    }
+
+    /** Names the sources a merged search could not reach, or clears the notice. */
+    function showPartialFailures(partial) {
+        dom.partial.replaceChildren();
+        if (partial.length === 0) {
+            dom.partial.hidden = true;
+            return;
+        }
+
+        dom.partial.hidden = false;
+        for (const entry of partial) {
+            const label = usable.find((item) => item.id === entry?.source)?.label ?? entry?.source;
+            setText(
+                dom.partial.appendChild(el('div', 'sbbs-partial-line')),
+                searchErrorMessage({ code: entry?.error }, label),
+            );
         }
     }
 
@@ -486,10 +589,14 @@ function wireBrowser(popup, health, options) {
         void runSearch({ append: false });
     }
 
-    function appendCards(items, source) {
+    function appendCards(items, selection) {
         const settingsNow = getSettings();
+        const merged = mergedSources().length > 0;
         for (const item of items) {
-            const { card, open, tags } = buildCard(item, source, settingsNow);
+            // In a merged search each card belongs to its own source: that is
+            // what supplies its image hosts, its filters and its importer.
+            const source = merged ? sourceOf(item) : selection;
+            const { card, open, tags } = buildCard(item, source, settingsNow, merged);
             records.set(open, { item, source });
 
             // Clicking a tag narrows the search instead of opening the card.
@@ -586,9 +693,10 @@ function wireBrowser(popup, health, options) {
  * @param {any} item
  * @param {{ label: string, clientHosts: string[], capabilities?: any }} source
  * @param {ReturnType<typeof getSettings>} settings
+ * @param {boolean} showSource whether results came from more than one site
  * @returns {{ card: HTMLElement, open: HTMLButtonElement, tags: {button: HTMLElement, tag: string}[] }}
  */
-function buildCard(item, source, settings) {
+function buildCard(item, source, settings, showSource = false) {
     const card = el('div', 'sbbs-card');
 
     const open = el('button', 'sbbs-card-open');
@@ -605,6 +713,11 @@ function buildCard(item, source, settings) {
     const rating = ratingOf(item);
     const badge = el('span', `sbbs-rating sbbs-rating-${rating.value}`, rating.label);
     figure.append(badge);
+
+    // Which site a result came from only matters when they are mixed together.
+    if (showSource) {
+        figure.append(el('span', 'sbbs-card-source', source.label ?? item.source ?? ''));
+    }
 
     const src = thumbSrc(item, source, 'grid', settings.imageMode);
     if (src) {
@@ -650,6 +763,9 @@ function buildCard(item, source, settings) {
     const parts = [item.name || 'Untitled'];
     if (item.creator) {
         parts.push(`by ${item.creator}`);
+    }
+    if (showSource && source.label) {
+        parts.push(`on ${source.label}`);
     }
     parts.push(rating.accessible);
     open.setAttribute('aria-label', parts.join(', '));

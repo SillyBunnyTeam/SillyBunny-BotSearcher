@@ -21,13 +21,15 @@ import {
     THUMB_SIZES,
     MAX_INGEST_BYTES,
     INGEST_KINDS,
+    MAX_FANOUT,
 } from '../shared/schema.js';
 import { describeSources, getSource } from './registry.js';
-import { wrap, jsonGuard, jsonGuardWithLimit, fail } from './guards.js';
+import { wrap, jsonGuard, jsonGuardWithLimit, fail, UpstreamError, SAFE_UPSTREAM_CODES } from './guards.js';
 import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey, readFilters } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, callerKey } from './limits.js';
-import { mintCursor, verifyCursor, verifyRef } from './refs.js';
+import { mintCursor, verifyCursor, verifyRef, mintToken, verifyToken } from './refs.js';
+import { interleave, dedupe, sharePageBudget } from './merge.js';
 import { BadCursorError } from './paging.js';
 import { detectImageType } from './imagetype.js';
 import {
@@ -56,6 +58,14 @@ const DEFAULT_MAX_THUMB_BYTES = 512 * 1024;
 
 /** Ceiling no adapter may exceed, so one source cannot dominate a small box. */
 const HARD_MAX_THUMB_BYTES = 6 * 1024 * 1024;
+
+/**
+ * Signing scope for a merged-search cursor.
+ *
+ * Distinct from the per-source `cursor:<id>` scope so a single-source cursor can
+ * never be replayed as a merged one, or the reverse.
+ */
+const MULTI_CURSOR_SCOPE = 'cursor:multi';
 
 /**
  * @param {import('express').Router} router
@@ -166,6 +176,18 @@ export function createRouter(router, state) {
     }));
 
     router.post('/search', jsonGuard, wrap(async (request, response) => {
+        // A list means a merged search. One source keeps the original path,
+        // including the browser-direct fallback, which cannot apply to a merge.
+        const many = readSourceIds(request.body);
+        if (many !== null) {
+            if (many.length === 0) {
+                fail(response, 400, 'bad_source');
+                return;
+            }
+            await searchMany(request, response, many);
+            return;
+        }
+
         const resolved = resolveSource(request, response);
         if (!resolved) {
             return;
@@ -529,6 +551,176 @@ function respondWithDirectPlan(response, adapter, kind, args, id) {
         url: String(url),
         reason: reasonOf(adapter.id) ?? 'forbidden',
     });
+}
+
+/**
+ * Reads the `sources` list for a merged search, or null when this is an
+ * ordinary single-source request.
+ *
+ * Unknown ids are dropped rather than refused: sources come and go between
+ * releases, and one stale entry in a saved selection should narrow the search,
+ * not break it.
+ *
+ * @returns {string[] | null}
+ */
+function readSourceIds(body) {
+    const raw = own(body, 'sources');
+    if (!Array.isArray(raw)) {
+        return null;
+    }
+
+    const seen = new Set();
+    for (const id of raw) {
+        if (typeof id !== 'string' || id === '' || id.length > 64 || seen.has(id)) {
+            continue;
+        }
+        if (getSource(id)) {
+            seen.add(id);
+        }
+        if (seen.size >= MAX_FANOUT) {
+            break;
+        }
+    }
+
+    return [...seen];
+}
+
+/**
+ * Runs one search across several sources and merges the results.
+ *
+ * Every source is gated, rate-limited and breaker-checked on its own, and a
+ * source that fails is reported in `partial` rather than failing the whole
+ * search. One site being down should cost the user that site's results, not
+ * their query.
+ */
+async function searchMany(request, response, ids) {
+    const body = request.body;
+    const rawCursor = own(body, 'cursor');
+    /** @type {Record<string, unknown> | null} */
+    let carried = null;
+
+    if (rawCursor !== undefined && rawCursor !== null) {
+        const parsed = verifyToken(MULTI_CURSOR_SCOPE, rawCursor);
+        const perSource = own(parsed, 's');
+        if (!isPlainObject(perSource)) {
+            fail(response, 400, 'bad_cursor');
+            return;
+        }
+        carried = perSource;
+        // Only sources that offered a next page stay in the search. The rest are
+        // exhausted, and asking them again would repeat their first page.
+        ids = ids.filter((id) => own(perSource, id) !== undefined);
+        if (ids.length === 0) {
+            response.json({ total: null, nextCursor: null, items: [], partial: [] });
+            return;
+        }
+    }
+
+    const limit = clampInt(own(body, 'limit'), 1, FIELD_LIMITS.itemsPerPage, 24);
+    const shares = sharePageBudget(limit, ids.length);
+    const sorts = isPlainObject(own(body, 'sorts')) ? own(body, 'sorts') : {};
+    const caller = callerKey(request);
+
+    // One search costs one search, however many sources it touches. The
+    // per-source limiters below still keep any single site from being hammered.
+    const perUser = await consume('search', caller);
+    if (!perUser.allowed) {
+        response.set('Retry-After', String(perUser.retryAfterSeconds));
+        fail(response, 429, 'rate_limited', { retryAfter: perUser.retryAfterSeconds });
+        return;
+    }
+
+    const settled = await Promise.all(ids.map(async (id, index) => {
+        const adapter = getSource(id);
+        const args = {
+            ...buildSearchArgs(adapter, body),
+            limit: shares[index],
+            // Each source sorts by its own vocabulary; there is no shared one.
+            sort: pick(own(sorts, id), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
+            cursor: carried ? (own(carried, id) ?? null) : null,
+        };
+
+        const gate = await gateSource(caller, id);
+        if (!gate.ok) {
+            return { id, error: gate.code };
+        }
+
+        try {
+            const result = await callAdapter(adapter, () => adapter.search(contextFor(adapter), args));
+            return { id, result };
+        } catch (error) {
+            return { id, error: partialErrorCode(error) };
+        } finally {
+            gate.release();
+        }
+    }));
+
+    const groups = [];
+    const partial = [];
+    const nextBySource = Object.create(null);
+    let total = null;
+
+    for (const outcome of settled) {
+        if (outcome.error) {
+            partial.push({ source: outcome.id, error: outcome.error });
+            continue;
+        }
+        const items = Array.isArray(outcome.result?.items) ? outcome.result.items : [];
+        groups.push({ source: outcome.id, items });
+
+        if (outcome.result?.next && typeof outcome.result.next === 'object') {
+            nextBySource[outcome.id] = outcome.result.next;
+        }
+        // A sum across sources counts mirrored cards more than once, so it is
+        // reported as what it is: how many the sources between them claim.
+        if (typeof outcome.result?.total === 'number' && Number.isFinite(outcome.result.total)) {
+            total = (total ?? 0) + Math.max(0, Math.floor(outcome.result.total));
+        }
+    }
+
+    // Interleave first, then dedupe, so the surviving copy of a mirrored card is
+    // the one from the source the user listed first.
+    const items = dedupe(interleave(groups, limit));
+    const remaining = Object.keys(nextBySource);
+
+    response.json({
+        total,
+        nextCursor: remaining.length > 0
+            ? mintToken(MULTI_CURSOR_SCOPE, { s: nextBySource })
+            : null,
+        items,
+        partial,
+    });
+}
+
+/** Per-source gate for a merged search: the same checks, reported not thrown. */
+async function gateSource(caller, sourceId) {
+    if (isDown(sourceId)) {
+        return { ok: false, code: 'source_down' };
+    }
+
+    const perSource = await consume('sourceGlobal', sourceId);
+    if (!perSource.allowed) {
+        return { ok: false, code: 'source_busy' };
+    }
+
+    const release = await acquire('source', sourceId);
+    if (!release) {
+        return { ok: false, code: 'source_busy' };
+    }
+
+    return { ok: true, release };
+}
+
+/** The classification a partial failure may carry, with details stripped. */
+function partialErrorCode(error) {
+    if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
+        return 'bad_cursor';
+    }
+    if (error instanceof UpstreamError) {
+        return SAFE_UPSTREAM_CODES.has(error.code) ? error.code : 'upstream_failed';
+    }
+    return 'upstream_failed';
 }
 
 /**

@@ -91,7 +91,7 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 2,
+                protocol: 3,
                 version: '0.2.0',
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, hideAiToggle: true, detail: true } },
@@ -265,6 +265,40 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
             () => /No cards on Chub match these filters/.test(popup.content.textContent),
             'an empty filtered result must say the filters are why',
         );
+
+        // ---- searching every source at once ----
+        source.value = '__all__';
+        source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(() => searches.length === 7, 'the merged search did not start');
+
+        const merged = searches[6].body;
+        assert.deepEqual(merged.sources, ['botbooru', 'chub'], 'a merged search names its sources');
+        assert.equal(merged.source, undefined, 'and does not also name a single one');
+        // No shared sort vocabulary, so each source keeps its own.
+        assert.deepEqual(Object.keys(merged.sorts).sort(), ['botbooru', 'chub']);
+        assert.equal(popup.content.querySelector('#sbbs_sort').hidden, true, 'one sort control cannot drive both');
+        // Chub filters tags and Botbooru does not; offering the control would
+        // filter half the list silently.
+        assert.equal(popup.content.querySelector('#sbbs_filters_toggle').hidden, true);
+
+        searches[6].resolve(jsonResponse({
+            total: 3,
+            nextCursor: null,
+            items: [
+                card('botbooru', 'b1', 'From Botbooru'),
+                card('chub', 'author/c1', 'From Chub'),
+            ],
+            partial: [{ source: 'chub', error: 'timeout' }],
+        }));
+
+        await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 2, 'merged results did not render');
+        // Which site each result came from only matters once they are mixed.
+        assert.deepEqual(
+            [...popup.content.querySelectorAll('.sbbs-card-source')].map((node) => node.textContent),
+            ['Botbooru', 'Chub'],
+        );
+        // A source that did not answer is named, not silently dropped.
+        assert.match(popup.content.querySelector('#sbbs_partial').textContent, /Chub did not respond in time/);
 
         popup.complete();
         await firstOpen;
