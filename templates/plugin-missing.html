@@ -6,8 +6,11 @@
     <div class="sbbs-install-instructions">
         <ol class="sbbs-install-steps">
             <li>
-                <p>From your SillyBunny folder, install the server plugin:</p>
-                <pre class="sbbs-install-code"><code>bun plugins.js install https://github.com/platberlitz/SillyBunny-BotSearcher</code></pre>
+                <p>From your SillyBunny folder, use Git Bash (including on Windows) to install the matching server-plugin release and its production dependencies:</p>
+                <pre class="sbbs-install-code"><code>set -eu
+RELEASE=<span class="sbbs-release-tag">v0.3.0</span>
+git clone --branch "$RELEASE" --depth 1 https://github.com/platberlitz/SillyBunny-BotSearcher.git plugins/SillyBunny-BotSearcher
+npm --prefix plugins/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts --no-audit --no-fund</code></pre>
             </li>
             <li>
                 <p>Open <code>config.yaml</code> and set these values:</p>
@@ -19,10 +22,45 @@ enableServerPluginsAutoUpdate: false</code></pre>
             </li>
         </ol>
 
-        <p class="sbbs-install-note"><code>enableServerPluginsAutoUpdate: false</code> keeps server-plugin updates manual so you can review changes before installing them.</p>
+        <p class="sbbs-install-note"><code>enableServerPluginsAutoUpdate: false</code> prevents SillyBunny's mutable branch updater from replacing this pinned release.</p>
     </div>
 
     <p class="sbbs-install-guidance" hidden></p>
 
-    <button id="sbbs_recheck" class="menu_button" type="button">Check again</button>
+    <div class="sbbs-update-instructions" hidden>
+        <p>Manual fallback from your SillyBunny folder. Stop SillyBunny completely, then run the complete block in Git Bash (including on Windows). It stops unless this directory is the checkout root, the official remote matches, tracked status is clean, and the installed stable version is older than <span class="sbbs-release-tag">v0.3.0</span>:</p>
+        <pre class="sbbs-install-code"><code>set -eu
+PLUGIN=plugins/SillyBunny-BotSearcher
+REPO=https://github.com/platberlitz/SillyBunny-BotSearcher.git
+RELEASE=<span class="sbbs-release-tag">v0.3.0</span>
+test ! -L "$PLUGIN"
+PLUGIN_ROOT="$(cd "$PLUGIN" &amp;&amp; pwd -P)"
+GIT_ROOT="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel)"
+GIT_ROOT="$(cd "$GIT_ROOT" &amp;&amp; pwd -P)"
+test "$GIT_ROOT" = "$PLUGIN_ROOT"
+REMOTE="$(git -C "$PLUGIN_ROOT" remote get-url origin)"
+REPO_NO_SUFFIX="${REPO%.git}"
+test "$REMOTE" = "$REPO" || test "$REMOTE" = "$REPO_NO_SUFFIX"
+STATUS="$(git -C "$PLUGIN_ROOT" status --porcelain --untracked-files=no)"
+test -z "$STATUS"
+CURRENT="$(node -e 'process.stdout.write(require(process.argv[1] + "/package.json").version)' "$PLUGIN_ROOT")"
+node -e 'const p=v=&gt;/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(v)?v.split(".").map(Number):null;const [a,b]=process.argv.slice(1).map(p);let c=0;if(a&amp;&amp;b){for(let i=0;i&lt;3&amp;&amp;!c;i++)c=Math.sign(a[i]-b[i]);}if(!a||!b||c&gt;=0){console.error("Installed version is not a stable older release; refusing replacement.");process.exit(1);}' "$CURRENT" "${RELEASE#v}"
+OLD_COMMIT="$(git -C "$PLUGIN_ROOT" rev-parse HEAD)"
+rollback() { git -C "$PLUGIN_ROOT" checkout --detach "$OLD_COMMIT"; npm --prefix "$PLUGIN_ROOT" ci --omit=dev --ignore-scripts --no-audit --no-fund; }
+trap rollback ERR
+git -C "$PLUGIN_ROOT" fetch --depth 1 "$REPO" "refs/tags/$RELEASE"
+git -C "$PLUGIN_ROOT" checkout --detach FETCH_HEAD
+TARGET="$(node -e 'process.stdout.write(require(process.argv[1] + "/package.json").version)' "$PLUGIN_ROOT")"
+test "$TARGET" = "${RELEASE#v}"
+npm --prefix "$PLUGIN_ROOT" ci --omit=dev --ignore-scripts --no-audit --no-fund
+trap - ERR</code></pre>
+        <p class="sbbs-install-note">Restart SillyBunny after the commands finish, then select <strong>Check again</strong>.</p>
+    </div>
+
+    <p class="sbbs-install-update-status" role="status" aria-live="polite" hidden></p>
+
+    <div class="sbbs-install-actions">
+        <button id="sbbs_update_plugin" class="menu_button" type="button" hidden>Update server plugin and restart</button>
+        <button id="sbbs_recheck" class="menu_button" type="button">Check again</button>
+    </div>
 </div>

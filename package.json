@@ -1,6 +1,6 @@
 {
     "name": "sillybunny-botsearcher",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Server plugin required by the SillyBunny BotSearcher frontend extension.",
     "type": "module",
     "main": "server/index.js",
@@ -24,6 +24,14 @@
     "repository": {
         "type": "git",
         "url": "https://github.com/platberlitz/SillyBunny-BotSearcher.git"
+    },
+    "sillybunny": {
+        "serverPlugin": {
+            "id": "sillybunny-botsearcher",
+            "preservePaths": [
+                ".cursor-key"
+            ]
+        }
     },
     "engines": {
         "node": ">=22 <27"

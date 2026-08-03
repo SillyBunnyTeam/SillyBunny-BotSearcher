@@ -25,7 +25,7 @@ git -C data/default-user/extensions/SillyBunny-BotSearcher checkout "$RELEASE"
 
 git clone "$REPO" plugins/SillyBunny-BotSearcher
 git -C plugins/SillyBunny-BotSearcher checkout "$RELEASE"
-npm --prefix plugins/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts
+npm --prefix plugins/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts --no-audit --no-fund
 ```
 
 Adjust the frontend extension path for the SillyBunny user you run. If you use the extension manager or plugin installer initially, immediately check out the same verified release in both resulting directories and install the server package's production dependencies as above.
@@ -39,7 +39,49 @@ enableServerPluginsAutoUpdate: false
 
 Restart SillyBunny after installing or updating either component.
 
-`enableServerPluginsAutoUpdate` controls updates for server plugins. It defaults to `true`, which runs `git pull` for each plugin when SillyBunny starts. Setting it to `false` lets you review and apply server-plugin updates yourself. BotSearcher's manifest disables frontend auto-update too; update both checkouts transactionally to the same verified release.
+`enableServerPluginsAutoUpdate` controls the legacy mutable-branch updater. It defaults to `true`, which runs `git pull` for each unpinned plugin when SillyBunny starts. Setting it to `false` prevents that path from changing BotSearcher. BotSearcher's manifest disables frontend auto-update too; keep both checkouts on the same verified release.
+
+## Updating the server plugin
+
+BotSearcher shows the active server-plugin version in **Extensions > BotSearcher**. When the server is older than the frontend, a SillyBunny 1.7.0-or-newer build exposing `/api/server-admin/server-plugins/capabilities` offers **Update server plugin and restart** to administrators.
+
+After installing a SillyBunny release that introduces this updater, stop and start the top-level launcher or service once. An ordinary in-app restart cannot add the updater protocol to a supervisor process that was already running older host code.
+
+The host-owned updater accepts only BotSearcher's installed directory and the frontend's exact `vX.Y.Z` release. It verifies no tracked Git changes and a matching repository, installs locked production dependencies with lifecycle scripts disabled, preserves `.cursor-key`, replaces the plugin only after graceful shutdown, and keeps the old directory as a rollback backup. It will not install a missing plugin, downgrade a newer server, or replace symlinked development checkouts. Other untracked state is not copied into the active release; it remains in the rollback backup.
+
+Older SillyBunny versions and non-admin users can use the guided fallback below only when the installed server is a stable older release. Do not use it to override an automatic updater refusal. Resolve dirty, wrong-remote, downgrade, or externally managed installations through their owner or deployment process instead.
+
+Stop SillyBunny completely, then run the complete block in Git Bash (including on Windows). It stops unless the plugin directory is the canonical Git checkout root, the official remote matches with or without its `.git` suffix, tracked status is clean, and the installed version is a stable release older than `RELEASE`. If checkout or dependency installation fails, it attempts to restore the prior commit and dependencies:
+
+```bash
+set -eu
+PLUGIN=plugins/SillyBunny-BotSearcher
+RELEASE=v0.3.0
+REPO=https://github.com/platberlitz/SillyBunny-BotSearcher.git
+test ! -L "$PLUGIN"
+PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
+GIT_ROOT="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel)"
+GIT_ROOT="$(cd "$GIT_ROOT" && pwd -P)"
+test "$GIT_ROOT" = "$PLUGIN_ROOT"
+REMOTE="$(git -C "$PLUGIN_ROOT" remote get-url origin)"
+REPO_NO_SUFFIX="${REPO%.git}"
+test "$REMOTE" = "$REPO" || test "$REMOTE" = "$REPO_NO_SUFFIX"
+STATUS="$(git -C "$PLUGIN_ROOT" status --porcelain --untracked-files=no)"
+test -z "$STATUS"
+CURRENT="$(node -e 'process.stdout.write(require(process.argv[1] + "/package.json").version)' "$PLUGIN_ROOT")"
+node -e 'const p=v=>/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(v)?v.split(".").map(Number):null;const [a,b]=process.argv.slice(1).map(p);let c=0;if(a&&b){for(let i=0;i<3&&!c;i++)c=Math.sign(a[i]-b[i]);}if(!a||!b||c>=0){console.error("Installed version is not a stable older release; refusing replacement.");process.exit(1);}' "$CURRENT" "${RELEASE#v}"
+OLD_COMMIT="$(git -C "$PLUGIN_ROOT" rev-parse HEAD)"
+rollback() { git -C "$PLUGIN_ROOT" checkout --detach "$OLD_COMMIT"; npm --prefix "$PLUGIN_ROOT" ci --omit=dev --ignore-scripts --no-audit --no-fund; }
+trap rollback ERR
+git -C "$PLUGIN_ROOT" fetch --depth 1 "$REPO" "refs/tags/$RELEASE"
+git -C "$PLUGIN_ROOT" checkout --detach FETCH_HEAD
+TARGET="$(node -e 'process.stdout.write(require(process.argv[1] + "/package.json").version)' "$PLUGIN_ROOT")"
+test "$TARGET" = "${RELEASE#v}"
+npm --prefix "$PLUGIN_ROOT" ci --omit=dev --ignore-scripts --no-audit --no-fund
+trap - ERR
+```
+
+Restart SillyBunny after a manual update. Never substitute a branch name or `latest` for the matching immutable release tag.
 
 ### Deployment limits
 
@@ -204,7 +246,7 @@ Restart SillyBunny and check the server-plugin logs. If the plugin route exists 
 
 ### Frontend and server are incompatible
 
-The frontend extension and server plugin are one protocol release and must be updated together. Install both components from the same release, then restart SillyBunny; deploying either component by itself can make the browser refuse the mismatched server.
+The frontend extension and server plugin are one protocol release and must be updated together. If the server is older, use **Update server plugin and restart** or the displayed matching-tag commands. If the server is newer, update the frontend instead; BotSearcher does not offer server downgrades.
 
 ### A source is unavailable
 

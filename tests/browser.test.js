@@ -8,6 +8,7 @@ import { JSDOM } from 'jsdom';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const TEMPLATE = fs.readFileSync(path.join(ROOT, 'templates/browser.html'), 'utf8');
+const INSTALL_TEMPLATE = fs.readFileSync(path.join(ROOT, 'templates/plugin-missing.html'), 'utf8');
 
 function tick() {
     return new Promise((resolve) => setTimeout(resolve, 0));
@@ -152,7 +153,7 @@ test('a setting note sits beside its label, not inside it', async () => {
         window: dom.window,
         requestAnimationFrame: (callback) => setTimeout(callback, 0),
     });
-    globalThis.fetch = async () => jsonResponse({ protocol: 4, version: '0.2.0', sources: [] });
+    globalThis.fetch = async () => jsonResponse({ protocol: 4, version: '0.3.0', sources: [] });
     const settingsStore = {};
     globalThis.SillyTavern = {
         getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
@@ -189,6 +190,291 @@ test('a setting note sits beside its label, not inside it', async () => {
     }
 });
 
+test('settings offer an exact-release update when a compatible server is older', async () => {
+    const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        fetch: globalThis.fetch,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+    });
+    globalThis.fetch = async (url) => {
+        if (String(url).endsWith('/healthz')) {
+            return jsonResponse({ protocol: 4, version: '0.2.0', sources: [] });
+        }
+        if (String(url).endsWith('/capabilities')) {
+            return jsonResponse({
+                apiVersion: 1,
+                exactGitRelease: true,
+                existingPluginsOnly: true,
+                installsDependencies: true,
+                dependencyPolicy: 'npm-ci-production-ignore-scripts',
+                safeRestart: true,
+                serverPluginsEnabled: true,
+                available: true,
+            });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+    const settingsStore = {};
+    globalThis.SillyTavern = {
+        getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { mountSettings } = await import('../client/settings.js?settings-plugin-update');
+        await mountSettings();
+
+        const root = dom.window.document.getElementById('sbbs_settings');
+        const update = root.querySelector('.sbbs-setting-plugin .menu_button');
+        await waitFor(() => update.hidden === false, 'settings update action did not appear');
+        assert.equal(update.type, 'button');
+        assert.match(root.querySelector('.sbbs-setting-plugin').textContent, /Server v0\.2\.0 is older than frontend v0\.3\.0/);
+        assert.equal(root.contains(update), true);
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
+test('an older incompatible server offers the host updater without bypassing a safety refusal', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    let applyBody = null;
+    globalThis.fetch = async (url, options = {}) => {
+        if (String(url).endsWith('/healthz')) {
+            return jsonResponse({ protocol: 3, version: '0.2.0', sources: [] });
+        }
+        if (String(url).endsWith('/capabilities')) {
+            return jsonResponse({
+                apiVersion: 1,
+                exactGitRelease: true,
+                existingPluginsOnly: true,
+                installsDependencies: true,
+                dependencyPolicy: 'npm-ci-production-ignore-scripts',
+                safeRestart: true,
+                serverPluginsEnabled: true,
+                available: true,
+            });
+        }
+        if (String(url).endsWith('/apply-release')) {
+            applyBody = JSON.parse(options.body);
+            return jsonResponse({
+                error: 'Symlinked plugins cannot be updated automatically.',
+                code: 'managed_externally',
+            }, 409);
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popups = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popups.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }),
+            renderExtensionTemplateAsync: async () => INSTALL_TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { openBrowser } = await import('../client/browser.js?server-plugin-update-panel');
+        const opened = openBrowser();
+        await waitFor(() => popups.length === 1, 'plugin recovery popup did not open');
+        const popup = popups[0];
+        assert.equal(popup.options.allowVerticalScrolling, true, 'recovery instructions must remain scrollable');
+        const update = popup.content.querySelector('#sbbs_update_plugin');
+        await waitFor(() => update.hidden === false, 'automatic update action did not appear');
+
+        assert.equal(popup.content.querySelector('.sbbs-update-instructions').hidden, true);
+        update.click();
+        await waitFor(
+            () => /externally managed/.test(popup.content.querySelector('.sbbs-install-update-status').textContent),
+            'host update failure was not explained',
+        );
+
+        assert.deepEqual(applyBody, {
+            directoryName: 'SillyBunny-BotSearcher',
+            targetVersion: '0.3.0',
+        });
+        assert.equal(update.disabled, false, 'the action should be retryable after failure');
+        assert.equal(popup.content.querySelector('.sbbs-update-instructions').hidden, true);
+
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
+test('closing the recovery popup does not abort an in-progress server update', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    let healthCalls = 0;
+    let resolveApply;
+    let applySignal;
+    globalThis.fetch = async (url, options = {}) => {
+        if (String(url).endsWith('/healthz')) {
+            healthCalls++;
+            return healthCalls === 1
+                ? jsonResponse({ protocol: 3, version: '0.2.0', sources: [] })
+                : jsonResponse({ protocol: 4, version: '0.3.0', sources: [] });
+        }
+        if (String(url).endsWith('/capabilities')) {
+            return jsonResponse({
+                apiVersion: 1,
+                exactGitRelease: true,
+                existingPluginsOnly: true,
+                installsDependencies: true,
+                dependencyPolicy: 'npm-ci-production-ignore-scripts',
+                safeRestart: true,
+                serverPluginsEnabled: true,
+                available: true,
+            });
+        }
+        if (String(url).endsWith('/apply-release')) {
+            applySignal = options.signal;
+            return new Promise((resolve, reject) => {
+                resolveApply = () => resolve(jsonResponse({
+                    ok: true,
+                    action: 'updated',
+                    restarting: true,
+                    serverBootId: 'old-boot',
+                }, 202));
+                options.signal?.addEventListener('abort', () => {
+                    reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                }, { once: true });
+            });
+        }
+        if (String(url).endsWith('/version')) {
+            return jsonResponse({ serverBootId: 'new-boot' });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popups = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popups.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }),
+            renderExtensionTemplateAsync: async () => INSTALL_TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { openBrowser } = await import('../client/browser.js?update-survives-popup-close');
+        const opened = openBrowser();
+        await waitFor(() => popups.length === 1, 'plugin recovery popup did not open');
+        const popup = popups[0];
+        const update = popup.content.querySelector('#sbbs_update_plugin');
+        await waitFor(() => update.hidden === false, 'automatic update action did not appear');
+
+        update.click();
+        await waitFor(() => typeof resolveApply === 'function', 'update request did not start');
+        popup.complete();
+        await opened;
+
+        assert.ok(applySignal instanceof AbortSignal, 'the state-changing request needs its own finite lifetime');
+        assert.equal(applySignal.aborted, false, 'popup lifetime must not abort the state-changing request');
+        resolveApply();
+        await waitFor(() => healthCalls === 2, 'the detached update did not finish verification');
+        assert.equal(popups.length, 1, 'closing the popup must not reopen it after the update');
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('a source that fails stays in the picker and offers a reload', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {
@@ -217,7 +503,7 @@ test('a source that fails stays in the picker and offers a reload', async () => 
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
                 protocol: 4,
-                version: '0.2.0',
+                version: '0.3.0',
                 sources: [
                     // Reported down before the dialog even opens. It must still
                     // be offered, not quietly missing from the list.
@@ -357,7 +643,7 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
                 protocol: 4,
-                version: '0.2.0',
+                version: '0.3.0',
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, hideAiToggle: true, detail: true } },
                     { id: 'chub', label: 'Chub', tier: 1, state: 'up', clientHosts: ['chub.ai'], capabilities: { search: true, sorts: ['default'], sfwToggle: true, hideAiToggle: false, detail: true, filters: [{ key: 'tags', type: 'tags', label: 'Tags' }] } },

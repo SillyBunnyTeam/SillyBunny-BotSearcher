@@ -24,12 +24,15 @@ export const PROTOCOL_VERSION = 4;
 export const MAX_FANOUT = 4;
 
 /** Release version. `tests/invariants.test.js` asserts this matches package.json and manifest.json. */
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 export const PLUGIN_ID = 'sillybunny-botsearcher';
 
 /** Directory name of the frontend extension; also the repo name. */
 export const EXTENSION_NAME = 'SillyBunny-BotSearcher';
+
+/** Repository identity pinned by the host-owned exact-release updater. */
+export const REPOSITORY_URL = 'https://github.com/platberlitz/SillyBunny-BotSearcher.git';
 
 /**
  * Fields a normalized search result may contain. `server/normalize.js` builds
