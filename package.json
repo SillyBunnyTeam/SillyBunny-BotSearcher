@@ -16,7 +16,7 @@
         "rate-limiter-flexible": "^11.2.0"
     },
     "devDependencies": {
-        "eslint": "^9.39.5",
+        "eslint": "^10.8.0",
         "express": "^5.2.1",
         "jsdom": "^26.1.0"
     },
