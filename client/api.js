@@ -246,7 +246,7 @@ export async function waitForServerRestart(previousBootId, {
                     return version;
                 }
             }
-        } catch (error) {
+        } catch (_error) {
             if (signal?.aborted) {
                 throw abortError();
             }
