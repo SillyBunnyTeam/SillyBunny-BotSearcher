@@ -1,0 +1,47 @@
+export default [
+    {
+        ignores: ['node_modules/**', 'docs/**'],
+    },
+    {
+        files: ['**/*.js', '**/*.mjs'],
+        languageOptions: {
+            ecmaVersion: 'latest',
+            sourceType: 'module',
+            globals: {
+                AbortController: 'readonly',
+                AbortSignal: 'readonly',
+                Buffer: 'readonly',
+                CSS: 'readonly',
+                MutationObserver: 'readonly',
+                URL: 'readonly',
+                URLSearchParams: 'readonly',
+                clearTimeout: 'readonly',
+                console: 'readonly',
+                document: 'readonly',
+                fetch: 'readonly',
+                globalThis: 'readonly',
+                requestAnimationFrame: 'readonly',
+                setTimeout: 'readonly',
+                structuredClone: 'readonly',
+                toastr: 'readonly',
+                window: 'readonly',
+            },
+        },
+        linterOptions: {
+            reportUnusedDisableDirectives: 'error',
+        },
+        rules: {
+            'array-callback-return': 'error',
+            'curly': ['error', 'all'],
+            'eqeqeq': ['error', 'always'],
+            'no-constant-binary-expression': 'error',
+            'no-dupe-keys': 'error',
+            'no-implicit-coercion': 'error',
+            'no-shadow-restricted-names': 'error',
+            'no-unreachable': 'error',
+            'no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
+            'no-useless-catch': 'error',
+            'prefer-const': 'error',
+        },
+    },
+];

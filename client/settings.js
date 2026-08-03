@@ -36,13 +36,14 @@ const DEFAULTS = Object.freeze({
     enabledSources: null,
     defaultSource: 'botbooru',
     sfwOnlyDefault: true,
+    hideAiDefault: false,
     blurNsfw: true,
     // Avoid direct browser connections to image hosts by default.
     imageMode: 'proxy',
     resultsPerPage: 24,
-    sortDefault: 'latest',
+    sortBySource: Object.freeze({}),
     showTrustPanel: true,
-    _v: 1,
+    _v: 2,
 });
 
 function context() {
@@ -61,6 +62,23 @@ export function getSettings() {
     const read = (key) => (Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
 
     const enabled = read('enabledSources');
+    const rawSorts = read('sortBySource');
+    const sortBySource = Object.create(null);
+    if (rawSorts && typeof rawSorts === 'object' && !Array.isArray(rawSorts)) {
+        for (const [sourceId, sort] of Object.entries(rawSorts)) {
+            if (/^[a-z0-9-]{1,64}$/.test(sourceId) && typeof sort === 'string') {
+                sortBySource[sourceId] = sort.slice(0, 32);
+            }
+        }
+    } else if (typeof read('sortDefault') === 'string') {
+        // v1 stored one global sort. Preserve it for the source it belonged to.
+        const sourceId = typeof read('defaultSource') === 'string'
+            ? read('defaultSource').slice(0, 64)
+            : DEFAULTS.defaultSource;
+        if (/^[a-z0-9-]{1,64}$/.test(sourceId)) {
+            sortBySource[sourceId] = read('sortDefault').slice(0, 32);
+        }
+    }
 
     return {
         enabledSources: Array.isArray(enabled)
@@ -68,10 +86,11 @@ export function getSettings() {
             : null,
         defaultSource: typeof read('defaultSource') === 'string' ? read('defaultSource').slice(0, 64) : DEFAULTS.defaultSource,
         sfwOnlyDefault: read('sfwOnlyDefault') !== false,
+        hideAiDefault: read('hideAiDefault') === true,
         blurNsfw: read('blurNsfw') !== false,
         imageMode: AVAILABLE_IMAGE_MODES.includes(read('imageMode')) ? read('imageMode') : DEFAULTS.imageMode,
         resultsPerPage: PAGE_SIZES.includes(read('resultsPerPage')) ? read('resultsPerPage') : DEFAULTS.resultsPerPage,
-        sortDefault: typeof read('sortDefault') === 'string' ? read('sortDefault').slice(0, 32) : DEFAULTS.sortDefault,
+        sortBySource: { ...sortBySource },
         showTrustPanel: read('showTrustPanel') !== false,
         _v: DEFAULTS._v,
     };
@@ -127,15 +146,20 @@ export async function mountSettings() {
     container.dataset.extensionName = EXTENSION_NAME;
 
     const drawer = el('div', 'inline-drawer');
-    const header = el('div', 'inline-drawer-toggle inline-drawer-header');
+    const header = el('button', 'inline-drawer-toggle inline-drawer-header sbbs-settings-toggle');
+    header.type = 'button';
+    header.setAttribute('aria-expanded', 'false');
+    header.setAttribute('aria-controls', 'sbbs_settings_content');
     header.append(el('b', undefined, 'BotSearcher'), el('div', 'inline-drawer-icon fa-solid fa-circle-chevron-down down'));
 
     const content = el('div', 'inline-drawer-content sbbs-settings');
+    content.id = 'sbbs_settings_content';
     const settings = getSettings();
 
     content.append(
         checkbox('sbbs_set_sfw', 'Request SFW results by default', settings.sfwOnlyDefault, (v) => updateSettings({ sfwOnlyDefault: v })),
-        checkbox('sbbs_set_blur', 'Blur sensitive thumbnails until opened', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
+        checkbox('sbbs_set_hide_ai', 'Hide AI-generated cards when the source supports it', settings.hideAiDefault, (v) => updateSettings({ hideAiDefault: v })),
+        checkbox('sbbs_set_blur', 'Blur sensitive and unrated thumbnails until revealed', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
         checkbox('sbbs_set_trust', 'Show the Card contents panel', settings.showTrustPanel, (v) => updateSettings({ showTrustPanel: v })),
         select(
             'sbbs_set_images',
@@ -156,6 +180,10 @@ export async function mountSettings() {
     drawer.append(header, content);
     container.append(drawer);
     host.append(container);
+
+    const syncExpanded = () => header.setAttribute('aria-expanded', String(content.getClientRects().length > 0));
+    header.addEventListener('click', () => requestAnimationFrame(syncExpanded));
+    requestAnimationFrame(syncExpanded);
 
     // Source list comes from the server, so it stays correct as adapters are
     // added. Appended after mounting so a missing plugin does not block the

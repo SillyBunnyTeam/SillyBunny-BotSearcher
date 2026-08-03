@@ -64,6 +64,33 @@ test('healthz answers without any outbound request', async () => {
     }
 });
 
+test('search rejects malformed and cross-source cursors before contacting an upstream', async () => {
+    const { mintCursor } = await import('../server/refs.js');
+    const router = express.Router();
+    plugin.init(router);
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/plugins/sillybunny-botsearcher', router);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+
+    try {
+        const { port } = server.address();
+        for (const cursor of ['not-a-cursor', mintCursor('chub', { p: 2 })]) {
+            const response = await fetch(`http://127.0.0.1:${port}/api/plugins/sillybunny-botsearcher/search`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: 'botbooru', cursor }),
+            });
+            assert.equal(response.status, 400);
+            assert.deepEqual(await response.json(), { error: 'bad_cursor' });
+        }
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
 test('exit never rejects', async () => {
     // src/server-main.js awaits Promise.all(exitHooks) before process.exit().
     // A rejection here means the server never shuts down.

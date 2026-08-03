@@ -21,6 +21,7 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, own, hostCheckedUrl, isPlainObject } from '../validate.js';
 import { mintRef } from '../refs.js';
+import { pageCursor } from '../paging.js';
 
 const API = 'https://app.wyvern.chat';
 const IMAGE_HOST = 'imagedelivery.net';
@@ -48,13 +49,18 @@ function tagsOf(character) {
     return [...new Set(out)];
 }
 
-function isNsfw(character, tags) {
+function contentRating(character, tags) {
     const rating = own(character, 'rating');
     if (typeof rating === 'string' && ['nsfw', 'explicit', 'adult'].includes(rating.toLowerCase())) {
-        return true;
+        return 'sensitive';
+    }
+    if (typeof rating === 'string' && ['sfw', 'safe', 'general'].includes(rating.toLowerCase())) {
+        return 'sfw';
     }
     const lowered = tags.map((tag) => tag.toLowerCase());
-    return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut'].some((flag) => lowered.includes(flag));
+    return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut'].some((flag) => lowered.includes(flag))
+        ? 'sensitive'
+        : 'unknown';
 }
 
 function creatorOf(character) {
@@ -87,7 +93,7 @@ function imageUrl(ref, size) {
 
 function countEntries(lorebooks) {
     if (!Array.isArray(lorebooks)) {
-        return 0;
+        return null;
     }
     let total = 0;
     for (const book of lorebooks) {
@@ -108,12 +114,12 @@ function insideOf(character) {
 
     return {
         lorebookEntries: countEntries(own(character, 'lorebooks')),
-        alternateGreetings: Array.isArray(greetings) ? greetings.length : 0,
-        hasSystemPrompt: nonEmpty(own(character, 'pre_history_instructions')),
-        hasPostHistoryInstructions: nonEmpty(own(character, 'post_history_instructions')),
-        hasDepthPrompt: nonEmpty(own(character, 'character_note')),
-        regexScripts: Array.isArray(regex) ? regex.length : 0,
-        embeddedAssets: Array.isArray(gallery) ? gallery.length : 0,
+        alternateGreetings: Array.isArray(greetings) ? greetings.length : null,
+        hasSystemPrompt: reportedNonEmpty(character, 'pre_history_instructions'),
+        hasPostHistoryInstructions: reportedNonEmpty(character, 'post_history_instructions'),
+        hasDepthPrompt: reportedNonEmpty(character, 'character_note'),
+        regexScripts: Array.isArray(regex) ? regex.length : null,
+        embeddedAssets: Array.isArray(gallery) ? gallery.length : null,
         specVersion: 'chara_card_v2',
         originSite: 'Wyvern',
     };
@@ -121,6 +127,10 @@ function insideOf(character) {
 
 function nonEmpty(value) {
     return typeof value === 'string' && value.trim() !== '';
+}
+
+function reportedNonEmpty(object, key) {
+    return Object.prototype.hasOwnProperty.call(object, key) ? nonEmpty(own(object, key)) : null;
 }
 
 function toRecord(character, build) {
@@ -139,7 +149,7 @@ function toRecord(character, build) {
         tagline: own(character, 'tagline'),
         creator: creatorOf(character),
         tags,
-        nsfw: isNsfw(character, tags),
+        contentRating: contentRating(character, tags),
         stats: {
             views: undefined,
             downloads: own(character, 'likes'),
@@ -179,16 +189,18 @@ export const wyvern = Object.freeze({
     capabilities: Object.freeze({
         search: true,
         query: true,
-        paging: 'offset',
+        paging: 'page',
         sorts: Object.freeze(['default']),
         sfwToggle: false,
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit }) {
+    async search(ctx, { query, cursor, limit }) {
+        const pageSize = clampInt(limit, 1, 48, 24);
+        const page = pageCursor(cursor);
         const url = new URL('/api/characters/public', API);
-        url.searchParams.set('limit', String(clampInt(limit, 1, 48, 24)));
-        url.searchParams.set('offset', String(clampInt(offset, 0, 5000, 0)));
+        url.searchParams.set('limit', String(pageSize));
+        url.searchParams.set('page', String(page));
         if (typeof query === 'string' && query !== '') {
             url.searchParams.set('search', query.slice(0, 128));
         }
@@ -197,16 +209,17 @@ export const wyvern = Object.freeze({
         const data = await ctx.fetchJson(url, { maxBytes: 12 << 20, timeoutMs: 15000 });
 
         const raw = own(data, 'characters');
-        const characters = Array.isArray(raw) ? raw.slice(0, 48) : [];
+        const characters = Array.isArray(raw) ? raw.slice(0, pageSize) : [];
         const rawTotal = own(data, 'total');
         const total = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? Math.floor(rawTotal) : null;
 
         const items = characters.map((character) => toRecord(character, buildSummary)).filter((item) => item !== null);
-        const start = clampInt(offset, 0, 5000, 0);
-
         return {
             total,
-            hasMore: total === null ? characters.length > 0 : start + characters.length < total,
+            next: characters.length > 0
+                && (total === null ? characters.length >= pageSize : page * pageSize < total)
+                ? { p: page + 1 }
+                : null,
             items,
         };
     },

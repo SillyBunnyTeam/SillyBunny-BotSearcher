@@ -47,6 +47,7 @@ const IHDR = chunk('IHDR', Buffer.concat([
     Buffer.from([0, 0, 0, 1, 0, 0, 0, 1]), // 1x1
     Buffer.from([8, 6, 0, 0, 0]),
 ]));
+const IDAT = chunk('IDAT', zlib.deflateSync(Buffer.from([0, 0, 0, 0, 0])));
 const IEND = chunk('IEND', Buffer.alloc(0));
 
 function textChunk(keyword, text) {
@@ -76,7 +77,7 @@ const V2_CARD = {
 
 function pngWith(keyword, cardObject) {
     const base64 = Buffer.from(JSON.stringify(cardObject)).toString('base64');
-    return Buffer.concat([SIGNATURE, IHDR, textChunk(keyword, base64), IEND]);
+    return Buffer.concat([SIGNATURE, IHDR, textChunk(keyword, base64), IDAT, IEND]);
 }
 
 // ---- the happy path ----
@@ -97,6 +98,7 @@ test('a v3 card wins when both chunks are present', () => {
         SIGNATURE, IHDR,
         textChunk('chara', Buffer.from(JSON.stringify(V2_CARD)).toString('base64')),
         textChunk('ccv3', Buffer.from(JSON.stringify(v3)).toString('base64')),
+        IDAT,
         IEND,
     ]);
 
@@ -105,7 +107,7 @@ test('a v3 card wins when both chunks are present', () => {
 
 test('a compressed zTXt card chunk is inflated and accepted', () => {
     const base64 = Buffer.from(JSON.stringify(V2_CARD)).toString('base64');
-    const png = Buffer.concat([SIGNATURE, IHDR, compressedTextChunk('chara', base64), IEND]);
+    const png = Buffer.concat([SIGNATURE, IHDR, compressedTextChunk('chara', base64), IDAT, IEND]);
 
     assert.equal(validateCardBytes(png, 'png').spec, 'chara_card_v2');
 });
@@ -114,7 +116,7 @@ test('a compressed zTXt card chunk is inflated and accepted', () => {
 
 test('a valid PNG with no embedded card is refused', () => {
     // A plain picture is not a character card, however well-formed.
-    const png = Buffer.concat([SIGNATURE, IHDR, textChunk('Comment', 'just a photo'), IEND]);
+    const png = Buffer.concat([SIGNATURE, IHDR, textChunk('Comment', 'just a photo'), IDAT, IEND]);
 
     assert.throws(() => validateCardBytes(png, 'png'), (error) => {
         assert.ok(error instanceof CardBytesError);
@@ -185,7 +187,7 @@ test('a zlib bomb in a zTXt chunk is refused', () => {
 test('a card chunk that is not base64 is refused rather than silently truncated', () => {
     // Buffer.from(x, 'base64') skips invalid characters instead of failing, so
     // without an explicit alphabet check garbage decodes to a short buffer.
-    const png = Buffer.concat([SIGNATURE, IHDR, textChunk('chara', '!!!! not base64 !!!!'), IEND]);
+    const png = Buffer.concat([SIGNATURE, IHDR, textChunk('chara', '!!!! not base64 !!!!'), IDAT, IEND]);
 
     assert.throws(() => validateCardBytes(png, 'png'), (error) => error.code === 'card_invalid');
 });
@@ -199,6 +201,46 @@ test('a chunk table that loops forever is bounded', () => {
 
     assert.throws(() => validateCardBytes(Buffer.concat(many), 'png'), (error) => error.code === 'png_malformed');
 });
+
+test('PNG CRCs, required chunk order and the exact IEND boundary are enforced', () => {
+    const valid = pngWith('chara', V2_CARD);
+    const corrupt = Buffer.from(valid);
+    corrupt[40] ^= 0x01;
+
+    for (const png of [
+        corrupt,
+        Buffer.concat([SIGNATURE, textChunk('chara', 'e30='), IHDR, IDAT, IEND]),
+        Buffer.concat([SIGNATURE, IHDR, textChunk('chara', 'e30='), IEND]),
+        Buffer.concat([valid, Buffer.from('trailing')]),
+    ]) {
+        assert.throws(() => validateCardBytes(png, 'png'), (error) => error.code === 'png_malformed');
+    }
+});
+
+test('IHDR rejects dangerous dimensions and illegal colour-depth combinations', () => {
+    const cardText = textChunk('chara', Buffer.from(JSON.stringify(V2_CARD)).toString('base64'));
+    const header = ({ width = 1, height = 1, bitDepth = 8, colorType = 6 }) => chunk('IHDR', Buffer.concat([
+        uint32(width),
+        uint32(height),
+        Buffer.from([bitDepth, colorType, 0, 0, 0]),
+    ]));
+
+    for (const badHeader of [
+        header({ width: 20_000 }),
+        header({ width: 16_384, height: 16_384 }),
+        header({ bitDepth: 4, colorType: 6 }),
+        header({ bitDepth: 8, colorType: 1 }),
+    ]) {
+        const png = Buffer.concat([SIGNATURE, badHeader, cardText, IDAT, IEND]);
+        assert.throws(() => validateCardBytes(png, 'png'), (error) => error.code === 'png_malformed');
+    }
+});
+
+function uint32(value) {
+    const buffer = Buffer.alloc(4);
+    buffer.writeUInt32BE(value);
+    return buffer;
+}
 
 // ---- JSON cards ----
 

@@ -11,10 +11,10 @@
  */
 
 /** Bumped only when the request/response contract changes incompatibly. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Release version. `tests/invariants.test.js` asserts this matches package.json and manifest.json. */
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 export const PLUGIN_ID = 'sillybunny-botsearcher';
 
@@ -33,7 +33,7 @@ export const CARD_SUMMARY_FIELDS = Object.freeze([
     'tagline',
     'creator',
     'tags',
-    'nsfw',
+    'contentRating',
     'stats',
     'createdAt',
     // Absolute https thumbnail URL, built by the adapter and host-checked twice
@@ -70,6 +70,9 @@ export const FIELD_LIMITS = Object.freeze({
 export const MAX_REQUEST_BYTES = 8192;
 
 export const IMAGE_MODES = Object.freeze(['proxy', 'direct', 'off']);
+
+/** Honest content classification: unknown must never be presented as safe. */
+export const CONTENT_RATINGS = Object.freeze(['sfw', 'sensitive', 'unknown']);
 
 export const THUMB_SIZES = Object.freeze(['grid', 'detail']);
 

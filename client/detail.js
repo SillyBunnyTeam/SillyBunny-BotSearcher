@@ -25,8 +25,9 @@ import {
  * @param {any} summary the card as it appeared in the grid
  * @param {{ id: string, label: string, clientHosts: string[] }} source
  * @param {() => void} onBack
+ * @param {{ signal?: AbortSignal }} [options]
  */
-export async function showDetail(container, summary, source, onBack) {
+export async function showDetail(container, summary, source, onBack, { signal } = {}) {
     container.replaceChildren();
 
     const settings = getSettings();
@@ -34,7 +35,9 @@ export async function showDetail(container, summary, source, onBack) {
     const header = el('div', 'sbbs-detail-header');
     const back = el('button', 'menu_button sbbs-back');
     back.type = 'button';
-    back.append(el('i', 'fa-solid fa-arrow-left'), el('span', undefined, 'Back'));
+    const backIcon = el('i', 'fa-solid fa-arrow-left');
+    backIcon.setAttribute('aria-hidden', 'true');
+    back.append(backIcon, el('span', undefined, 'Back'));
     back.addEventListener('click', onBack);
     header.append(back);
     container.append(header);
@@ -48,13 +51,20 @@ export async function showDetail(container, summary, source, onBack) {
 
     let card;
     try {
-        card = await post('/detail', { source: source.id, id: summary.id });
+        card = await post('/detail', { source: source.id, id: summary.id }, { signal });
     } catch (error) {
+        if (error?.name === 'AbortError' || signal?.aborted) {
+            return;
+        }
         setText(loading, detailErrorMessage(error, source.label));
         const retry = el('button', 'menu_button', 'Try again');
         retry.type = 'button';
-        retry.addEventListener('click', () => showDetail(container, summary, source, onBack));
+        retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, { signal }));
         container.append(retry);
+        return;
+    }
+
+    if (signal?.aborted) {
         return;
     }
 
@@ -69,10 +79,11 @@ export async function showDetail(container, summary, source, onBack) {
         const img = document.createElement('img');
         img.alt = '';
         if (setImgSafe(img, previewSrc, source.clientHosts)) {
-            if (card.nsfw && settings.blurNsfw) {
+            const rating = ratingOf(card);
+            if (rating.value !== 'sfw' && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
                 // A real button, so revealing works by keyboard too.
-                const reveal = el('button', 'sbbs-reveal', 'Show sensitive image');
+                const reveal = el('button', 'sbbs-reveal', `Show ${rating.reveal} image`);
                 reveal.type = 'button';
                 reveal.addEventListener('click', () => {
                     figure.classList.remove('sbbs-blurred');
@@ -91,6 +102,8 @@ export async function showDetail(container, summary, source, onBack) {
     main.append(el('h2', 'sbbs-detail-name', card.name || 'Untitled'));
 
     const meta = el('div', 'sbbs-detail-meta');
+    const rating = ratingOf(card);
+    meta.append(el('span', `sbbs-chip sbbs-rating-${rating.value}`, rating.label));
     if (card.creator) {
         meta.append(el('span', 'sbbs-chip', `by ${card.creator}`));
     }
@@ -148,6 +161,16 @@ export async function showDetail(container, summary, source, onBack) {
 
     // ---- actions ----
     container.append(actionBar(card, source));
+}
+
+function ratingOf(card) {
+    if (card?.contentRating === 'sfw') {
+        return { value: 'sfw', label: 'SFW', reveal: 'SFW' };
+    }
+    if (card?.contentRating === 'sensitive') {
+        return { value: 'sensitive', label: 'Sensitive content', reveal: 'sensitive' };
+    }
+    return { value: 'unknown', label: 'Content rating not reported', reveal: 'unrated' };
 }
 
 /**

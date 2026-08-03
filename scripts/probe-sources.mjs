@@ -61,21 +61,35 @@ for (const id of ids) {
 
     const probe = await timed(() => adapter.probe(ctx));
 
-    const search = await timed(() => adapter.search(ctx, {
+    const searchArgs = {
         query: SEARCH_TERM,
-        offset: 0,
+        cursor: null,
         limit: 3,
         sort: adapter.capabilities.sorts[0],
         sfwOnly: adapter.capabilities.sfwToggle,
         hideAi: false,
-    }));
+    };
+    const search = await timed(() => adapter.search(ctx, searchArgs));
 
     const items = search.ok && Array.isArray(search.value?.items) ? search.value.items : [];
     const first = items[0];
+    const nextState = search.ok ? search.value?.next ?? null : null;
+    const nextPage = nextState && typeof nextState === 'object'
+        ? await timed(() => adapter.search(ctx, { ...searchArgs, cursor: nextState }))
+        : null;
+    const nextItems = nextPage?.ok && Array.isArray(nextPage.value?.items) ? nextPage.value.items : [];
 
     // A search that returns nothing is not necessarily broken, but a search
     // returning cards with no name means the mapping has drifted.
-    const mappingOk = items.length === 0 || items.every((item) => typeof item.name === 'string' && item.name !== '');
+    const mappingOk = items.every((item) => typeof item.id === 'string' && item.id !== ''
+        && item.source === id
+        && typeof item.name === 'string' && item.name !== ''
+        && ['sfw', 'sensitive', 'unknown'].includes(item.contentRating));
+    const limitOk = items.length <= searchArgs.limit && nextItems.length <= searchArgs.limit;
+    const firstIds = new Set(items.map((item) => item.id));
+    const pagingOk = nextPage === null || (nextPage.ok && nextItems.every((item) => !firstIds.has(item.id)));
+    const cursorOk = nextState === null
+        || (typeof nextState === 'object' && !Array.isArray(nextState) && JSON.stringify(nextState).length <= 128);
 
     let detail = null;
     if (first && adapter.capabilities.detail) {
@@ -92,6 +106,9 @@ for (const id of ids) {
         items: items.length,
         total: search.ok ? search.value?.total ?? null : null,
         mappingOk,
+        limitOk,
+        pagingOk,
+        cursorOk,
         detail: detail === null ? null : detail.ok,
         detailNote: detail === null || detail.ok ? '' : detail.error,
         ms: probe.ms + search.ms + (detail?.ms ?? 0),
@@ -126,11 +143,21 @@ for (const r of results) {
         }
     }
     if (!r.mappingOk) {
-        console.log(`  ${r.id}: search returned unnamed items; the field mapping may have changed`);
+        console.log(`  ${r.id}: search returned malformed normalized records; the field mapping may have changed`);
+    }
+    if (!r.limitOk) {
+        console.log(`  ${r.id}: search ignored the requested page limit`);
+    }
+    if (!r.pagingOk) {
+        console.log(`  ${r.id}: the next page failed or repeated an id from the first page`);
+    }
+    if (!r.cursorOk) {
+        console.log(`  ${r.id}: search returned a malformed cursor state`);
     }
 }
 
-const broken = results.filter((r) => r.tier <= TIER_THAT_MUST_WORK && (!r.search || r.detail === false || !r.mappingOk));
+const broken = results.filter((r) => r.tier <= TIER_THAT_MUST_WORK
+    && (!r.probe || !r.search || r.detail === false || !r.mappingOk || !r.limitOk || !r.pagingOk || !r.cursorOk));
 
 if (broken.length > 0) {
     console.log('');

@@ -18,6 +18,7 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
 import { mintRef } from '../refs.js';
+import { pageCursor } from '../paging.js';
 
 const API = 'https://gateway.chub.ai';
 const AVATARS = 'https://avatars.charhub.io';
@@ -77,12 +78,15 @@ function previewRef(fullPath) {
 /**
  * Chub exposes `nsfw_image` plus a topic list. Either signal is enough to blur.
  */
-function isNsfw(node, topics) {
+function contentRating(node, topics, assumeSfw = false) {
     if (own(node, 'nsfw_image') === true) {
-        return true;
+        return 'sensitive';
     }
     const lowered = topics.map((topic) => String(topic).toLowerCase());
-    return ['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag));
+    if (['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag))) {
+        return 'sensitive';
+    }
+    return assumeSfw ? 'sfw' : 'unknown';
 }
 
 function topicsOf(node) {
@@ -90,7 +94,7 @@ function topicsOf(node) {
     return Array.isArray(topics) ? topics.filter((topic) => typeof topic === 'string') : [];
 }
 
-function toSummary(node) {
+function toSummary(node, assumeSfw = false) {
     const fullPath = fullPathOf(node);
     if (fullPath === null) {
         return null;
@@ -105,7 +109,7 @@ function toSummary(node) {
         tagline: own(node, 'tagline') || own(node, 'description'),
         creator: creatorOf(fullPath),
         tags: topics,
-        nsfw: isNsfw(node, topics),
+        contentRating: contentRating(node, topics, assumeSfw),
         stats: {
             views: own(node, 'nChats'),
             downloads: own(node, 'starCount'),
@@ -135,7 +139,7 @@ function toDetail(node, fullPath) {
         tagline: own(node, 'tagline'),
         creator: creatorOf(fullPath),
         tags: topics,
-        nsfw: isNsfw(node, topics),
+        contentRating: contentRating(node, topics),
         stats: {
             views: own(node, 'nChats'),
             downloads: own(node, 'starCount'),
@@ -154,12 +158,14 @@ function toDetail(node, fullPath) {
         firstMessage: own(definition, 'first_message') ?? own(definition, 'first_mes'),
         creatorNotes: own(definition, 'creator_notes') ?? own(node, 'description'),
         inside: {
-            lorebookEntries: countLorebookEntries(lorebook),
-            alternateGreetings: Array.isArray(greetings) ? greetings.length : 0,
-            hasSystemPrompt: nonEmpty(own(definition, 'system_prompt')),
-            hasPostHistoryInstructions: nonEmpty(own(definition, 'post_history_instructions')),
-            hasDepthPrompt: nonEmpty(own(own(definition, 'extensions'), 'depth_prompt')),
-            embeddedAssets: own(node, 'hasGallery') === true ? null : 0,
+            lorebookEntries: countLorebookEntries(definition, lorebook),
+            alternateGreetings: Array.isArray(greetings) ? greetings.length : null,
+            hasSystemPrompt: reportedContent(definition, 'system_prompt'),
+            hasPostHistoryInstructions: reportedContent(definition, 'post_history_instructions'),
+            hasDepthPrompt: reportedContent(own(definition, 'extensions'), 'depth_prompt'),
+            embeddedAssets: own(node, 'hasGallery') === true
+                ? null
+                : (own(node, 'hasGallery') === false ? 0 : null),
             specVersion: own(node, 'primaryFormat') ?? 'chara_card_v2',
             originSite: 'Chub',
         },
@@ -174,7 +180,14 @@ function nonEmpty(value) {
     return value !== null && value !== undefined && typeof value === 'object';
 }
 
-function countLorebookEntries(lorebook) {
+function reportedContent(object, key) {
+    if (!object || typeof object !== 'object' || !Object.prototype.hasOwnProperty.call(object, key)) {
+        return null;
+    }
+    return nonEmpty(own(object, key));
+}
+
+function countLorebookEntries(definition, lorebook) {
     const entries = own(lorebook, 'entries');
     if (Array.isArray(entries)) {
         return entries.length;
@@ -182,7 +195,10 @@ function countLorebookEntries(lorebook) {
     if (entries && typeof entries === 'object') {
         return Object.keys(entries).length;
     }
-    return 0;
+    return definition && typeof definition === 'object'
+        && Object.prototype.hasOwnProperty.call(definition, 'embedded_lorebook')
+        ? 0
+        : null;
 }
 
 export const chub = Object.freeze({
@@ -204,10 +220,9 @@ export const chub = Object.freeze({
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit, sort, sfwOnly }) {
+    async search(ctx, { query, cursor, limit, sort, sfwOnly }) {
         const perPage = clampInt(limit, 1, 48, 24);
-        // Chub pages rather than offsets; the router speaks offsets, so convert.
-        const page = Math.floor(clampInt(offset, 0, 5000, 0) / perPage) + 1;
+        const page = pageCursor(cursor);
         const safe = sfwOnly === true;
 
         const url = new URL('/search', API);
@@ -228,15 +243,17 @@ export const chub = Object.freeze({
 
         const payload = own(data, 'data');
         const rawNodes = own(payload, 'nodes');
-        const nodes = Array.isArray(rawNodes) ? rawNodes.slice(0, 48) : [];
+        const nodes = Array.isArray(rawNodes) ? rawNodes.slice(0, perPage) : [];
         const rawCount = own(payload, 'count');
         const total = typeof rawCount === 'number' && Number.isFinite(rawCount) ? Math.floor(rawCount) : null;
 
-        const items = nodes.map(toSummary).filter((item) => item !== null && item.id !== '');
+        const items = nodes.map((node) => toSummary(node, safe)).filter((item) => item !== null && item.id !== '');
 
         return {
             total,
-            hasMore: total === null ? nodes.length >= perPage : page * perPage < total,
+            next: nodes.length > 0 && (total === null ? nodes.length >= perPage : page * perPage < total)
+                ? { p: page + 1 }
+                : null,
             items,
         };
     },

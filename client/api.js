@@ -61,6 +61,7 @@ export async function getAvailability({ force = false } = {}) {
             method: 'GET',
             credentials: 'same-origin',
             headers: { Accept: 'application/json' },
+            signal: AbortSignal.timeout(8000),
         });
 
         if (MISSING_STATUSES.has(response.status)) {
@@ -118,14 +119,16 @@ export function thumbSrc(card, source, size, imageMode) {
  *
  * @param {string} path e.g. '/search'
  * @param {Record<string, unknown>} body
+ * @param {{ signal?: AbortSignal }} [options]
  * @returns {Promise<any>}
  */
-export async function post(path, body) {
+export async function post(path, body, { signal } = {}) {
     const response = await fetch(`${PLUGIN_BASE}${path}`, {
         method: 'POST',
         credentials: 'same-origin',
         headers: context().getRequestHeaders(),
         body: JSON.stringify(body ?? {}),
+        signal,
     });
 
     if (MISSING_STATUSES.has(response.status)) {

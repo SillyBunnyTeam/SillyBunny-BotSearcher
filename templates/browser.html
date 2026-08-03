@@ -1,24 +1,33 @@
 <div class="sbbs-root" data-view="grid">
-    <header class="sbbs-bar">
+    <header>
+      <form id="sbbs_search_form" class="sbbs-bar" role="search">
         <div class="sbbs-bar-row">
+            <label class="sbbs-visually-hidden" for="sbbs_source">Card source</label>
             <select id="sbbs_source" class="text_pole sbbs-source" aria-label="Source"></select>
+            <label class="sbbs-visually-hidden" for="sbbs_query">Search character cards</label>
             <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="128" enterkeyhint="search" autocomplete="off" spellcheck="false">
-            <button id="sbbs_go" class="menu_button sbbs-go" type="button" title="Search" aria-label="Search">
+            <button id="sbbs_go" class="menu_button sbbs-go" type="submit" title="Search" aria-label="Search">
                 <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
             </button>
         </div>
         <div class="sbbs-bar-row sbbs-bar-row-secondary">
+            <label class="sbbs-visually-hidden" for="sbbs_sort">Sort results</label>
             <select id="sbbs_sort" class="text_pole sbbs-sort" aria-label="Sort"></select>
             <label class="checkbox_label sbbs-sfw">
                 <input id="sbbs_sfw" type="checkbox">
                 <span>SFW only</span>
             </label>
+            <label id="sbbs_hide_ai_control" class="checkbox_label sbbs-hide-ai" hidden>
+                <input id="sbbs_hide_ai" type="checkbox">
+                <span>Hide AI-generated</span>
+            </label>
             <span id="sbbs_sfw_note" class="sbbs-control-note" aria-live="polite"></span>
             <span id="sbbs_count" class="sbbs-count" aria-live="polite"></span>
         </div>
+      </form>
     </header>
 
-    <div class="sbbs-body">
+    <div class="sbbs-body" aria-busy="false">
         <div id="sbbs_state" class="sbbs-state" role="status"></div>
         <ul id="sbbs_grid" class="sbbs-grid" role="list"></ul>
         <button id="sbbs_more" class="menu_button sbbs-more" type="button" hidden>Load more</button>

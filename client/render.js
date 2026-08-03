@@ -56,6 +56,9 @@ export function isAllowedImageUrl(raw, allowedHosts) {
     if (url.protocol !== 'https:') {
         return false;
     }
+    if ((url.port !== '' && url.port !== '443') || url.username !== '' || url.password !== '') {
+        return false;
+    }
 
     if (!Array.isArray(allowedHosts)) {
         return false;

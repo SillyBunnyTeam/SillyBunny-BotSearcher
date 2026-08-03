@@ -158,6 +158,9 @@ export function hostCheckedUrl(raw, hosts) {
     if (url.protocol !== 'https:') {
         return null;
     }
+    if ((url.port !== '' && url.port !== '443') || url.username !== '' || url.password !== '') {
+        return null;
+    }
     if (!Array.isArray(hosts) || !hosts.includes(url.hostname.toLowerCase())) {
         return null;
     }

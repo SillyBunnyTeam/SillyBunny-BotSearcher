@@ -16,6 +16,7 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, own } from '../validate.js';
 import { mintRef } from '../refs.js';
+import { offsetCursor } from '../paging.js';
 
 const BASE = 'https://quillgen.app';
 const API = '/v1/public/api/browse/characters';
@@ -36,12 +37,15 @@ function tagsOf(card) {
 }
 
 /** Quillgen rates its own content, which is more reliable than guessing from tags. */
-function isNsfw(card) {
+function contentRating(card) {
     if (own(card, 'possibleNsfw') === true) {
-        return true;
+        return 'sensitive';
     }
     const rating = own(card, 'contentRating');
-    return typeof rating === 'string' && rating.toLowerCase() !== 'general';
+    if (typeof rating !== 'string') {
+        return 'unknown';
+    }
+    return rating.toLowerCase() === 'general' ? 'sfw' : 'sensitive';
 }
 
 function toRecord(card, build) {
@@ -59,7 +63,7 @@ function toRecord(card, build) {
         tagline: own(card, 'desc_preview'),
         creator: own(card, 'creator'),
         tags: tagsOf(card),
-        nsfw: isNsfw(card),
+        contentRating: contentRating(card),
         stats: { views: undefined, downloads: undefined, favorites: undefined, tokens: undefined },
         createdAt: null,
         thumbUrl: avatarUrl(id),
@@ -76,11 +80,12 @@ function toRecord(card, build) {
             // The listing exposes no card internals. The real answer comes from
             // the downloaded bytes at import time, which is the honest source.
             lorebookEntries: null,
-            alternateGreetings: 0,
-            hasSystemPrompt: false,
-            hasPostHistoryInstructions: false,
-            hasDepthPrompt: false,
-            embeddedAssets: 0,
+            alternateGreetings: null,
+            hasSystemPrompt: null,
+            hasPostHistoryInstructions: null,
+            hasDepthPrompt: null,
+            regexScripts: null,
+            embeddedAssets: null,
             specVersion: null,
             originSite: 'Quillgen',
         },
@@ -114,10 +119,12 @@ export const quillgen = Object.freeze({
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit }) {
+    async search(ctx, { query, cursor, limit }) {
+        const pageSize = clampInt(limit, 1, 48, 24);
+        const start = offsetCursor(cursor);
         const url = new URL(API, BASE);
-        url.searchParams.set('limit', String(clampInt(limit, 1, 48, 24)));
-        url.searchParams.set('offset', String(clampInt(offset, 0, 5000, 0)));
+        url.searchParams.set('limit', String(pageSize));
+        url.searchParams.set('offset', String(start));
         if (typeof query === 'string' && query !== '') {
             url.searchParams.set('search', query.slice(0, 128));
         }
@@ -125,16 +132,16 @@ export const quillgen = Object.freeze({
         const data = await ctx.fetchJson(url, { maxBytes: 4 << 20, timeoutMs: 10000 });
 
         const raw = own(data, 'cards');
-        const cards = Array.isArray(raw) ? raw.slice(0, 48) : [];
+        const cards = Array.isArray(raw) ? raw.slice(0, pageSize) : [];
         const rawTotal = own(data, 'total');
         const total = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? Math.floor(rawTotal) : null;
 
         const items = cards.map((card) => toRecord(card, buildSummary)).filter((item) => item !== null);
-        const start = clampInt(offset, 0, 5000, 0);
-
         return {
             total,
-            hasMore: total === null ? cards.length > 0 : start + cards.length < total,
+            next: cards.length > 0 && (total === null ? cards.length >= pageSize : start + cards.length < total)
+                ? { o: start + cards.length }
+                : null,
             items,
         };
     },

@@ -20,6 +20,7 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own, hostCheckedUrl } from '../validate.js';
 import { mintRef } from '../refs.js';
+import { pageCursor } from '../paging.js';
 
 const API = 'https://server.pygmalion.chat';
 const SERVICE = 'galatea.v1.PublicCharacterService';
@@ -90,12 +91,14 @@ function tagsOf(character) {
 
 /**
  * Pygmalion has no per-card adult flag on the public listing; `includeSensitive`
- * is a request-side filter only. Fall back to the tags, and treat unknown as
- * safe — unlike Botbooru, this catalogue is not adult by default.
+ * is a request-side filter only. Positive tags are sensitive; otherwise only
+ * a search that asked the source for safe content may claim SFW.
  */
-function isNsfw(tags) {
+function contentRating(tags, assumeSfw = false) {
     const lowered = tags.map((tag) => tag.toLowerCase());
-    return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut'].some((flag) => lowered.includes(flag));
+    return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut'].some((flag) => lowered.includes(flag))
+        ? 'sensitive'
+        : (assumeSfw ? 'sfw' : 'unknown');
 }
 
 function creatorOf(character) {
@@ -103,7 +106,7 @@ function creatorOf(character) {
     return own(owner, 'displayName') ?? own(owner, 'username') ?? '';
 }
 
-function toSummary(character) {
+function toSummary(character, assumeSfw = false) {
     const id = own(character, 'id');
     if (typeof id !== 'string' || !UUID.test(id)) {
         return null;
@@ -119,7 +122,7 @@ function toSummary(character) {
         tagline: own(character, 'description'),
         creator: creatorOf(character),
         tags,
-        nsfw: isNsfw(tags),
+        contentRating: contentRating(tags, assumeSfw),
         stats: {
             views: own(character, 'views'),
             downloads: own(character, 'stars'),
@@ -150,7 +153,7 @@ function toDetail(payload, id) {
         tagline: own(character, 'description'),
         creator: creatorOf(character) || own(personality, 'creator'),
         tags,
-        nsfw: isNsfw(tags),
+        contentRating: contentRating(tags),
         stats: {
             views: own(character, 'views'),
             downloads: own(character, 'stars'),
@@ -171,11 +174,12 @@ function toDetail(payload, id) {
             // Pygmalion's public API exposes no lorebook or prompt-override
             // fields, so these are reported as unknown rather than guessed at.
             lorebookEntries: null,
-            alternateGreetings: Array.isArray(versions) ? Math.max(0, versions.length - 1) : 0,
-            hasSystemPrompt: false,
-            hasPostHistoryInstructions: false,
-            hasDepthPrompt: false,
-            embeddedAssets: 0,
+            alternateGreetings: Array.isArray(versions) ? Math.max(0, versions.length - 1) : null,
+            hasSystemPrompt: null,
+            hasPostHistoryInstructions: null,
+            hasDepthPrompt: null,
+            regexScripts: null,
+            embeddedAssets: null,
             specVersion: null,
             originSite: own(character, 'source') || 'Pygmalion',
         },
@@ -208,16 +212,18 @@ export const pygmalion = Object.freeze({
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit, sort, sfwOnly }) {
+    async search(ctx, { query, cursor, limit, sort, sfwOnly }) {
         const pageSize = clampInt(limit, 1, 48, 24);
-        const pageNumber = Math.floor(clampInt(offset, 0, 5000, 0) / pageSize);
+        const pageNumber = pageCursor(cursor, { first: 0, max: 999 });
 
         const message = {
             orderBy: pick(sort, SORTS, 'approved_at'),
             orderDescending: true,
             includeSensitive: sfwOnly !== true,
             pageSize,
-            pageNumber,
+            // The Connect schema calls this field `page`; unknown JSON fields
+            // are silently ignored, so the former `pageNumber` repeated page 0.
+            page: pageNumber,
         };
         if (typeof query === 'string' && query.trim() !== '') {
             message.query = query.trim().slice(0, 128);
@@ -226,16 +232,19 @@ export const pygmalion = Object.freeze({
         const data = await ctx.fetchJson(rpcUrl('CharacterSearch', message), { maxBytes: 4 << 20, timeoutMs: 10000 });
 
         const raw = own(data, 'characters');
-        const characters = Array.isArray(raw) ? raw.slice(0, 48) : [];
+        const characters = Array.isArray(raw) ? raw.slice(0, pageSize) : [];
         // totalItems arrives as a string.
         const totalRaw = Number(own(data, 'totalItems'));
         const total = Number.isFinite(totalRaw) && totalRaw >= 0 ? Math.floor(totalRaw) : null;
 
-        const items = characters.map(toSummary).filter((item) => item !== null);
+        const items = characters.map((character) => toSummary(character, sfwOnly === true)).filter((item) => item !== null);
 
         return {
             total,
-            hasMore: total === null ? characters.length >= pageSize : (pageNumber + 1) * pageSize < total,
+            next: characters.length > 0
+                && (total === null ? characters.length >= pageSize : (pageNumber + 1) * pageSize < total)
+                ? { p: pageNumber + 1 }
+                : null,
             items,
         };
     },
@@ -260,7 +269,7 @@ export const pygmalion = Object.freeze({
     },
 
     async probe(ctx) {
-        const url = rpcUrl('CharacterSearch', { orderBy: 'approved_at', orderDescending: true, includeSensitive: false, pageSize: 1, pageNumber: 0 });
+        const url = rpcUrl('CharacterSearch', { orderBy: 'approved_at', orderDescending: true, includeSensitive: false, pageSize: 1, page: 0 });
         const data = await ctx.fetchJson(url, { maxBytes: 1 << 20, timeoutMs: 8000 });
         return Array.isArray(own(data, 'characters'));
     },

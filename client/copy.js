@@ -138,13 +138,19 @@ export function insideRows(inside) {
     } else if (inside.alternateGreetings > 0) {
         add('Alternate greetings', formatCount(inside.alternateGreetings, 'greeting'));
     }
-    if (inside.hasSystemPrompt) {
+    if (inside.hasSystemPrompt === null) {
+        add('System prompt', 'Not reported');
+    } else if (inside.hasSystemPrompt) {
         add('System prompt', 'Included');
     }
-    if (inside.hasPostHistoryInstructions) {
+    if (inside.hasPostHistoryInstructions === null) {
+        add('Post-history instructions', 'Not reported');
+    } else if (inside.hasPostHistoryInstructions) {
         add('Post-history instructions', 'Included');
     }
-    if (inside.hasDepthPrompt) {
+    if (inside.hasDepthPrompt === null) {
+        add('Depth prompt', 'Not reported');
+    } else if (inside.hasDepthPrompt) {
         add('Depth prompt', 'Included');
     }
     if (inside.regexScripts === null) {
@@ -181,6 +187,8 @@ export function searchErrorMessage(error, sourceLabel) {
             return `${sourceLabel} returned an error.`;
         case 'too_large':
             return `${sourceLabel} sent more data than BotSearcher accepts.`;
+        case 'bad_cursor':
+            return `The ${sourceLabel} result page expired. Start a new search to continue.`;
         case 'bad_json':
         case 'unsafe_json':
             return `${sourceLabel} sent a response this version cannot read. The source API may have changed.`;

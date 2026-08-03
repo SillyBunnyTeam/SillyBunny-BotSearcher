@@ -18,6 +18,7 @@
 
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, own } from '../validate.js';
+import { pageCursor } from '../paging.js';
 
 const SITE = 'https://character-tavern.com';
 const SEARCH = '/api/search/cards';
@@ -44,12 +45,17 @@ function tagsOf(hit) {
 }
 
 /** Character Tavern rates its own content, which beats guessing from tags. */
-function isNsfw(hit, tags) {
+function contentRating(hit, tags) {
     if (own(hit, 'isNSFW') === true) {
-        return true;
+        return 'sensitive';
+    }
+    if (own(hit, 'isNSFW') === false) {
+        return 'sfw';
     }
     const lowered = tags.map((tag) => tag.toLowerCase());
-    return ['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag));
+    return ['nsfw', 'nsfl', 'gore', 'explicit'].some((flag) => lowered.includes(flag))
+        ? 'sensitive'
+        : 'unknown';
 }
 
 /** Unix seconds. */
@@ -66,13 +72,15 @@ function insideOf(hit) {
 
     return {
         // hasLorebook is a flag, not a count; null means "present, size unknown".
-        lorebookEntries: own(hit, 'hasLorebook') === true ? null : 0,
-        alternateGreetings: Array.isArray(greetings) ? greetings.length : 0,
-        hasSystemPrompt: false,
-        hasPostHistoryInstructions: nonEmpty(own(hit, 'characterPostHistoryPrompt')),
-        hasDepthPrompt: false,
-        regexScripts: 0,
-        embeddedAssets: 0,
+        lorebookEntries: own(hit, 'hasLorebook') === true
+            ? null
+            : (own(hit, 'hasLorebook') === false ? 0 : null),
+        alternateGreetings: Array.isArray(greetings) ? greetings.length : null,
+        hasSystemPrompt: null,
+        hasPostHistoryInstructions: reportedNonEmpty(hit, 'characterPostHistoryPrompt'),
+        hasDepthPrompt: null,
+        regexScripts: null,
+        embeddedAssets: null,
         specVersion: 'chara_card_v2',
         originSite: 'Character Tavern',
     };
@@ -80,6 +88,10 @@ function insideOf(hit) {
 
 function nonEmpty(value) {
     return typeof value === 'string' && value.trim() !== '';
+}
+
+function reportedNonEmpty(object, key) {
+    return Object.prototype.hasOwnProperty.call(object, key) ? nonEmpty(own(object, key)) : null;
 }
 
 function toRecord(hit, build) {
@@ -97,7 +109,7 @@ function toRecord(hit, build) {
         tagline: own(hit, 'tagline') ?? own(hit, 'pageDescription'),
         creator: own(hit, 'author'),
         tags,
-        nsfw: isNsfw(hit, tags),
+        contentRating: contentRating(hit, tags),
         stats: {
             views: own(hit, 'messages'),
             downloads: own(hit, 'downloads'),
@@ -163,9 +175,9 @@ export const charactertavern = Object.freeze({
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit }) {
+    async search(ctx, { query, cursor, limit }) {
         const perPage = clampInt(limit, 1, 48, 24);
-        const page = Math.floor(clampInt(offset, 0, 5000, 0) / perPage) + 1;
+        const page = pageCursor(cursor);
 
         const url = new URL(SEARCH, SITE);
         url.searchParams.set('query', typeof query === 'string' ? query.slice(0, 128) : '');
@@ -176,7 +188,7 @@ export const charactertavern = Object.freeze({
         const data = await ctx.fetchJson(url, { maxBytes: 12 << 20, timeoutMs: 15000 });
 
         const raw = own(data, 'hits');
-        const hits = Array.isArray(raw) ? raw.slice(0, 48) : [];
+        const hits = Array.isArray(raw) ? raw.slice(0, perPage) : [];
         const rawTotal = own(data, 'totalHits');
         const total = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? Math.floor(rawTotal) : null;
 
@@ -184,7 +196,9 @@ export const charactertavern = Object.freeze({
 
         return {
             total,
-            hasMore: total === null ? hits.length >= perPage : page * perPage < total,
+            next: hits.length > 0 && (total === null ? hits.length >= perPage : page * perPage < total)
+                ? { p: page + 1 }
+                : null,
             items,
         };
     },

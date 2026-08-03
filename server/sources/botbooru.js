@@ -18,6 +18,7 @@
 import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
 import { mintRef } from '../refs.js';
+import { offsetCursor } from '../paging.js';
 
 const BASE = 'https://botbooru.com';
 
@@ -65,10 +66,10 @@ function writerFrom(rawTags) {
     return '';
 }
 
-function isNsfw(names) {
+function contentRating(names) {
     // Conservative: only an explicit sfw tag clears a card. Botbooru is mostly
     // adult, so "unknown" must not render unblurred.
-    return !names.includes(SFW_TAG);
+    return names.includes(SFW_TAG) ? 'sfw' : 'sensitive';
 }
 
 /**
@@ -146,7 +147,7 @@ function toSummary(post) {
         tagline: own(post, 'tagline') || own(post, 'description_excerpt'),
         creator: writerFrom(own(post, 'tags')),
         tags: names,
-        nsfw: isNsfw(names),
+        contentRating: contentRating(names),
         stats: {
             views: own(post, 'views'),
             downloads: own(post, 'downloads'),
@@ -176,7 +177,7 @@ function toDetail(post, id) {
         tagline: own(post, 'tagline'),
         creator: own(post, 'uploader_name') || writerFrom(own(post, 'tags')),
         tags: names,
-        nsfw: isNsfw(names),
+        contentRating: contentRating(names),
         stats: {
             views: own(post, 'views'),
             downloads: own(post, 'downloads'),
@@ -194,23 +195,35 @@ function toDetail(post, id) {
         creatorNotes: own(post, 'creator_notes'),
         inside: {
             lorebookEntries: countLorebookEntries(lorebook, own(post, 'has_lorebook')),
-            alternateGreetings: Array.isArray(greetings) ? greetings.length : 0,
-            hasSystemPrompt: nonEmptyString(own(post, 'system_prompt')),
-            hasPostHistoryInstructions: nonEmptyString(own(post, 'post_history_instructions')),
-            hasDepthPrompt: hasDepthPrompt(own(post, 'depth_prompt')),
-            embeddedAssets: Array.isArray(own(gallery, 'images')) ? own(gallery, 'images').length : 0,
+            alternateGreetings: Array.isArray(greetings) ? greetings.length : null,
+            hasSystemPrompt: reportedNonEmpty(post, 'system_prompt'),
+            hasPostHistoryInstructions: reportedNonEmpty(post, 'post_history_instructions'),
+            hasDepthPrompt: reportedDepth(post),
+            embeddedAssets: Array.isArray(own(gallery, 'images')) ? own(gallery, 'images').length : null,
             specVersion: 'chara_card_v2',
             originSite: own(post, 'origin'),
         },
     });
 }
 
-function nonEmptyString(value) {
-    return typeof value === 'string' && value.trim() !== '';
+function reportedNonEmpty(object, key) {
+    if (!object || typeof object !== 'object' || !Object.prototype.hasOwnProperty.call(object, key)) {
+        return null;
+    }
+    const value = own(object, key);
+    return typeof value === 'string' ? value.trim() !== '' : null;
 }
 
-function hasDepthPrompt(value) {
-    return nonEmptyString(own(value, 'prompt'));
+function reportedDepth(post) {
+    if (!Object.prototype.hasOwnProperty.call(post, 'depth_prompt')) {
+        return null;
+    }
+    const value = own(post, 'depth_prompt');
+    if (!value || typeof value !== 'object') {
+        return false;
+    }
+    const prompt = own(value, 'prompt');
+    return typeof prompt === 'string' ? prompt.trim() !== '' : null;
 }
 
 /**
@@ -219,7 +232,7 @@ function hasDepthPrompt(value) {
  */
 function countLorebookEntries(lorebook, hasLorebook) {
     if (!lorebook || typeof lorebook !== 'object') {
-        return hasLorebook === true ? null : 0;
+        return hasLorebook === true ? null : (hasLorebook === false ? 0 : null);
     }
     const entries = own(lorebook, 'entries');
     if (Array.isArray(entries)) {
@@ -228,7 +241,7 @@ function countLorebookEntries(lorebook, hasLorebook) {
     if (entries && typeof entries === 'object') {
         return Object.keys(entries).length;
     }
-    return hasLorebook === true ? null : 0;
+    return hasLorebook === true ? null : (hasLorebook === false ? 0 : null);
 }
 
 export const botbooru = Object.freeze({
@@ -245,13 +258,16 @@ export const botbooru = Object.freeze({
         paging: 'offset',
         sorts: SORTS,
         sfwToggle: true,
+        hideAiToggle: true,
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit, sort, sfwOnly, hideAi }) {
+    async search(ctx, { query, cursor, limit, sort, sfwOnly, hideAi }) {
+        const pageSize = clampInt(limit, 1, 48, 24);
+        const start = offsetCursor(cursor);
         const url = new URL('/posts/', BASE);
-        url.searchParams.set('limit', String(clampInt(limit, 1, 48, 24)));
-        url.searchParams.set('offset', String(clampInt(offset, 0, 5000, 0)));
+        url.searchParams.set('limit', String(pageSize));
+        url.searchParams.set('offset', String(start));
         url.searchParams.set('sort', pick(sort, SORTS, 'latest'));
 
         if (typeof query === 'string' && query !== '') {
@@ -267,16 +283,16 @@ export const botbooru = Object.freeze({
         const data = await ctx.fetchJson(url, { maxBytes: 2 << 20, timeoutMs: 8000 });
 
         const rawPosts = own(data, 'posts');
-        const posts = Array.isArray(rawPosts) ? rawPosts.slice(0, 48) : [];
+        const posts = Array.isArray(rawPosts) ? rawPosts.slice(0, pageSize) : [];
         const rawTotal = own(data, 'total');
         const total = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? Math.floor(rawTotal) : null;
 
         const items = posts.map(toSummary).filter((item) => item.id !== '');
-        const start = clampInt(offset, 0, 5000, 0);
-
         return {
             total,
-            hasMore: total === null ? items.length > 0 : start + posts.length < total,
+            next: posts.length > 0 && (total === null ? posts.length >= pageSize : start + posts.length < total)
+                ? { o: start + posts.length }
+                : null,
             items,
         };
     },

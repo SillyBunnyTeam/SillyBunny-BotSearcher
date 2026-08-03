@@ -9,7 +9,12 @@
  * Adapters map upstream names to our names; this module owns types and limits.
  */
 
-import { CARD_SUMMARY_FIELDS, CARD_DETAIL_FIELDS, FIELD_LIMITS } from '../shared/schema.js';
+import {
+    CARD_SUMMARY_FIELDS,
+    CARD_DETAIL_FIELDS,
+    CONTENT_RATINGS,
+    FIELD_LIMITS,
+} from '../shared/schema.js';
 import { str, intOrNull, isoOrNull } from './strings.js';
 
 const SUMMARY_KEYS = new Set(CARD_SUMMARY_FIELDS);
@@ -61,14 +66,18 @@ function inside(value) {
     return {
         lorebookEntries: intOrNull(read('lorebookEntries')),
         alternateGreetings: intOrNull(read('alternateGreetings')),
-        hasSystemPrompt: read('hasSystemPrompt') === true,
-        hasPostHistoryInstructions: read('hasPostHistoryInstructions') === true,
-        hasDepthPrompt: read('hasDepthPrompt') === true,
+        hasSystemPrompt: nullableBoolean(read('hasSystemPrompt')),
+        hasPostHistoryInstructions: nullableBoolean(read('hasPostHistoryInstructions')),
+        hasDepthPrompt: nullableBoolean(read('hasDepthPrompt')),
         regexScripts: intOrNull(read('regexScripts')),
         embeddedAssets: intOrNull(read('embeddedAssets')),
         specVersion: str(read('specVersion'), 32) || null,
         originSite: str(read('originSite'), 64) || null,
     };
+}
+
+function nullableBoolean(value) {
+    return typeof value === 'boolean' ? value : null;
 }
 
 /**
@@ -91,7 +100,7 @@ function build(candidate, allowedKeys) {
     put('tagline', str(get('tagline'), FIELD_LIMITS.shortText));
     put('creator', str(get('creator'), FIELD_LIMITS.shortText));
     put('tags', tags(get('tags')));
-    put('nsfw', get('nsfw') === true);
+    put('contentRating', CONTENT_RATINGS.includes(get('contentRating')) ? get('contentRating') : 'unknown');
     put('stats', stats(get('stats')));
     put('createdAt', isoOrNull(get('createdAt')));
     put('thumbUrl', urlOrNull(get('thumbUrl')));
@@ -123,7 +132,10 @@ function urlOrNull(value) {
     }
     try {
         const url = new URL(value);
-        return url.protocol === 'https:' ? url.toString() : null;
+        return url.protocol === 'https:' && (url.port === '' || url.port === '443')
+            && url.username === '' && url.password === ''
+            ? url.toString()
+            : null;
     } catch {
         return null;
     }

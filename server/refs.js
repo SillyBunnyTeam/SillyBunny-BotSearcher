@@ -23,17 +23,17 @@ import crypto from 'node:crypto';
 const SECRET = crypto.randomBytes(32);
 
 const SIGNATURE_LENGTH = 22;
-const MAX_REF_LENGTH = 512;
+const MAX_TOKEN_LENGTH = 512;
 
 function base64url(buffer) {
     return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function sign(source, payloadPart) {
+function sign(scope, payloadPart) {
     // The source is inside the signed material, so a ref minted for one source
     // cannot be replayed against another adapter's URL builder.
     return base64url(
-        crypto.createHmac('sha256', SECRET).update(`${source}|${payloadPart}`).digest(),
+        crypto.createHmac('sha256', SECRET).update(`${scope}|${payloadPart}`).digest(),
     ).slice(0, SIGNATURE_LENGTH);
 }
 
@@ -42,8 +42,8 @@ function sign(source, payloadPart) {
  * @param {Record<string, string | number>} payload small and flat
  * @returns {string | null}
  */
-export function mintRef(source, payload) {
-    if (typeof source !== 'string' || !payload || typeof payload !== 'object') {
+export function mintToken(scope, payload) {
+    if (typeof scope !== 'string' || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
         return null;
     }
 
@@ -54,11 +54,11 @@ export function mintRef(source, payload) {
         return null;
     }
 
-    if (payloadPart.length > MAX_REF_LENGTH - SIGNATURE_LENGTH - 1) {
+    if (payloadPart.length > MAX_TOKEN_LENGTH - SIGNATURE_LENGTH - 1) {
         return null;
     }
 
-    return `${payloadPart}.${sign(source, payloadPart)}`;
+    return `${payloadPart}.${sign(scope, payloadPart)}`;
 }
 
 /**
@@ -68,8 +68,8 @@ export function mintRef(source, payload) {
  * @param {unknown} ref
  * @returns {Record<string, unknown> | null}
  */
-export function verifyRef(source, ref) {
-    if (typeof source !== 'string' || typeof ref !== 'string' || ref === '' || ref.length > MAX_REF_LENGTH) {
+export function verifyToken(scope, ref) {
+    if (typeof scope !== 'string' || typeof ref !== 'string' || ref === '' || ref.length > MAX_TOKEN_LENGTH) {
         return null;
     }
 
@@ -85,7 +85,7 @@ export function verifyRef(source, ref) {
         return null;
     }
 
-    const expected = sign(source, payloadPart);
+    const expected = sign(scope, payloadPart);
 
     // Constant-time compare. timingSafeEqual throws on a length mismatch, so
     // check that first.
@@ -108,4 +108,20 @@ export function verifyRef(source, ref) {
     }
 
     return parsed;
+}
+
+export function mintRef(source, payload) {
+    return mintToken(`thumb:${source}`, payload);
+}
+
+export function verifyRef(source, ref) {
+    return verifyToken(`thumb:${source}`, ref);
+}
+
+export function mintCursor(source, payload) {
+    return mintToken(`cursor:${source}`, payload);
+}
+
+export function verifyCursor(source, cursor) {
+    return verifyToken(`cursor:${source}`, cursor);
 }

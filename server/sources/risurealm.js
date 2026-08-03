@@ -18,6 +18,7 @@ import { buildSummary, buildDetail } from '../normalize.js';
 import { clampInt, pick, own } from '../validate.js';
 import { mintRef } from '../refs.js';
 import { readSvelteKitData } from '../devalue.js';
+import { indexedPageCursor } from '../paging.js';
 
 const SITE = 'https://realm.risuai.net';
 const IMAGES = 'https://sv.risuai.xyz';
@@ -30,7 +31,8 @@ const SVELTEKIT_PARAMS = Object.freeze({
 
 const SORTS = Object.freeze(['recommended', 'download', 'newest', 'trending']);
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The site has both newer UUID ids and legacy 64-character hex ids. */
+const CHARACTER_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64})$/i;
 
 /** Image references are content hashes. */
 const IMAGE_HASH = /^[0-9a-f]{16,128}$/i;
@@ -59,9 +61,11 @@ function tagsOf(card) {
     return Array.isArray(tags) ? tags.filter((tag) => typeof tag === 'string') : [];
 }
 
-function isNsfw(tags) {
+function contentRating(tags) {
     const lowered = tags.map((tag) => tag.toLowerCase());
-    return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut', 'hentai'].some((flag) => lowered.includes(flag));
+    return ['nsfw', 'nsfl', 'gore', 'explicit', 'smut', 'hentai'].some((flag) => lowered.includes(flag))
+        ? 'sensitive'
+        : 'unknown';
 }
 
 /**
@@ -71,7 +75,7 @@ function isNsfw(tags) {
  */
 function toSummary(card) {
     const id = own(card, 'id');
-    if (typeof id !== 'string' || !UUID.test(id)) {
+    if (typeof id !== 'string' || !CHARACTER_ID.test(id)) {
         return null;
     }
 
@@ -85,7 +89,7 @@ function toSummary(card) {
         tagline: own(card, 'desc'),
         creator: own(card, 'authorname'),
         tags,
-        nsfw: isNsfw(tags),
+        contentRating: contentRating(tags),
         stats: { views: undefined, downloads: undefined, favorites: undefined, tokens: undefined },
         createdAt: null,
         thumbUrl: hash === null ? null : imageUrl(hash),
@@ -108,7 +112,7 @@ function toDetail(card, id) {
         tagline: '',
         creator: own(card, 'authorname'),
         tags,
-        nsfw: isNsfw(tags),
+        contentRating: contentRating(tags),
         stats: { views: undefined, downloads: undefined, favorites: undefined, tokens: undefined },
         createdAt: null,
         thumbUrl: hash === null ? null : imageUrl(hash),
@@ -121,12 +125,17 @@ function toDetail(card, id) {
         creatorNotes: '',
         inside: {
             // The gallery exposes flags rather than counts.
-            lorebookEntries: own(card, 'haslore') === true ? null : 0,
-            alternateGreetings: 0,
-            hasSystemPrompt: false,
-            hasPostHistoryInstructions: false,
-            hasDepthPrompt: false,
-            embeddedAssets: own(card, 'hasAsset') === true ? null : 0,
+            lorebookEntries: own(card, 'haslore') === true
+                ? null
+                : (own(card, 'haslore') === false ? 0 : null),
+            alternateGreetings: null,
+            hasSystemPrompt: null,
+            hasPostHistoryInstructions: null,
+            hasDepthPrompt: null,
+            regexScripts: null,
+            embeddedAssets: own(card, 'hasAsset') === true
+                ? null
+                : (own(card, 'hasAsset') === false ? 0 : null),
             specVersion: 'chara_card_v3',
             originSite: 'RisuRealm',
         },
@@ -155,7 +164,7 @@ export const risurealm = Object.freeze({
     label: 'RisuRealm',
     homepage: SITE,
     allowedHosts: Object.freeze(['realm.risuai.net', 'sv.risuai.xyz']),
-    idPattern: UUID,
+    idPattern: CHARACTER_ID,
     tier: 1,
     nativeImport: true,
     /** Full-size art, measured around 1.4 MB; there is no preview endpoint. */
@@ -171,13 +180,14 @@ export const risurealm = Object.freeze({
         detail: true,
     }),
 
-    async search(ctx, { query, offset, limit }) {
+    async search(ctx, { query, cursor, limit, sort }) {
         const perPage = clampInt(limit, 1, 48, 24);
-        const page = Math.floor(clampInt(offset, 0, 5000, 0) / perPage) + 1;
+        const { page, index } = indexedPageCursor(cursor);
 
         const url = dataUrl({
             page,
             q: typeof query === 'string' && query !== '' ? query.slice(0, 128) : undefined,
+            sort: pick(sort, SORTS, 'recommended'),
         });
 
         const payload = await ctx.fetchJson(url, { maxBytes: 4 << 20, timeoutMs: 12000 });
@@ -189,13 +199,18 @@ export const risurealm = Object.freeze({
             throw Object.assign(new Error('bad_json'), { code: 'bad_json', detail: 'risurealm' });
         }
 
-        const cards = cardsFrom(root).slice(0, 48);
+        const allCards = cardsFrom(root).slice(0, 256);
+        const cards = allCards.slice(index, index + perPage);
         const items = cards.map(toSummary).filter((item) => item !== null);
+        const consumed = index + cards.length;
+        const next = cards.length === 0 && allCards.length === 0
+            ? null
+            : (consumed < allCards.length ? { p: page, i: consumed } : { p: page + 1, i: 0 });
 
         return {
             // RisuRealm reports no total.
             total: null,
-            hasMore: cards.length >= perPage,
+            next,
             items,
         };
     },

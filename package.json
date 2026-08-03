@@ -1,12 +1,22 @@
 {
     "name": "sillybunny-botsearcher",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Server plugin required by the SillyBunny BotSearcher frontend extension.",
     "type": "module",
     "main": "server/index.js",
     "private": true,
     "scripts": {
-        "test": "node --test tests/*.test.js"
+        "lint": "eslint .",
+        "test": "node --test tests/*.test.js",
+        "test:coverage": "node --test --experimental-test-coverage tests/*.test.js",
+        "probe": "node scripts/probe-sources.mjs"
+    },
+    "devDependencies": {
+        "eslint": "^9.39.5",
+        "express": "^4.21.0",
+        "jsdom": "^26.1.0",
+        "node-fetch": "^3.3.2",
+        "rate-limiter-flexible": "^5.0.5"
     },
     "license": "AGPL-3.0",
     "repository": {
@@ -14,6 +24,6 @@
         "url": "https://github.com/platberlitz/SillyBunny-BotSearcher.git"
     },
     "engines": {
-        "node": ">=18"
+        "node": ">=20"
     }
 }

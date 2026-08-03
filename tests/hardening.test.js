@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 
-import { fetchJson, fetchBytes } from '../server/http.js';
+import { fetchJson } from '../server/http.js';
 import { mintRef, verifyRef } from '../server/refs.js';
 import { detectImageType } from '../server/imagetype.js';
 import { markFailure, markSuccess, isDown, stateOf, clearAll, classify } from '../server/health.js';
@@ -179,6 +179,18 @@ test('a host outside the adapter allow-list is refused before any request', asyn
             );
         }
     }
+});
+
+test('non-default HTTPS ports and URL credentials are refused before any request', async () => {
+    const adapter = SOURCES.botbooru;
+    await assert.rejects(
+        () => fetchJson(adapter, 'https://botbooru.com:444/x'),
+        (error) => error.code === 'port_not_allowed',
+    );
+    await assert.rejects(
+        () => fetchJson(adapter, 'https://user:password@botbooru.com/x'),
+        (error) => error.code === 'credentials_not_allowed',
+    );
 });
 
 test('malformed upstream JSON is reported, not thrown raw', async () => {

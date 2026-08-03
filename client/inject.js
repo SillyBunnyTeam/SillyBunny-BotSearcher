@@ -131,10 +131,10 @@ function ensureWandItem(onOpen) {
         return;
     }
 
-    const item = document.createElement('div');
+    const item = document.createElement('button');
     item.id = DOM_IDS.wandItem;
     item.className = 'list-group-item flex-container flexGap5 interactable';
-    item.tabIndex = 0;
+    item.type = 'button';
 
     const icon = document.createElement('div');
     icon.className = 'fa-solid fa-magnifying-glass extensionsMenuExtensionButton';
@@ -145,12 +145,6 @@ function ensureWandItem(onOpen) {
 
     item.append(icon, label);
     item.addEventListener('click', () => onOpen());
-    item.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            onOpen();
-        }
-    });
 
     menu.append(item);
     console.debug(`[${LOG_TAG}] wand menu fallback installed`);

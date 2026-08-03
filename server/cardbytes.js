@@ -33,8 +33,41 @@ const MAX_INFLATED_BYTES = 4 * 1024 * 1024;
 /** Card JSON larger than this is not a card. */
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 
+/** Bounds the image decoder work a tiny compressed PNG can request. */
+const MAX_IMAGE_DIMENSION = 16_384;
+const MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+
+/** Legal PNG bit depths for each colour type from the PNG specification. */
+const BIT_DEPTHS_BY_COLOR_TYPE = Object.freeze({
+    0: Object.freeze([1, 2, 4, 8, 16]),
+    2: Object.freeze([8, 16]),
+    3: Object.freeze([1, 2, 4, 8]),
+    4: Object.freeze([8, 16]),
+    6: Object.freeze([8, 16]),
+});
+
 /** Keywords SillyTavern and the card specs use for embedded card data. */
 const CARD_KEYWORDS = new Set(['chara', 'ccv3']);
+
+const CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+        let value = n;
+        for (let bit = 0; bit < 8; bit++) {
+            value = value & 1 ? 0xEDB88320 ^ (value >>> 1) : value >>> 1;
+        }
+        table[n] = value >>> 0;
+    }
+    return table;
+})();
+
+function crc32Range(buffer, start, end) {
+    let crc = 0xFFFFFFFF;
+    for (let index = start; index < end; index++) {
+        crc = CRC_TABLE[(crc ^ buffer[index]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
 
 export class CardBytesError extends Error {
     constructor(code, detail) {
@@ -65,6 +98,9 @@ function readPngTextChunks(buffer) {
     let offset = PNG_SIGNATURE.length;
     let chunks = 0;
     let sawEnd = false;
+    let sawHeader = false;
+    let sawImageData = false;
+    let imageDataEnded = false;
 
     while (offset + 8 <= buffer.length) {
         if (++chunks > MAX_CHUNKS) {
@@ -86,6 +122,48 @@ function readPngTextChunks(buffer) {
         }
 
         const type = buffer.toString('latin1', offset + 4, offset + 8);
+        if (!/^[A-Za-z]{4}$/.test(type)) {
+            throw new CardBytesError('png_malformed', 'invalid chunk type');
+        }
+
+        const expectedCrc = buffer.readUInt32BE(dataEnd);
+        const actualCrc = crc32Range(buffer, offset + 4, dataEnd);
+        if (expectedCrc !== actualCrc) {
+            throw new CardBytesError('png_malformed', `${type} CRC mismatch`);
+        }
+
+        if (!sawHeader) {
+            if (type !== 'IHDR' || length !== 13) {
+                throw new CardBytesError('png_malformed', 'IHDR must be first and 13 bytes');
+            }
+            const width = buffer.readUInt32BE(dataStart);
+            const height = buffer.readUInt32BE(dataStart + 4);
+            const bitDepth = buffer[dataStart + 8];
+            const colorType = buffer[dataStart + 9];
+            const legalBitDepths = BIT_DEPTHS_BY_COLOR_TYPE[colorType];
+            if (width === 0 || height === 0
+                || width > MAX_IMAGE_DIMENSION
+                || height > MAX_IMAGE_DIMENSION
+                || width * height > MAX_IMAGE_PIXELS
+                || !legalBitDepths?.includes(bitDepth)
+                || buffer[dataStart + 10] !== 0
+                || buffer[dataStart + 11] !== 0
+                || buffer[dataStart + 12] > 1) {
+                throw new CardBytesError('png_malformed', 'invalid IHDR');
+            }
+            sawHeader = true;
+        } else if (type === 'IHDR') {
+            throw new CardBytesError('png_malformed', 'duplicate IHDR');
+        }
+
+        if (type === 'IDAT') {
+            if (imageDataEnded) {
+                throw new CardBytesError('png_malformed', 'non-consecutive IDAT');
+            }
+            sawImageData = true;
+        } else if (sawImageData) {
+            imageDataEnded = true;
+        }
 
         if (type === 'tEXt' || type === 'zTXt') {
             const data = buffer.subarray(dataStart, dataEnd);
@@ -104,6 +182,12 @@ function readPngTextChunks(buffer) {
         }
 
         if (type === 'IEND') {
+            if (length !== 0 || !sawImageData) {
+                throw new CardBytesError('png_malformed', 'invalid IEND or missing IDAT');
+            }
+            if (dataEnd + 4 !== buffer.length) {
+                throw new CardBytesError('png_malformed', 'trailing bytes after IEND');
+            }
             sawEnd = true;
             break;
         }

@@ -24,7 +24,7 @@ import {
 } from './copy.js';
 import { PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
 
-let openPopup = null;
+let openingPromise = null;
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -33,10 +33,17 @@ function context() {
 /**
  * @param {{ query?: string }} [options]
  */
-export async function openBrowser(options = {}) {
-    if (openPopup) {
-        return;
+export function openBrowser(options = {}) {
+    if (openingPromise) {
+        return openingPromise;
     }
+    openingPromise = openBrowserOnce(options).finally(() => {
+        openingPromise = null;
+    });
+    return openingPromise;
+}
+
+async function openBrowserOnce(options) {
 
     const ctx = context();
     const availability = await getAvailability();
@@ -54,6 +61,7 @@ export async function openBrowser(options = {}) {
 
     // Popup assigns a string body itself (public/scripts/popup.js:529), which is
     // how this extension stays free of HTML parsing in its own code.
+    let dispose = () => {};
     const popup = new ctx.Popup(html, ctx.POPUP_TYPE.DISPLAY, '', {
         large: true,
         wide: true,
@@ -62,16 +70,15 @@ export async function openBrowser(options = {}) {
         okButton: false,
         cancelButton: 'Close',
         onClose: () => {
-            openPopup = null;
+            dispose();
         },
     });
     popup.dlg.setAttribute('aria-label', 'Find cards online');
 
-    openPopup = popup;
     const closed = popup.show();
 
     if (connected) {
-        wireBrowser(popup, availability.health, options);
+        dispose = wireBrowser(popup, availability.health, options);
     } else {
         wireInstallPanel(popup, availability);
     }
@@ -88,6 +95,7 @@ function wireBrowser(popup, health, options) {
     const root = popup.content;
     const dom = {
         root: root.querySelector('.sbbs-root'),
+        form: root.querySelector('#sbbs_search_form'),
         bar: root.querySelector('.sbbs-bar'),
         source: root.querySelector('#sbbs_source'),
         query: root.querySelector('#sbbs_query'),
@@ -95,8 +103,11 @@ function wireBrowser(popup, health, options) {
         sort: root.querySelector('#sbbs_sort'),
         sfw: root.querySelector('#sbbs_sfw'),
         sfwNote: root.querySelector('#sbbs_sfw_note'),
+        hideAiControl: root.querySelector('#sbbs_hide_ai_control'),
+        hideAi: root.querySelector('#sbbs_hide_ai'),
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
+        body: root.querySelector('.sbbs-body'),
         grid: root.querySelector('#sbbs_grid'),
         more: root.querySelector('#sbbs_more'),
         detail: root.querySelector('#sbbs_detail'),
@@ -117,19 +128,22 @@ function wireBrowser(popup, health, options) {
         } else {
             setText(dom.state, 'Enabled sources are unavailable right now.');
         }
-        return;
+        return () => {};
     }
 
-    /** Card element -> record. Keeps untrusted strings out of the DOM entirely. */
+    /** Card element -> record and immutable source snapshot. */
     const records = new Map();
 
     const state = {
         source: usable.find((entry) => entry.id === settings.defaultSource) ?? usable[0],
-        offset: 0,
+        nextCursor: null,
         loading: false,
-        /** A search requested while one was in flight, honoured when it lands. */
-        rerun: null,
+        requestGeneration: 0,
+        searchController: null,
+        detailController: null,
+        disposed: false,
         items: [],
+        itemKeys: new Set(),
     };
 
     for (const source of usable) {
@@ -141,13 +155,12 @@ function wireBrowser(popup, health, options) {
     dom.source.value = state.source.id;
 
     dom.sfw.checked = settings.sfwOnlyDefault;
+    dom.hideAi.checked = settings.hideAiDefault;
     applySourceCapabilities();
 
     if (typeof options.query === 'string' && options.query !== '') {
         dom.query.value = options.query.slice(0, 128);
     }
-
-    setText(dom.state, `Enter a search term, or leave it blank to browse ${state.source.label}.`);
 
     // ---- events ----
 
@@ -157,29 +170,36 @@ function wireBrowser(popup, health, options) {
             return;
         }
         state.source = next;
+        state.detailController?.abort();
         applySourceCapabilities();
         updateSettings({ defaultSource: next.id });
-        runSearch({ append: false });
+        void runSearch({ append: false });
     });
 
-    dom.sort.addEventListener('change', () => runSearch({ append: false }));
+    dom.sort.addEventListener('change', () => {
+        const latest = getSettings();
+        updateSettings({ sortBySource: { ...latest.sortBySource, [state.source.id]: dom.sort.value } });
+        void runSearch({ append: false });
+    });
     dom.sfw.addEventListener('change', () => {
         updateSettings({ sfwOnlyDefault: dom.sfw.checked });
-        runSearch({ append: false });
+        void runSearch({ append: false });
+    });
+    dom.hideAi.addEventListener('change', () => {
+        updateSettings({ hideAiDefault: dom.hideAi.checked });
+        void runSearch({ append: false });
     });
 
-    dom.go.addEventListener('click', () => runSearch({ append: false }));
-    dom.query.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            runSearch({ append: false });
-        }
+    dom.form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        void runSearch({ append: false });
     });
-    dom.more.addEventListener('click', () => runSearch({ append: true }));
+    dom.more.addEventListener('click', () => void runSearch({ append: true }));
 
-    if (typeof options.query === 'string' && options.query !== '') {
-        runSearch({ append: false });
-    }
+    // Browsing is useful without a query. Start immediately, then leave the
+    // search field focused so the user can replace the catalogue view.
+    void runSearch({ append: false });
+    requestAnimationFrame(() => dom.query.focus());
 
     /** Rebuilds sort options and the SFW toggle for the active source. */
     function applySourceCapabilities() {
@@ -191,10 +211,11 @@ function wireBrowser(popup, health, options) {
             setText(option, sortLabel(sort));
             dom.sort.append(option);
         }
-        if (sorts.includes(settings.sortDefault)) {
-            dom.sort.value = settings.sortDefault;
+        const savedSort = getSettings().sortBySource[state.source.id];
+        if (sorts.includes(savedSort)) {
+            dom.sort.value = savedSort;
         }
-        dom.sort.hidden = sorts.length === 0;
+        dom.sort.hidden = sorts.length <= 1;
 
         // Never imply filtering that the source cannot actually do.
         const canFilter = state.source.capabilities?.sfwToggle === true;
@@ -205,23 +226,34 @@ function wireBrowser(popup, health, options) {
         } else {
             dom.sfw.setAttribute('aria-describedby', 'sbbs_sfw_note');
         }
+
+        dom.hideAiControl.hidden = state.source.capabilities?.hideAiToggle !== true;
     }
 
     async function runSearch({ append }) {
-        // Dropping a request while one is in flight loses it silently: type a
-        // query during the initial load, press Enter, and nothing happens. Note
-        // the intent instead and honour it when the current one finishes.
-        if (state.loading) {
-            state.rerun = append ? state.rerun : { append: false };
+        if (state.disposed || (append && (state.loading || !state.nextCursor))) {
             return;
         }
+
+        state.searchController?.abort();
+        const controller = new AbortController();
+        state.searchController = controller;
+        const generation = ++state.requestGeneration;
+        const source = state.source;
+        const query = dom.query.value.trim();
+        const sort = dom.sort.value;
+        const cursor = append ? state.nextCursor : null;
+
         state.loading = true;
-        state.rerun = null;
-        setText(dom.state, `Searching ${state.source.label}...`);
+        dom.body?.setAttribute('aria-busy', 'true');
+        dom.more.disabled = true;
+        setText(dom.more, 'Load more');
+        setText(dom.state, append ? `Loading more from ${source.label}...` : `Searching ${source.label}...`);
 
         if (!append) {
-            state.offset = 0;
+            state.nextCursor = null;
             state.items = [];
+            state.itemKeys.clear();
             records.clear();
             dom.grid.replaceChildren();
             showSkeletons();
@@ -230,51 +262,72 @@ function wireBrowser(popup, health, options) {
 
         try {
             const result = await post('/search', {
-                source: state.source.id,
-                query: dom.query.value.trim(),
-                sort: dom.sort.value,
-                limit: settings.resultsPerPage,
-                offset: state.offset,
-                filters: { sfwOnly: dom.sfw.checked },
-            });
+                source: source.id,
+                query,
+                sort,
+                limit: getSettings().resultsPerPage,
+                cursor,
+                filters: {
+                    sfwOnly: dom.sfw.checked,
+                    hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
+                },
+            }, { signal: controller.signal });
+
+            if (state.disposed || generation !== state.requestGeneration) {
+                return;
+            }
 
             clearSkeletons();
 
             const items = Array.isArray(result.items) ? result.items : [];
-            state.items.push(...items);
-            state.offset += items.length;
+            const fresh = items.filter((item) => {
+                const key = `${source.id}:${String(item?.id ?? '')}`;
+                if (!item?.id || state.itemKeys.has(key)) {
+                    return false;
+                }
+                state.itemKeys.add(key);
+                return true;
+            });
+            state.items.push(...fresh);
+            state.nextCursor = typeof result.nextCursor === 'string' && result.nextCursor !== ''
+                ? result.nextCursor
+                : null;
 
-            appendCards(items);
+            appendCards(fresh, source);
 
             if (state.items.length === 0) {
-                const term = dom.query.value.trim();
-                setText(dom.state, term
-                    ? `No results for "${term}" on ${state.source.label}.`
-                    : `No results on ${state.source.label}.`);
+                setText(dom.state, query
+                    ? `No results for "${query}" on ${source.label}. Try a broader search.`
+                    : `No cards are currently listed on ${source.label}.`);
             } else {
                 setText(dom.state, '');
             }
 
             setText(dom.count, formatResultCount(state.items.length, result.total));
-
-            dom.more.hidden = result.hasMore !== true || items.length === 0;
+            dom.more.hidden = state.nextCursor === null;
         } catch (error) {
+            if (error?.name === 'AbortError' || generation !== state.requestGeneration || state.disposed) {
+                return;
+            }
             clearSkeletons();
-            setText(dom.count, '');
 
             if (error?.code === 'source_down') {
-                retireSource(state.source);
+                retireSource(source);
                 return;
             }
 
-            setText(dom.state, searchErrorMessage(error, state.source.label));
+            setText(dom.state, searchErrorMessage(error, source.label));
+            if (append && state.items.length > 0) {
+                setText(dom.more, 'Retry loading more');
+                dom.more.hidden = false;
+            } else {
+                setText(dom.count, '');
+            }
         } finally {
-            state.loading = false;
-
-            const queued = state.rerun;
-            if (queued) {
-                state.rerun = null;
-                runSearch(queued);
+            if (generation === state.requestGeneration) {
+                state.loading = false;
+                dom.body?.setAttribute('aria-busy', 'false');
+                dom.more.disabled = false;
             }
         }
     }
@@ -296,6 +349,8 @@ function wireBrowser(popup, health, options) {
         dom.grid.replaceChildren();
         records.clear();
         state.items = [];
+        state.itemKeys.clear();
+        state.nextCursor = null;
 
         if (usable.length === 0) {
             dom.bar.hidden = true;
@@ -305,6 +360,7 @@ function wireBrowser(popup, health, options) {
             dom.source.value = state.source.id;
             applySourceCapabilities();
             setText(dom.state, `Switched to ${state.source.label}.`);
+            void runSearch({ append: false });
         }
 
         const retry = el('button', 'menu_button sbbs-retry-source', `Retry ${dead.label}`);
@@ -338,23 +394,34 @@ function wireBrowser(popup, health, options) {
         dom.source.value = revived.id;
         state.source = revived;
         applySourceCapabilities();
-        runSearch({ append: false });
+        void runSearch({ append: false });
     }
 
-    function appendCards(items) {
+    function appendCards(items, source) {
         const settingsNow = getSettings();
         for (const item of items) {
-            const card = buildCard(item, state.source, settingsNow);
-            records.set(card, item);
+            const card = buildCard(item, source, settingsNow);
+            records.set(card, { item, source });
             card.addEventListener('click', () => {
+                const record = records.get(card);
+                if (!record) {
+                    return;
+                }
+                state.detailController?.abort();
+                const detailController = new AbortController();
+                state.detailController = detailController;
                 dom.root.dataset.view = 'detail';
-                showDetail(dom.detail, records.get(card), state.source, () => {
+                void showDetail(dom.detail, record.item, record.source, () => {
+                    detailController.abort();
+                    state.detailController = null;
                     dom.root.dataset.view = 'grid';
                     dom.detail.replaceChildren();
                     // Return focus where it was, so keyboard and screen-reader
                     // users are not dropped back at the top of the dialog.
-                    card.focus();
-                });
+                    if (card.isConnected) {
+                        card.focus();
+                    }
+                }, { signal: detailController.signal });
             });
             const li = document.createElement('li');
             li.append(card);
@@ -366,7 +433,10 @@ function wireBrowser(popup, health, options) {
         for (let i = 0; i < 12; i++) {
             const li = document.createElement('li');
             li.className = 'sbbs-skeleton';
-            li.append(el('div', 'sbbs-card-img'));
+            li.setAttribute('aria-hidden', 'true');
+            const shape = el('div', 'sbbs-card-img');
+            shape.setAttribute('aria-hidden', 'true');
+            li.append(shape);
             dom.grid.append(li);
         }
     }
@@ -376,6 +446,13 @@ function wireBrowser(popup, health, options) {
             node.remove();
         }
     }
+
+    return () => {
+        state.disposed = true;
+        state.requestGeneration++;
+        state.searchController?.abort();
+        state.detailController?.abort();
+    };
 }
 
 /**
@@ -395,12 +472,16 @@ function buildCard(item, source, settings) {
     initial.setAttribute('aria-hidden', 'true');
     figure.append(initial);
 
+    const rating = ratingOf(item);
+    const badge = el('span', `sbbs-rating sbbs-rating-${rating.value}`, rating.label);
+    figure.append(badge);
+
     const src = thumbSrc(item, source, 'grid', settings.imageMode);
     if (src) {
         const img = document.createElement('img');
         img.alt = '';
         if (setImgSafe(img, src, source.clientHosts)) {
-            if (item.nsfw && settings.blurNsfw) {
+            if (rating.value !== 'sfw' && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
             }
             img.addEventListener('error', () => img.remove(), { once: true });
@@ -428,12 +509,20 @@ function buildCard(item, source, settings) {
     if (item.creator) {
         parts.push(`by ${item.creator}`);
     }
-    if (item.nsfw) {
-        parts.push('sensitive content');
-    }
+    parts.push(rating.accessible);
     card.setAttribute('aria-label', parts.join(', '));
 
     return card;
+}
+
+function ratingOf(item) {
+    if (item?.contentRating === 'sfw') {
+        return { value: 'sfw', label: 'SFW', accessible: 'rated SFW' };
+    }
+    if (item?.contentRating === 'sensitive') {
+        return { value: 'sensitive', label: 'Sensitive', accessible: 'sensitive content' };
+    }
+    return { value: 'unknown', label: 'Unrated', accessible: 'content rating not reported' };
 }
 
 /** First character of a name, for the no-image tile. */

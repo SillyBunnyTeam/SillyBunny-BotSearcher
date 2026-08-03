@@ -41,6 +41,12 @@ function assertReachable(adapter, url) {
     if (url.protocol !== 'https:' && adapter.allowInsecureForTests !== true) {
         throw new UpstreamError('insecure_scheme', url.protocol);
     }
+    if (adapter.allowInsecureForTests !== true && url.port !== '' && url.port !== '443') {
+        throw new UpstreamError('port_not_allowed', url.port);
+    }
+    if (url.username !== '' || url.password !== '') {
+        throw new UpstreamError('credentials_not_allowed', adapter.id);
+    }
     // Exact hostname match. A suffix test would accept "botbooru.com.evil.tld".
     if (!adapter.allowedHosts.includes(url.hostname.toLowerCase())) {
         throw new UpstreamError('host_not_allowed', url.hostname);

@@ -17,7 +17,8 @@ import { wrap, jsonGuard, fail } from './guards.js';
 import { clampInt, pick, own, readSourceId, isPlainObject } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, callerKey } from './limits.js';
-import { verifyRef } from './refs.js';
+import { mintCursor, verifyCursor, verifyRef } from './refs.js';
+import { BadCursorError } from './paging.js';
 import { detectImageType } from './imagetype.js';
 import { markSuccess, markFailure, isDown, stateOf, reset } from './health.js';
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
@@ -160,26 +161,56 @@ export function createRouter(router, state) {
         const body = request.body;
         const filters = isPlainObject(own(body, 'filters')) ? own(body, 'filters') : {};
         const rawQuery = own(body, 'query');
+        const rawCursor = own(body, 'cursor');
+        let cursor = null;
+
+        if (rawCursor !== undefined && rawCursor !== null) {
+            cursor = verifyCursor(adapter.id, rawCursor);
+            if (cursor === null) {
+                gate.release();
+                fail(response, 400, 'bad_cursor');
+                return;
+            }
+        }
 
         const args = {
             // Cap before the adapter sees it, so no adapter can be tricked into
             // building a giant upstream URL.
             query: typeof rawQuery === 'string' ? rawQuery.slice(0, 128).trim() : '',
             limit: clampInt(own(body, 'limit'), 1, FIELD_LIMITS.itemsPerPage, 24),
-            offset: clampInt(own(body, 'offset'), 0, 5000, 0),
+            cursor,
             sort: pick(own(body, 'sort'), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
             // Only honour a filter the source can actually apply, so the UI is
             // never able to imply filtering that is not happening.
             sfwOnly: adapter.capabilities.sfwToggle ? own(filters, 'sfwOnly') === true : false,
-            hideAi: own(filters, 'hideAi') === true,
+            hideAi: adapter.capabilities.hideAiToggle ? own(filters, 'hideAi') === true : false,
         };
 
         try {
-            const result = await callAdapter(adapter, () => adapter.search(contextFor(adapter), args));
+            let result;
+            try {
+                result = await callAdapter(adapter, () => adapter.search(contextFor(adapter), args));
+            } catch (error) {
+                if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
+                    fail(response, 400, 'bad_cursor');
+                    return;
+                }
+                throw error;
+            }
+
+            const items = Array.isArray(result?.items)
+                ? result.items.slice(0, args.limit)
+                : [];
+            const nextCursor = result?.next && typeof result.next === 'object'
+                ? mintCursor(adapter.id, result.next)
+                : null;
+
             response.json({
-                total: typeof result.total === 'number' ? result.total : null,
-                hasMore: result.hasMore === true,
-                items: Array.isArray(result.items) ? result.items : [],
+                total: typeof result?.total === 'number' && Number.isFinite(result.total)
+                    ? Math.max(0, Math.floor(result.total))
+                    : null,
+                nextCursor,
+                items,
             });
         } finally {
             gate.release();
@@ -362,6 +393,9 @@ async function callAdapter(adapter, fn) {
         markSuccess(adapter.id);
         return result;
     } catch (error) {
+        if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
+            throw error;
+        }
         markFailure(adapter.id, error);
         throw error;
     }

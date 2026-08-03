@@ -43,7 +43,7 @@ Open the character import screen and select **Find cards online**, or use the sl
 /botsearch [search term]
 ```
 
-Choose a source, enter a search term, and open a result to review its details. An empty search shows the source's default or newest results where supported.
+The browser immediately loads the saved or default source's catalog. Enter a search term to narrow it, then open a result to review its details. Each source remembers its own sort choice.
 
 The details shown before import come from the selected source. A source may omit fields or report incomplete information. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
@@ -60,6 +60,8 @@ The details shown before import come from the selected source. A source may omit
 ## Request routing and privacy
 
 For search and detail requests, the browser contacts the BotSearcher plugin on your SillyBunny server. The server then contacts only the selected source through a fixed source adapter.
+
+Opening BotSearcher immediately requests the selected source's default catalog, even when the search field is empty. This means opening the browser contacts that source through your SillyBunny server.
 
 - BotSearcher does not send searches through a public relay.
 - The selected source receives the search query and sees the SillyBunny server's outgoing IP address.
@@ -126,7 +128,8 @@ These controls do not make third-party card instructions safe. They also do not 
 | Sources | Tiers 0, 1, and 2 | Selects the sites shown in the source list. |
 | Thumbnails | Through SillyBunny server | Controls whether images load through the server, directly in the browser, or not at all. |
 | SFW only by default | On | Requests an SFW filter where the selected source supports one. |
-| Blur sensitive thumbnails | On | Blurs thumbnails marked as sensitive until selected. |
+| Hide AI-generated cards | Off | Requests this filter only from Botbooru, the source that supports it. |
+| Blur sensitive and unrated thumbnails | On | Blurs thumbnails marked sensitive or lacking a reported rating until revealed. Rating labels remain visible when blur is off. |
 | Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
 
@@ -154,15 +157,18 @@ Some sources do not provide a reliable SFW filter. BotSearcher disables the cont
 
 ## Development
 
-Node.js 18 or newer is required for the test suite.
+Node.js 20 or newer is required. Development dependencies are self-contained in this package.
 
 ```bash
+npm ci
+npm run lint
 npm test
-node scripts/probe-sources.mjs
-node scripts/probe-sources.mjs chub wyvern
+npm run test:coverage
+npm run probe
+npm run probe -- chub wyvern
 ```
 
-The tests use Node's built-in test runner. Server contract tests also import packages supplied by SillyBunny, including Express, `node-fetch`, and `rate-limiter-flexible`, so run them where those dependencies are available.
+The tests use Node's built-in test runner plus jsdom for browser interaction coverage. CI runs lint and tests on Node.js 20 and 22.
 
 The source probe contacts live external services. It exits with a nonzero status if a required source in tiers 0, 1, or 2 fails. Run it deliberately before a release.
 

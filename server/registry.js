@@ -75,6 +75,7 @@ export function describeSources(stateOf) {
                 paging: adapter.capabilities.paging,
                 sorts: [...adapter.capabilities.sorts],
                 sfwToggle: adapter.capabilities.sfwToggle,
+                hideAiToggle: adapter.capabilities.hideAiToggle === true,
                 detail: adapter.capabilities.detail,
             },
         };
