@@ -65,6 +65,54 @@ test('v1 settings migrate their sort to the saved source', async () => {
     assert.equal(settings.allowDirectRequests, true);
 });
 
+test('search history keeps what was searched for, newest first and without repeats', async () => {
+    const settingsStore = {};
+    globalThis.SillyTavern = {
+        getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
+    };
+
+    const { getSettings, rememberQuery, clearQueryHistory, MAX_QUERY_HISTORY } =
+        await import('../client/settings.js?query-history');
+
+    rememberQuery('elf');
+    rememberQuery('orc');
+    assert.deepEqual(getSettings().queryHistory, ['orc', 'elf'], 'newest first');
+
+    // Searching something again moves it up rather than duplicating it, and the
+    // spelling the user just typed is the one kept.
+    rememberQuery('ELF');
+    assert.deepEqual(getSettings().queryHistory, ['ELF', 'orc']);
+
+    // The catalogue view runs with an empty query on every open; it is not a search.
+    rememberQuery('');
+    rememberQuery('   ');
+    assert.deepEqual(getSettings().queryHistory, ['ELF', 'orc']);
+
+    for (let i = 0; i < MAX_QUERY_HISTORY + 10; i++) {
+        rememberQuery(`term-${i}`);
+    }
+    assert.equal(getSettings().queryHistory.length, MAX_QUERY_HISTORY, 'the list stays bounded');
+
+    clearQueryHistory();
+    assert.deepEqual(getSettings().queryHistory, []);
+});
+
+test('a corrupt stored history is repaired rather than trusted', async () => {
+    const settingsStore = {
+        SillyBunnyBotSearcher: { queryHistory: ['ok', 42, null, '', { evil: true }, 'x'.repeat(500)] },
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
+    };
+
+    const { getSettings } = await import('../client/settings.js?query-history-repair');
+    const history = getSettings().queryHistory;
+
+    assert.deepEqual(history.slice(0, 1), ['ok']);
+    assert.equal(history.length, 2, 'non-strings are dropped');
+    assert.equal(history[1].length, 128, 'and an oversized entry is capped');
+});
+
 test('the browser is single-flight, ignores stale searches, deduplicates, and preserves append results on retry', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {
@@ -299,6 +347,38 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         );
         // A source that did not answer is named, not silently dropped.
         assert.match(popup.content.querySelector('#sbbs_partial').textContent, /Chub did not respond in time/);
+
+        // ---- asking the same question twice ----
+        // Switching source rebuilds the filter panel, so this is the same
+        // unfiltered Chub search that ran earlier — and must be answered from
+        // the cache rather than the network.
+        const beforeReturn = searches.length;
+        source.value = 'chub';
+        source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(
+            () => popup.content.textContent.includes('Fresh'),
+            'switching back did not restore the earlier Chub results',
+        );
+        assert.equal(searches.length, beforeReturn, 'a repeated search must not hit the network again');
+
+        // And back to All, which was answered a moment ago too.
+        source.value = '__all__';
+        source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(
+            () => popup.content.querySelectorAll('.sbbs-card').length === 2,
+            'the repeated merged search did not render',
+        );
+        assert.equal(searches.length, beforeReturn, 'still no network request');
+        assert.match(popup.content.textContent, /From Botbooru/);
+
+        // ---- typing does not fire a request per keystroke ----
+        const queryBox = popup.content.querySelector('#sbbs_query');
+        for (const value of ['e', 'el', 'elf', 'elfn']) {
+            queryBox.value = value;
+            queryBox.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        }
+        await tick();
+        assert.equal(searches.length, beforeReturn, 'typing must be debounced, not sent per keystroke');
 
         popup.complete();
         await firstOpen;

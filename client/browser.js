@@ -13,7 +13,8 @@
 import { EXTENSION_PATH, LOG_TAG } from './constants.js';
 import { AVAILABILITY, getAvailability, invalidateAvailability, post, postRouted, thumbSrc } from './api.js';
 import { el, setText, setImgSafe } from './render.js';
-import { getSettings, updateSettings, isSourceEnabled } from './settings.js';
+import { getSettings, updateSettings, isSourceEnabled, rememberQuery } from './settings.js';
+import { createResultCache } from './cache.js';
 import { showDetail } from './detail.js';
 import {
     availabilityCopy,
@@ -35,6 +36,12 @@ import { PROTOCOL_VERSION, VERSION, MAX_FANOUT } from '../shared/schema.js';
  * A merged search sends the real ids in `sources`.
  */
 const ALL_SOURCES = '__all__';
+
+/** How long to wait after the last keystroke before searching. */
+const TYPEAHEAD_DELAY_MS = 500;
+
+/** Shorter than this and a search matches most of the catalogue anyway. */
+const MIN_TYPEAHEAD_LENGTH = 3;
 
 /**
  * Builds the pseudo-source that stands for a merged search.
@@ -152,6 +159,7 @@ function wireBrowser(popup, health, options) {
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
         partial: root.querySelector('#sbbs_partial'),
+        queryHistory: root.querySelector('#sbbs_query_history'),
         body: root.querySelector('.sbbs-body'),
         grid: root.querySelector('#sbbs_grid'),
         more: root.querySelector('#sbbs_more'),
@@ -193,6 +201,10 @@ function wireBrowser(popup, health, options) {
         directNoted: new Set(),
         /** Per-source filter panel handle; null when the source declares none. */
         filters: null,
+        /** Answers to questions already asked, so toggling a control is free. */
+        cache: createResultCache(),
+        /** Pending as-you-type search. */
+        typingTimer: null,
     };
 
     // "All sources" is a synthetic entry, not a source. It is only worth
@@ -265,9 +277,33 @@ function wireBrowser(popup, health, options) {
 
     dom.form.addEventListener('submit', (event) => {
         event.preventDefault();
+        clearTimeout(state.typingTimer);
+        rememberQuery(dom.query.value);
+        refreshQueryHistory();
         void runSearch({ append: false });
     });
+
+    /**
+     * Searches while typing, but slowly.
+     *
+     * Long enough that an ordinary phrase is one request rather than a dozen —
+     * the per-user budget is 30 searches a minute and a card site should not be
+     * asked a question per keystroke — and short enough that the grid follows
+     * along. Submitting still works and skips the wait.
+     */
+    dom.query.addEventListener('input', () => {
+        clearTimeout(state.typingTimer);
+        const value = dom.query.value.trim();
+        // Below this a search is mostly noise, but clearing the box back to the
+        // catalogue view is a real intent.
+        if (value !== '' && value.length < MIN_TYPEAHEAD_LENGTH) {
+            return;
+        }
+        state.typingTimer = setTimeout(() => void runSearch({ append: false }), TYPEAHEAD_DELAY_MS);
+    });
     dom.more.addEventListener('click', () => void runSearch({ append: true }));
+
+    refreshQueryHistory();
 
     // Browsing is useful without a query. Start immediately, then leave the
     // search field focused so the user can replace the catalogue view.
@@ -406,7 +442,9 @@ function wireBrowser(popup, health, options) {
         }
 
         try {
-            const result = await postRouted('/search', body, source, {
+            // A control that was just toggled asks a question already answered.
+            const cached = state.cache.get(body);
+            const result = cached ?? await postRouted('/search', body, source, {
                 signal: controller.signal,
                 // A merged search has no single source to reroute, and the
                 // per-source failures it reports are handled below instead.
@@ -416,6 +454,10 @@ function wireBrowser(popup, health, options) {
 
             if (state.disposed || generation !== state.requestGeneration) {
                 return;
+            }
+
+            if (!cached) {
+                state.cache.set(body, result);
             }
 
             clearSkeletons();
@@ -475,6 +517,18 @@ function wireBrowser(popup, health, options) {
                 dom.body?.setAttribute('aria-busy', 'false');
                 dom.more.disabled = false;
             }
+        }
+    }
+
+    /** Refills the previous-searches dropdown attached to the query box. */
+    function refreshQueryHistory() {
+        dom.queryHistory.replaceChildren();
+        for (const entry of getSettings().queryHistory) {
+            const option = document.createElement('option');
+            // A datalist option's VALUE is what gets inserted, and setting it as
+            // an attribute rather than as text keeps it out of the markup path.
+            option.value = entry;
+            dom.queryHistory.append(option);
         }
     }
 
@@ -677,8 +731,12 @@ function wireBrowser(popup, health, options) {
     return () => {
         state.disposed = true;
         state.requestGeneration++;
+        clearTimeout(state.typingTimer);
         state.searchController?.abort();
         state.detailController?.abort();
+        // Cached pages hold listing text from adult catalogues. They live as long
+        // as the dialog and no longer.
+        state.cache.clear();
     };
 }
 

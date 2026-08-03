@@ -50,8 +50,16 @@ const DEFAULTS = Object.freeze({
      * always announced in the browse dialog when it happens.
      */
     allowDirectRequests: true,
+    /** Most recent first. Search terms only — never a card name or a filter. */
+    queryHistory: Object.freeze([]),
     _v: 3,
 });
+
+/** Enough to be useful as a dropdown, few enough to stay scannable. */
+export const MAX_QUERY_HISTORY = 20;
+
+/** Search terms are user text, so they are capped like any other stored string. */
+const MAX_QUERY_LENGTH = 128;
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -100,8 +108,39 @@ export function getSettings() {
         sortBySource: { ...sortBySource },
         showTrustPanel: read('showTrustPanel') !== false,
         allowDirectRequests: read('allowDirectRequests') !== false,
+        queryHistory: Array.isArray(read('queryHistory'))
+            ? read('queryHistory')
+                .filter((entry) => typeof entry === 'string' && entry.trim() !== '')
+                .map((entry) => entry.slice(0, MAX_QUERY_LENGTH))
+                .slice(0, MAX_QUERY_HISTORY)
+            : [],
         _v: DEFAULTS._v,
     };
+}
+
+/**
+ * Records a search term, most recent first, without duplicates.
+ *
+ * Only called for a search the user actually submitted, so the catalogue view
+ * that runs on open never lands here and the list stays a record of what they
+ * asked for rather than of what the dialog did.
+ *
+ * @param {string} query
+ */
+export function rememberQuery(query) {
+    const trimmed = typeof query === 'string' ? query.trim().slice(0, MAX_QUERY_LENGTH) : '';
+    if (trimmed === '') {
+        return;
+    }
+
+    const previous = getSettings().queryHistory;
+    // Case-insensitive dedupe, but the newest spelling is what gets kept.
+    const rest = previous.filter((entry) => entry.toLowerCase() !== trimmed.toLowerCase());
+    updateSettings({ queryHistory: [trimmed, ...rest].slice(0, MAX_QUERY_HISTORY) });
+}
+
+export function clearQueryHistory() {
+    updateSettings({ queryHistory: [] });
 }
 
 /**
@@ -190,6 +229,7 @@ export async function mountSettings() {
             String(settings.resultsPerPage),
             (v) => updateSettings({ resultsPerPage: Number(v) }),
         ),
+        historyControl(),
     );
 
     drawer.append(header, content);
@@ -253,6 +293,39 @@ function sourceList(sources) {
         wrapper.append(row);
     }
 
+    return wrapper;
+}
+
+/**
+ * Search history, with a way to get rid of it.
+ *
+ * Search terms are kept so the query box can offer them again. They are also a
+ * record of what someone looked for on adult catalogues, sitting in a settings
+ * file, so clearing them has to be one visible click rather than an edit.
+ */
+function historyControl() {
+    const wrapper = el('div', 'sbbs-setting sbbs-setting-select');
+    const count = getSettings().queryHistory.length;
+
+    const caption = el('label', undefined, 'Search history');
+    wrapper.append(caption);
+
+    const button = el('button', 'menu_button');
+    button.type = 'button';
+    button.disabled = count === 0;
+    setText(button, count === 0 ? 'No saved searches' : `Clear ${count} saved ${count === 1 ? 'search' : 'searches'}`);
+    button.addEventListener('click', () => {
+        clearQueryHistory();
+        button.disabled = true;
+        setText(button, 'No saved searches');
+    });
+
+    wrapper.append(button);
+    wrapper.append(el(
+        'span',
+        'sbbs-setting-note',
+        'Terms you searched for are saved on this device so the search box can suggest them again. Card names are not saved.',
+    ));
     return wrapper;
 }
 

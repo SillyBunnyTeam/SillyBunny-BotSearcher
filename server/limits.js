@@ -14,8 +14,15 @@
 import { RateLimiterMemory } from 'rate-limiter-flexible';
 
 const limiters = {
-    /** Per user, across all sources. */
-    search: new RateLimiterMemory({ points: 30, duration: 60 }),
+    /**
+     * Per user, across all sources.
+     *
+     * Raised from 30 when the query box began searching as the user types. A
+     * debounced phrase is a handful of requests rather than one, and a merged
+     * search across four sources still costs one point here — the per-source
+     * limiter below is what actually protects the sites.
+     */
+    search: new RateLimiterMemory({ points: 90, duration: 60 }),
     /** Per source, across all users: protects the upstream site and our IP reputation. */
     sourceGlobal: new RateLimiterMemory({ points: 20, duration: 60 }),
     /** Per user: fetching card bytes is the expensive path. */

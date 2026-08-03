@@ -4,3 +4,5 @@ node_modules
 *.log
 .DS_Store
 bun.lock
+# Token-signing secret, generated on first run. Per install, never committed.
+.cursor-key

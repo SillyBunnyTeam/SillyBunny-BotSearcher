@@ -58,6 +58,10 @@ Sort and filter controls are hidden while searching all sources. The sites share
 
 In a tag box, press Enter or type a comma to commit a tag, and Backspace on an empty box to remove the last one. Multiple tags narrow to cards carrying *all* of them.
 
+Results update shortly after you stop typing, from three characters onward; pressing Enter or the search button skips the wait. Repeating a search you already ran — clearing a filter, switching back to a source you were just looking at — is answered from memory rather than by asking the site again. That memory lasts five minutes and is discarded when the dialog closes.
+
+Terms you searched for are saved so the search box can suggest them again. Card names are not saved. Clear them under **Extensions > BotSearcher > Search history**.
+
 Each result shows the name, creator, token count, the source's own one-line summary, the popularity figures that source reported, and up to four tags. Where the source supports tag filtering, clicking a tag adds it to the filters; on other sources the tags are shown but are not clickable. Figures a source does not report are omitted rather than shown as zero, and the labels follow that source's own meaning — Chub's download count is its star count.
 
 The details shown before import come from the selected source. A source may omit fields or report incomplete information. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
@@ -169,6 +173,7 @@ These controls do not make third-party card instructions safe. They also do not 
 | Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
 | Request a source from this browser when the server cannot reach it | On | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source is removed from the source list. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
+| Search history | — | Clears the search terms saved for the search box's suggestions. |
 
 ## Troubleshooting
 

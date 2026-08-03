@@ -14,13 +14,62 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
- * One random secret per process. Refs do not survive a restart, which is fine —
- * the client simply re-runs its search. Nothing is persisted, so there is no
- * key file to leak and no rotation to manage.
+ * The signing secret, kept across restarts when the plugin directory is
+ * writable and generated fresh when it is not.
+ *
+ * It used to be per-process, which meant every restart invalidated every
+ * outstanding cursor and turned an ordinary "Load more" into "the result page
+ * expired". This stack restarts often enough for that to be a routine
+ * annoyance rather than an edge case.
+ *
+ * Persisting it is cheap in risk terms because a token is not a capability:
+ * every field inside one is re-validated by the adapter that consumes it — a
+ * cursor against its page-range check, a thumbnail ref against the adapter's own
+ * id pattern — so forging one buys an attacker a request they could already have
+ * made. The signature exists to stop /thumb being turned into a URL fetcher, and
+ * that property does not depend on the secret being new each boot.
+ *
+ * Any failure falls back to a random in-memory secret, which is exactly the old
+ * behaviour. A read-only install therefore still works.
  */
-const SECRET = crypto.randomBytes(32);
+const SECRET = loadOrCreateSecret();
+
+function loadOrCreateSecret() {
+    const file = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), '.cursor-key');
+
+    try {
+        const existing = fs.readFileSync(file);
+        if (existing.length === 32) {
+            return existing;
+        }
+    } catch {
+        // Not there yet, or unreadable. Fall through and try to create it.
+    }
+
+    const fresh = crypto.randomBytes(32);
+    try {
+        // Owner-only, and never overwrite: two workers racing here must end up
+        // agreeing on one secret rather than each clobbering the other's.
+        fs.writeFileSync(file, fresh, { mode: 0o600, flag: 'wx' });
+        return fresh;
+    } catch {
+        try {
+            const raced = fs.readFileSync(file);
+            if (raced.length === 32) {
+                return raced;
+            }
+        } catch {
+            // Read-only install. In-memory it is.
+        }
+    }
+
+    return fresh;
+}
 
 const SIGNATURE_LENGTH = 22;
 const MAX_TOKEN_LENGTH = 512;

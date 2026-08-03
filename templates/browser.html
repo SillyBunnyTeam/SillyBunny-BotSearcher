@@ -5,7 +5,9 @@
             <label class="sbbs-visually-hidden" for="sbbs_source">Card source</label>
             <select id="sbbs_source" class="text_pole sbbs-source" aria-label="Source"></select>
             <label class="sbbs-visually-hidden" for="sbbs_query">Search character cards</label>
-            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="128" enterkeyhint="search" autocomplete="off" spellcheck="false">
+            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="128" enterkeyhint="search" autocomplete="off" spellcheck="false" list="sbbs_query_history">
+            <!-- Previous searches, offered by the browser's own dropdown. -->
+            <datalist id="sbbs_query_history"></datalist>
             <button id="sbbs_go" class="menu_button sbbs-go" type="submit" title="Search" aria-label="Search">
                 <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
             </button>
