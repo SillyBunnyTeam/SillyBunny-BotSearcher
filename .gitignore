@@ -1,0 +1,6 @@
+# No trailing slash: during development this is a symlink to SillyBunny's tree,
+# and a directory-only pattern would not match it.
+node_modules
+*.log
+.DS_Store
+bun.lock

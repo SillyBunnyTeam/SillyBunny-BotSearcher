@@ -1,0 +1,16 @@
+{
+    "display_name": "BotSearcher",
+    "author": "platberlitz",
+    "version": "0.1.0",
+    "description": "Search character cards on external sites and import them, without any third-party relay.",
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "homePage": "https://github.com/platberlitz/SillyBunny-BotSearcher",
+    "loading_order": 100,
+    "auto_update": true,
+    "hooks": {
+        "activate": "init"
+    }
+}

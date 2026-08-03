@@ -1,0 +1,467 @@
+/*
+ * SillyBunny-BotSearcher.
+ *
+ * Everything is namespaced .sbbs-*. Colours, radii and spacing come from the
+ * fork's own tokens (public/css/sillybunny-theme.css, public/css/spacing-system.css)
+ * so the dialog tracks the user's theme without any per-theme work. The
+ * "Browse online" button deliberately has no rules here — it borrows
+ * .sb-character-import-action from the fork.
+ *
+ * This sheet is injected at extension activation, i.e. after every core sheet,
+ * so plain specificity is enough and no !important is needed.
+ */
+
+/*
+ * Popup's own `wide` option only sets `min-width: var(--sheldWidth)`
+ * (public/style.css:4097), which lands around 750px — too narrow for a card
+ * grid. `large` supplies height: 90vh and a 90vw cap, so we only need to claim
+ * the width. Scoped by :has() so no other popup is affected.
+ */
+.popup:has(.sbbs-root) {
+    width: min(1400px, 90vw);
+}
+
+.sbbs-root {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md, 12px);
+    height: 100%;
+    min-height: 0;
+    position: relative;
+}
+
+/*
+ * `.menu_button` sets `display: flex` (public/style.css:4215), which beats the
+ * UA stylesheet's `[hidden] { display: none }` — so a hidden .menu_button stays
+ * visible. Doubled attribute selector raises specificity above the class
+ * without introducing an !important, matching the fork's house rule.
+ */
+.sbbs-root [hidden][hidden] {
+    display: none;
+}
+
+/* ---- search bar ---- */
+
+.sbbs-bar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm, 8px);
+    flex: 0 0 auto;
+}
+
+.sbbs-bar-row {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm, 8px);
+}
+
+.sbbs-bar-row-secondary {
+    flex-wrap: wrap;
+}
+
+/*
+ * .text_pole is width:100% in the host stylesheet, so a select in a flex row
+ * stretches to fill. Both pickers size to their content instead.
+ */
+.sbbs-source,
+.sbbs-sort {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 9rem;
+    max-width: 14rem;
+}
+
+.sbbs-query {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.sbbs-go {
+    flex: 0 0 auto;
+}
+
+.sbbs-sfw {
+    margin: 0;
+}
+
+.sbbs-count {
+    margin-inline-start: auto;
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+/* ---- body ---- */
+
+.sbbs-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md, 12px);
+}
+
+.sbbs-state {
+    opacity: 0.75;
+    padding: var(--spacing-md, 12px) 0;
+}
+
+.sbbs-state:empty {
+    display: none;
+    padding: 0;
+}
+
+/* ---- grid ---- */
+
+.sbbs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--spacing-md, 12px);
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.sbbs-grid:empty {
+    display: none;
+}
+
+.sbbs-card {
+    background: var(--sb-card-bg, rgba(255, 255, 255, 0.04));
+    border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--sb-radius-md, 10px);
+    overflow: hidden;
+    cursor: pointer;
+    text-align: start;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    width: 100%;
+    display: block;
+    transition:
+        transform var(--sb-transition-fast, 120ms) ease,
+        border-color var(--sb-transition-fast, 120ms) ease;
+}
+
+@media (hover: hover) {
+    .sbbs-card:hover {
+        transform: translateY(-2px);
+        border-color: var(--sb-accent, currentColor);
+    }
+}
+
+.sbbs-card:focus-visible {
+    outline: none;
+    border-color: var(--sb-accent, currentColor);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--sb-focus-ring, currentColor) 58%, transparent);
+}
+
+/* Fixed ratio so the grid never reflows as thumbnails arrive. */
+.sbbs-card-img {
+    aspect-ratio: 2 / 3;
+    background: var(--sb-surface-highlight, rgba(255, 255, 255, 0.06));
+    display: block;
+}
+
+.sbbs-card-img img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.sbbs-card-meta {
+    padding: var(--spacing-sm, 8px);
+    display: grid;
+    gap: 2px;
+}
+
+.sbbs-card-name,
+.sbbs-card-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sbbs-card-sub {
+    opacity: 0.7;
+    font-size: 0.85em;
+}
+
+.sbbs-more {
+    align-self: center;
+    flex: 0 0 auto;
+}
+
+/* Loading placeholders keep the grid from jumping as results arrive. */
+.sbbs-skeleton .sbbs-card-img {
+    border-radius: var(--sb-radius-md, 10px);
+    animation: sbbs-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes sbbs-shimmer {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.7; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sbbs-skeleton .sbbs-card-img {
+        animation: none;
+        opacity: 0.4;
+    }
+}
+
+.sbbs-blurred img {
+    filter: blur(18px);
+}
+
+.sbbs-detail .sbbs-blurred {
+    cursor: pointer;
+}
+
+/* ---- detail ---- */
+
+/*
+ * Column layout with its own scroller, so the action bar can pin to the bottom.
+ * Card descriptions run to thousands of characters; without this the Import
+ * button lands far below the fold, which buries the one action people came for.
+ */
+.sbbs-detail {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.sbbs-detail-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.sbbs-root[data-view="detail"] .sbbs-bar,
+.sbbs-root[data-view="detail"] .sbbs-body {
+    display: none;
+}
+
+.sbbs-root[data-view="grid"] .sbbs-detail {
+    display: none;
+}
+
+.sbbs-detail-header {
+    margin-bottom: var(--spacing-sm, 8px);
+}
+
+.sbbs-detail-body {
+    display: flex;
+    gap: var(--spacing-lg, 16px);
+    align-items: flex-start;
+    padding-right: var(--spacing-xs, 4px);
+}
+
+.sbbs-detail-image {
+    flex: 0 0 260px;
+    max-width: 40%;
+    border-radius: var(--sb-radius-md, 10px);
+    overflow: hidden;
+    background: var(--sb-surface-highlight, rgba(255, 255, 255, 0.06));
+}
+
+.sbbs-detail-image img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.sbbs-detail-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm, 8px);
+}
+
+.sbbs-detail-name {
+    margin: 0;
+}
+
+.sbbs-detail-meta,
+.sbbs-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs, 4px);
+}
+
+.sbbs-chip,
+.sbbs-tag {
+    border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--sb-radius-sm, 6px);
+    padding: 1px 8px;
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+.sbbs-chip-link {
+    text-decoration: none;
+}
+
+.sbbs-detail-stats {
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+.sbbs-detail-subhead {
+    margin: var(--spacing-sm, 8px) 0 0;
+    font-size: 1em;
+    opacity: 0.8;
+}
+
+/* Untrusted description text: preserve the author's line breaks, never parse it. */
+.sbbs-description {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* ---- "what's inside this card" ---- */
+
+.sbbs-inside {
+    border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--sb-radius-md, 10px);
+    padding: var(--spacing-sm, 8px);
+    background: color-mix(in srgb, var(--sb-accent, currentColor) 6%, transparent);
+}
+
+.sbbs-inside > summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.sbbs-inside-list {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px var(--spacing-md, 12px);
+    margin: var(--spacing-sm, 8px) 0 0;
+}
+
+.sbbs-inside-list dt {
+    opacity: 0.7;
+}
+
+.sbbs-inside-list dd {
+    margin: 0;
+}
+
+/* ---- detail actions ---- */
+
+/* Pinned, so Import is reachable without scrolling past the description. */
+.sbbs-detail-actions {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-sm, 8px);
+    padding-top: var(--spacing-md, 12px);
+    margin-top: var(--spacing-md, 12px);
+    border-top: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+}
+
+.sbbs-trust-note {
+    flex: 1 0 100%;
+    margin: 0;
+    opacity: 0.65;
+    font-size: 0.85em;
+}
+
+.sbbs-import-status {
+    opacity: 0.8;
+    font-size: 0.9em;
+}
+
+/* ---- settings drawer ---- */
+
+.sbbs-settings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm, 8px);
+}
+
+.sbbs-setting-select {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+/* ---- install panel ---- */
+
+.sbbs-install {
+    max-width: 60ch;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md, 12px);
+}
+
+.sbbs-install-steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md, 12px);
+    margin: 0;
+    padding-inline-start: 1.5em;
+}
+
+.sbbs-install-code {
+    background: var(--sb-input-bg, rgba(0, 0, 0, 0.25));
+    border: 1px solid var(--sb-input-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--sb-radius-sm, 6px);
+    padding: var(--spacing-sm, 8px);
+    margin: var(--spacing-xs, 4px) 0 0;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+.sbbs-install-note {
+    opacity: 0.75;
+    font-size: 0.9em;
+}
+
+/* ---- mobile ---- */
+
+@media screen and (max-width: 768px) {
+    .sbbs-grid {
+        grid-template-columns: repeat(auto-fill, minmax(44vw, 1fr));
+    }
+
+    .sbbs-bar {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: var(--sb-shell-surface, transparent);
+    }
+
+    .sbbs-source {
+        max-width: none;
+    }
+
+    .sbbs-detail {
+        position: absolute;
+        inset: 0;
+        background: var(--sb-shell-surface, transparent);
+    }
+
+    .sbbs-detail-body {
+        flex-direction: column;
+    }
+
+    .sbbs-detail-image {
+        flex: 0 0 auto;
+        max-width: 60%;
+        align-self: center;
+    }
+
+    .sbbs-detail-actions {
+        position: sticky;
+        bottom: 0;
+        background: var(--sb-shell-surface, transparent);
+    }
+}

@@ -1,0 +1,19 @@
+{
+    "name": "sillybunny-botsearcher",
+    "version": "0.1.0",
+    "description": "Server half of the SillyBunny BotSearcher extension.",
+    "type": "module",
+    "main": "server/index.js",
+    "private": true,
+    "scripts": {
+        "test": "node --test tests/*.test.js"
+    },
+    "license": "AGPL-3.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/platberlitz/SillyBunny-BotSearcher.git"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
