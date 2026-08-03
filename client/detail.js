@@ -11,7 +11,7 @@
 import { el, setText, setImgSafe, setLinkSafe } from './render.js';
 import { post, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
-import { importCard, openCharacter } from './importer.js';
+import { importCard, importCardBytes, openCharacter } from './importer.js';
 
 /**
  * @param {HTMLElement} container the #sbbs_detail node
@@ -205,7 +205,12 @@ function actionBar(card, source) {
         setText(status, '');
 
         try {
-            const added = await importCard(card, source.clientHosts);
+            // Native sources go through SillyBunny's own importer; the rest
+            // need the server to fetch and validate the bytes first.
+            const added = card.nativeImport === true
+                ? await importCard(card, source.clientHosts)
+                : await importCardBytes(card, source);
+
             setText(button, 'Imported');
 
             const open = el('button', 'menu_button sbbs-open-character', 'Go to character');
@@ -214,6 +219,13 @@ function actionBar(card, source) {
             bar.append(open);
 
             toastr.success(added.name || card.name || 'Character', 'Imported');
+
+            // The bytes are the only honest source for this. If the card turned
+            // out to carry something the listing never mentioned, say so.
+            const surprise = describeSurprise(added.inside, card.inside);
+            if (surprise) {
+                toastr.info(surprise, 'What this card brought with it', { timeOut: 12000 });
+            }
         } catch (error) {
             button.disabled = false;
             setText(button, 'Import failed — retry');
@@ -257,6 +269,42 @@ function describeError(error, sourceLabel) {
     }
 }
 
+/**
+ * Compares what the card actually contained against what the listing claimed.
+ * Only the difference is worth interrupting for — repeating what the detail
+ * view already showed is noise.
+ */
+function describeSurprise(actual, claimed) {
+    if (!actual || typeof actual !== 'object') {
+        return '';
+    }
+
+    const notes = [];
+    const wasClaimed = (key) => claimed && typeof claimed === 'object' && claimed[key];
+
+    if (actual.lorebookEntries > 0 && !wasClaimed('lorebookEntries')) {
+        notes.push(`a lorebook with ${actual.lorebookEntries} entr${actual.lorebookEntries === 1 ? 'y' : 'ies'}`);
+    }
+    if (actual.hasSystemPrompt && !wasClaimed('hasSystemPrompt')) {
+        notes.push('a system prompt that overrides yours');
+    }
+    if (actual.hasPostHistoryInstructions && !wasClaimed('hasPostHistoryInstructions')) {
+        notes.push('post-history instructions');
+    }
+    if (actual.externalImages > 0) {
+        notes.push(`${actual.externalImages} image${actual.externalImages === 1 ? '' : 's'} loaded from other sites`);
+    }
+
+    return notes.length === 0 ? '' : `This card also includes ${joinList(notes)}.`;
+}
+
+function joinList(items) {
+    if (items.length === 1) {
+        return items[0];
+    }
+    return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
 function describeImportError(error) {
     switch (error?.message) {
         case 'import_url_rejected':
@@ -265,6 +313,17 @@ function describeImportError(error) {
             return 'This source cannot be imported yet.';
         case 'import_failed':
             return 'The card did not arrive. It may have been removed.';
+        case 'card_invalid':
+            return 'That download was not a usable character card.';
+        case 'png_malformed':
+        case 'not_a_png':
+            return 'That download was damaged or incomplete.';
+        case 'too_large':
+            return 'That card is larger than this extension will download.';
+        case 'use_native_import':
+            return 'This source should import directly — please report this.';
+        case 'rate_limited':
+            return 'Too many downloads — wait a moment and try again.';
         default:
             return 'Something went wrong during import.';
     }

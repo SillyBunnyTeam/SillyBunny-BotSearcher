@@ -10,6 +10,7 @@
  */
 
 import { isAllowedImageUrl } from './render.js';
+import { PLUGIN_BASE } from './constants.js';
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -47,6 +48,90 @@ export async function importCard(card, clientHosts) {
     }
 
     return added[added.length - 1];
+}
+
+/**
+ * Import path for a source SillyBunny cannot fetch by URL itself.
+ *
+ * The server downloads and structurally validates the bytes; this only carries
+ * them to the host's own importer. Note that /api/characters/import answers 200
+ * with `{ error: true }` on failure rather than an error status, so the status
+ * code alone cannot be trusted — and as with the native path, the character
+ * list diff is the real success signal.
+ *
+ * @param {any} card
+ * @param {{ id: string }} source
+ * @returns {Promise<{ avatar: string, name: string, inside: object | null }>}
+ */
+export async function importCardBytes(card, source) {
+    const ctx = context();
+
+    const cardResponse = await fetch(`${PLUGIN_BASE}/card`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify({ source: source.id, id: card.id }),
+    });
+
+    if (!cardResponse.ok) {
+        let code = `http_${cardResponse.status}`;
+        try {
+            const payload = await cardResponse.json();
+            if (typeof payload?.error === 'string') {
+                code = payload.error;
+            }
+        } catch {
+            // Not JSON; the status is enough.
+        }
+        throw new Error(code);
+    }
+
+    const kind = cardResponse.headers.get('X-SBBS-Card-Kind') === 'json' ? 'json' : 'png';
+    const inside = readInside(cardResponse.headers.get('X-SBBS-Card-Inside'));
+    const blob = await cardResponse.blob();
+
+    const fileName = `${source.id}-${String(card.id).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64)}.${kind}`;
+    const file = new File([blob], fileName, { type: kind === 'json' ? 'application/json' : 'image/png' });
+
+    const form = new FormData();
+    form.append('avatar', file);
+    form.append('file_type', kind);
+
+    const before = new Set(snapshotAvatars());
+
+    // omitContentType so the browser sets the multipart boundary itself.
+    const importResponse = await fetch('/api/characters/import', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: ctx.getRequestHeaders({ omitContentType: true }),
+        body: form,
+    });
+
+    if (!importResponse.ok) {
+        throw new Error('import_failed');
+    }
+
+    await context().getCharacters();
+
+    const added = snapshotCharacters().filter((entry) => !before.has(entry.avatar));
+    if (added.length === 0) {
+        throw new Error('import_failed');
+    }
+
+    return { ...added[added.length - 1], inside };
+}
+
+/** The server sends the trust summary URI-encoded so it survives as a header. */
+function readInside(raw) {
+    if (typeof raw !== 'string' || raw === '') {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(decodeURIComponent(raw));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
 }
 
 function snapshotCharacters() {

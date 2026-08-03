@@ -64,6 +64,7 @@ function inside(value) {
         hasSystemPrompt: read('hasSystemPrompt') === true,
         hasPostHistoryInstructions: read('hasPostHistoryInstructions') === true,
         hasDepthPrompt: read('hasDepthPrompt') === true,
+        regexScripts: intOrNull(read('regexScripts')),
         embeddedAssets: intOrNull(read('embeddedAssets')),
         specVersion: str(read('specVersion'), 32) || null,
         originSite: str(read('originSite'), 64) || null,

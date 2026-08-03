@@ -13,7 +13,7 @@
 import { EXTENSION_PATH, LOG_TAG } from './constants.js';
 import { AVAILABILITY, getAvailability, invalidateAvailability, post, thumbSrc } from './api.js';
 import { el, setText, setImgSafe } from './render.js';
-import { getSettings, updateSettings } from './settings.js';
+import { getSettings, updateSettings, isSourceEnabled } from './settings.js';
 import { showDetail } from './detail.js';
 
 let openPopup = null;
@@ -94,7 +94,10 @@ function wireBrowser(popup, health, options) {
 
     const settings = getSettings();
     const sources = Array.isArray(health?.sources) ? health.sources : [];
-    const usable = sources.filter((source) => source && source.state !== 'down' && source.capabilities?.search);
+    const usable = sources.filter((source) => source
+        && source.state !== 'down'
+        && source.capabilities?.search
+        && isSourceEnabled(source, settings.enabledSources));
 
     if (usable.length === 0) {
         dom.bar.hidden = true;

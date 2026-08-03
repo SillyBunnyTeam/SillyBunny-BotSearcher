@@ -10,6 +10,8 @@ import { botbooru } from './sources/botbooru.js';
 import { chub } from './sources/chub.js';
 import { pygmalion } from './sources/pygmalion.js';
 import { risurealm } from './sources/risurealm.js';
+import { quillgen } from './sources/quillgen.js';
+import { wyvern } from './sources/wyvern.js';
 
 /** @type {Readonly<Record<string, any>>} */
 export const SOURCES = Object.freeze({
@@ -17,6 +19,8 @@ export const SOURCES = Object.freeze({
     chub,
     pygmalion,
     risurealm,
+    quillgen,
+    wyvern,
 });
 
 /**

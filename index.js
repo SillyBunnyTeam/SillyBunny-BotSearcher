@@ -31,7 +31,7 @@ export function init() {
         openBrowser().catch((error) => console.error(`[${LOG_TAG}] open failed:`, error));
     });
 
-    mountSettings();
+    mountSettings().catch((error) => console.error(`[${LOG_TAG}] settings mount failed:`, error));
 
     const ctx = globalThis.SillyTavern.getContext();
     ctx.SlashCommandParser.addCommandObject(ctx.SlashCommand.fromProps({

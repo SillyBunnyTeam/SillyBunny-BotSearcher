@@ -16,6 +16,7 @@
 import { SETTINGS_KEY, DOM_IDS, EXTENSION_NAME } from './constants.js';
 import { IMAGE_MODES } from '../shared/schema.js';
 import { el, setText } from './render.js';
+import { getAvailability } from './api.js';
 
 const PAGE_SIZES = [12, 24, 48];
 
@@ -27,7 +28,12 @@ const IMAGE_MODE_LABELS = {
     off: 'No thumbnails (lowest data use)',
 };
 
+/** Sources above this tier are opt-in: they work, but are narrow or unreliable. */
+export const DEFAULT_MAX_TIER = 2;
+
 const DEFAULTS = Object.freeze({
+    /** null means "whatever is tier <= DEFAULT_MAX_TIER"; an array is an explicit choice. */
+    enabledSources: null,
     defaultSource: 'botbooru',
     sfwOnlyDefault: true,
     blurNsfw: true,
@@ -55,7 +61,12 @@ export function getSettings() {
     const source = raw && typeof raw === 'object' ? raw : {};
     const read = (key) => (Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
 
+    const enabled = read('enabledSources');
+
     return {
+        enabledSources: Array.isArray(enabled)
+            ? enabled.filter((id) => typeof id === 'string' && /^[a-z0-9-]{1,64}$/.test(id))
+            : null,
         defaultSource: typeof read('defaultSource') === 'string' ? read('defaultSource').slice(0, 64) : DEFAULTS.defaultSource,
         sfwOnlyDefault: read('sfwOnlyDefault') !== false,
         blurNsfw: read('blurNsfw') !== false,
@@ -65,6 +76,23 @@ export function getSettings() {
         showTrustPanel: read('showTrustPanel') !== false,
         _v: DEFAULTS._v,
     };
+}
+
+/**
+ * Whether a source should appear in the picker.
+ *
+ * With no explicit choice saved, tier decides: tiers 0-2 are sources with a
+ * real catalogue and a stable API, tier 3 is everything narrow or fragile
+ * enough that it should be asked for rather than assumed.
+ *
+ * @param {{ id: string, tier: number }} source
+ * @param {string[] | null} enabledSources
+ */
+export function isSourceEnabled(source, enabledSources) {
+    if (Array.isArray(enabledSources)) {
+        return enabledSources.includes(source.id);
+    }
+    return typeof source.tier === 'number' && source.tier <= DEFAULT_MAX_TIER;
 }
 
 /**
@@ -85,7 +113,7 @@ export function updateSettings(patch) {
  * whose dedupe key collides with an existing one
  * (public/scripts/extensions.js:890-963).
  */
-export function mountSettings() {
+export async function mountSettings() {
     if (document.getElementById(DOM_IDS.settingsRoot)) {
         return;
     }
@@ -129,6 +157,61 @@ export function mountSettings() {
     drawer.append(header, content);
     container.append(drawer);
     host.append(container);
+
+    // Source list comes from the server, so it stays correct as adapters are
+    // added. Appended after mounting so a missing plugin does not block the
+    // rest of the panel.
+    try {
+        const { health } = await getAvailability();
+        const sources = Array.isArray(health?.sources) ? health.sources : [];
+        if (sources.length > 0) {
+            content.prepend(sourceList(sources));
+        }
+    } catch {
+        // Plugin not installed yet; the rest of the panel still works.
+    }
+}
+
+/**
+ * Checkbox per source. Ticking any one switches from "tier default" to an
+ * explicit list, so a new adapter never silently turns itself on for someone
+ * who has already curated their sources.
+ */
+function sourceList(sources) {
+    const wrapper = el('div', 'sbbs-setting sbbs-setting-sources');
+    wrapper.append(el('label', undefined, 'Sources'));
+
+    const settings = getSettings();
+
+    for (const source of sources) {
+        const enabled = isSourceEnabled(source, settings.enabledSources);
+        const row = el('label', 'checkbox_label sbbs-source-row');
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = enabled;
+        input.dataset.sourceId = source.id;
+
+        input.addEventListener('change', () => {
+            const chosen = [...wrapper.querySelectorAll('input[type=checkbox]')]
+                .filter((box) => box.checked)
+                .map((box) => box.dataset.sourceId);
+            updateSettings({ enabledSources: chosen });
+        });
+
+        row.append(input, el('span', undefined, source.label ?? source.id));
+
+        if (source.tier > DEFAULT_MAX_TIER) {
+            row.append(el('small', 'sbbs-source-note', 'limited'));
+        }
+        if (source.state === 'down') {
+            row.append(el('small', 'sbbs-source-note', 'not responding'));
+        }
+
+        wrapper.append(row);
+    }
+
+    return wrapper;
 }
 
 function checkbox(id, label, checked, onChange) {

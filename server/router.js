@@ -20,6 +20,10 @@ import { consume, acquire, callerKey } from './limits.js';
 import { verifyRef } from './refs.js';
 import { detectImageType } from './imagetype.js';
 import { markSuccess, markFailure, isDown, stateOf, reset } from './health.js';
+import { validateCardBytes, CardBytesError } from './cardbytes.js';
+
+/** A character card is text plus one image; well past anything legitimate. */
+const MAX_CARD_BYTES = 8 * 1024 * 1024;
 
 /**
  * Default thumbnail cap. A 320px preview is 20-60 KB, so anything near this is
@@ -182,6 +186,99 @@ export function createRouter(router, state) {
         }
     }));
 
+    /**
+     * Downloads and validates card bytes for a source SillyBunny cannot import
+     * by URL itself. This is the only route that hands the browser something it
+     * will feed into the character importer, so everything here is deliberate:
+     * the URL comes from the adapter's own base, the bytes are structurally
+     * validated before they are sent, and nothing is re-encoded (re-encoding a
+     * PNG would strip the embedded card, which IS the character).
+     */
+    router.post('/card', jsonGuard, wrap(async (request, response) => {
+        const resolved = resolveSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const { adapter } = resolved;
+
+        // Native sources must go through SillyBunny's own importer, which is
+        // already hardened. Offering a second path would only add surface.
+        if (adapter.nativeImport === true) {
+            fail(response, 400, 'use_native_import');
+            return;
+        }
+
+        const id = readId(adapter, request.body);
+        if (id === null) {
+            fail(response, 400, 'bad_id');
+            return;
+        }
+
+        const gate = await gateRequest(request, response, adapter.id, 'card');
+        if (!gate) {
+            return;
+        }
+
+        try {
+            const ctx = contextFor(adapter);
+            const target = adapter.getImportTarget(ctx, id);
+
+            /** @type {Buffer} */
+            let buffer;
+
+            if (target?.kind === 'bytes' && typeof target.url === 'string') {
+                const result = await callAdapter(adapter, () => fetchBytes(adapter, target.url, {
+                    accept: 'image/png,application/json;q=0.9,*/*;q=0.5',
+                    maxBytes: MAX_CARD_BYTES,
+                    timeoutMs: 20000,
+                }));
+                buffer = result.buffer;
+            } else if (target?.kind === 'inline' && typeof adapter.buildCard === 'function') {
+                // Some sources publish full card data but no downloadable file.
+                // The adapter assembles a card from it; the result then goes
+                // through exactly the same validation as a downloaded one, so
+                // this path is not a way to bypass any of the checks.
+                const card = await callAdapter(adapter, () => adapter.buildCard(ctx, id));
+                buffer = Buffer.from(JSON.stringify(card), 'utf8');
+                if (buffer.length > MAX_CARD_BYTES) {
+                    fail(response, 422, 'too_large');
+                    return;
+                }
+            } else {
+                fail(response, 500, 'bad_import_target');
+                return;
+            }
+
+            let verdict;
+            try {
+                verdict = validateCardBytes(buffer, target.expect === 'json' ? 'json' : 'png');
+            } catch (error) {
+                if (error instanceof CardBytesError) {
+                    console.warn(`[BotSearcher] ${adapter.id} card rejected: ${error.code} (${error.detail ?? ''})`);
+                    fail(response, 422, error.code);
+                    return;
+                }
+                throw error;
+            }
+
+            response.set({
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': String(buffer.length),
+                'X-Content-Type-Options': 'nosniff',
+                'Content-Security-Policy': "default-src 'none'; sandbox",
+                'Content-Disposition': `attachment; filename="${cardFileName(adapter.id, id, verdict.kind)}"`,
+                // Tells the client which extension to declare on import, and
+                // what the card actually contains — from the bytes, not from
+                // whatever the listing claimed.
+                'X-SBBS-Card-Kind': verdict.kind,
+                'X-SBBS-Card-Inside': encodeURIComponent(JSON.stringify(verdict.inside)),
+            });
+            response.send(buffer);
+        } finally {
+            gate.release();
+        }
+    }));
+
     router.post('/detail', jsonGuard, wrap(async (request, response) => {
         const resolved = resolveSource(request, response);
         if (!resolved) {
@@ -244,6 +341,15 @@ function readId(adapter, body) {
         return null;
     }
     return adapter.idPattern.test(id) ? id : null;
+}
+
+/**
+ * A filename the client can hand to the importer. Built from values we control
+ * — never from anything upstream sent — so no sanitizer is needed.
+ */
+function cardFileName(sourceId, id, kind) {
+    const slug = String(id).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64) || 'card';
+    return `${sourceId}-${slug}.${kind === 'json' ? 'json' : 'png'}`;
 }
 
 /**

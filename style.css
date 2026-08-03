@@ -161,11 +161,6 @@
 .sbbs-card-img {
     aspect-ratio: 2 / 3;
     background: var(--sb-surface-highlight, rgba(255, 255, 255, 0.06));
-    display: block;
-}
-
-.sbbs-card-img {
-    position: relative;
     display: grid;
     place-items: center;
 }
@@ -480,4 +475,21 @@
         bottom: 0;
         background: var(--sb-shell-surface, transparent);
     }
+}
+
+.sbbs-setting-sources {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-bottom: var(--spacing-xs, 4px);
+    border-bottom: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+}
+
+.sbbs-source-row {
+    margin: 0;
+}
+
+.sbbs-source-note {
+    opacity: 0.55;
+    font-size: 0.8em;
 }
