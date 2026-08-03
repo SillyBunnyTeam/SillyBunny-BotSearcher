@@ -156,6 +156,7 @@ function wireBrowser(popup, health, options) {
         filters: root.querySelector('#sbbs_filters'),
         filterFields: root.querySelector('#sbbs_filter_fields'),
         filtersClear: root.querySelector('#sbbs_filters_clear'),
+        filterActions: root.querySelector('.sbbs-filter-actions'),
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
         partial: root.querySelector('#sbbs_partial'),
@@ -353,12 +354,13 @@ function wireBrowser(popup, health, options) {
         state.filters = declared.length > 0
             ? buildFilters(dom.filterFields, declared, onFilterChange)
             : null;
-        dom.filtersToggle.hidden = declared.length === 0;
+        // The panel itself always stays reachable: it also holds the content
+        // controls, which apply to every source. Only the per-source fields go,
+        // and "Clear filters" with them, since it would have nothing to clear.
         if (declared.length === 0) {
-            dom.filters.hidden = true;
-            dom.filtersToggle.setAttribute('aria-expanded', 'false');
             dom.filterFields.replaceChildren();
         }
+        dom.filterActions.hidden = declared.length === 0;
         updateFilterBadge();
     }
 
@@ -762,13 +764,6 @@ function buildCard(item, source, settings, showSource = false) {
     figure.append(initial);
 
     const rating = ratingOf(item);
-    const badge = el('span', `sbbs-rating sbbs-rating-${rating.value}`, rating.label);
-    figure.append(badge);
-
-    // Which site a result came from only matters when they are mixed together.
-    if (showSource) {
-        figure.append(el('span', 'sbbs-card-source', source.label ?? item.source ?? ''));
-    }
 
     const src = thumbSrc(item, source, 'grid', settings.imageMode);
     if (src) {
@@ -801,10 +796,24 @@ function buildCard(item, source, settings, showSource = false) {
         meta.append(el('div', 'sbbs-card-tagline', item.tagline.trim()));
     }
 
+    // Source, popularity and content rating share the card's last line. On a
+    // wide screen CSS lifts the rating and the source chip back onto the
+    // thumbnail; in the narrow list layout the thumbnail is far too small to
+    // carry either legibly, and the content rating has to stay readable.
+    const footer = el('div', 'sbbs-card-footer');
+
+    // Which site a result came from only matters when they are mixed together.
+    if (showSource) {
+        footer.append(el('span', 'sbbs-card-source', source.label ?? item.source ?? ''));
+    }
+
     const popularity = popularityOf(item);
     if (popularity !== '') {
-        meta.append(el('div', 'sbbs-card-stats', popularity));
+        footer.append(el('div', 'sbbs-card-stats', popularity));
     }
+
+    footer.append(el('span', `sbbs-rating sbbs-rating-${rating.value}`, rating.label));
+    meta.append(footer);
 
     open.append(figure, meta);
     open.title = item.name || '';

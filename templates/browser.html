@@ -2,8 +2,6 @@
     <header>
       <form id="sbbs_search_form" class="sbbs-bar" role="search">
         <div class="sbbs-bar-row">
-            <label class="sbbs-visually-hidden" for="sbbs_source">Card source</label>
-            <select id="sbbs_source" class="text_pole sbbs-source" aria-label="Source"></select>
             <label class="sbbs-visually-hidden" for="sbbs_query">Search character cards</label>
             <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="128" enterkeyhint="search" autocomplete="off" spellcheck="false" list="sbbs_query_history">
             <!-- Previous searches, offered by the browser's own dropdown. -->
@@ -13,29 +11,40 @@
             </button>
         </div>
         <div class="sbbs-bar-row sbbs-bar-row-secondary">
+            <label class="sbbs-visually-hidden" for="sbbs_source">Card source</label>
+            <select id="sbbs_source" class="text_pole sbbs-source" aria-label="Source"></select>
             <label class="sbbs-visually-hidden" for="sbbs_sort">Sort results</label>
             <select id="sbbs_sort" class="text_pole sbbs-sort" aria-label="Sort"></select>
-            <label class="checkbox_label sbbs-sfw">
-                <input id="sbbs_sfw" type="checkbox">
-                <span>SFW only</span>
-            </label>
-            <label id="sbbs_hide_ai_control" class="checkbox_label sbbs-hide-ai" hidden>
-                <input id="sbbs_hide_ai" type="checkbox">
-                <span>Hide AI-generated</span>
-            </label>
-            <button id="sbbs_filters_toggle" class="menu_button sbbs-filters-toggle" type="button" aria-expanded="false" aria-controls="sbbs_filters" hidden>
+            <!--
+                Always present. It holds the content controls below, which apply to
+                every source, so hiding it when a source declares no filters of its
+                own would put "SFW only" out of reach.
+            -->
+            <button id="sbbs_filters_toggle" class="menu_button sbbs-filters-toggle" type="button" aria-expanded="false" aria-controls="sbbs_filters">
                 <i class="fa-solid fa-sliders" aria-hidden="true"></i>
                 <span>Filters</span>
                 <span id="sbbs_filters_badge" class="sbbs-filters-badge" hidden></span>
             </button>
-            <span id="sbbs_sfw_note" class="sbbs-control-note" aria-live="polite"></span>
-            <span id="sbbs_count" class="sbbs-count" aria-live="polite"></span>
         </div>
-        <!--
-            Populated per source from capabilities.filters, so a control only
-            appears when the selected source can actually apply it.
-        -->
         <div id="sbbs_filters" class="sbbs-filters" hidden>
+            <!--
+                Content controls first: they apply to every source and keep their
+                value across a source change, unlike the per-source fields below.
+            -->
+            <div class="sbbs-filter-group">
+                <label class="checkbox_label sbbs-sfw">
+                    <input id="sbbs_sfw" type="checkbox">
+                    <span>SFW only</span>
+                </label>
+                <label id="sbbs_hide_ai_control" class="checkbox_label sbbs-hide-ai" hidden>
+                    <input id="sbbs_hide_ai" type="checkbox">
+                    <span>Hide AI-generated</span>
+                </label>
+            </div>
+            <!--
+                Populated per source from capabilities.filters, so a control only
+                appears when the selected source can actually apply it.
+            -->
             <div id="sbbs_filter_fields" class="sbbs-filter-fields"></div>
             <div class="sbbs-filter-actions">
                 <button id="sbbs_filters_clear" class="menu_button sbbs-filters-clear" type="button">Clear filters</button>
@@ -45,6 +54,13 @@
     </header>
 
     <div class="sbbs-body" aria-busy="false">
+        <!--
+            Describes the results, so it sits with them rather than in the filter
+            panel: a source with no reliable SFW filter has to say so whether or
+            not the user has the panel open. Still the checkbox's aria-describedby.
+        -->
+        <span id="sbbs_sfw_note" class="sbbs-control-note" aria-live="polite"></span>
+        <span id="sbbs_count" class="sbbs-count" aria-live="polite"></span>
         <div id="sbbs_state" class="sbbs-state" role="status"></div>
         <!-- Sources a merged search could not reach. -->
         <div id="sbbs_partial" class="sbbs-partial" role="status" hidden></div>

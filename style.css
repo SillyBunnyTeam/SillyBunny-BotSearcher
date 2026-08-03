@@ -98,18 +98,18 @@
     margin: 0;
 }
 
+/* Both describe the results, so both sit above the grid rather than in the bar. */
 .sbbs-count {
-    margin-inline-start: auto;
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.9em;
 }
 
 .sbbs-control-note {
-    flex: 1 1 18rem;
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.85em;
 }
 
+.sbbs-count:empty,
 .sbbs-control-note:empty {
     display: none;
 }
@@ -142,6 +142,27 @@
     flex-direction: column;
     gap: var(--spacing-sm, 8px);
     padding: var(--spacing-md, 12px) 0 0;
+}
+
+/*
+ * Content controls. These apply to every source and survive a source change, so
+ * they are kept visually apart from the per-source fields under them.
+ */
+.sbbs-filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-xs, 4px) var(--spacing-md, 12px);
+}
+
+/* Only a divider when there is something under it to divide from. */
+.sbbs-filter-group:has(+ .sbbs-filter-fields:not(:empty)) {
+    padding-bottom: var(--spacing-sm, 8px);
+    border-bottom: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+}
+
+.sbbs-filter-fields:empty {
+    display: none;
 }
 
 .sbbs-filter-fields {
@@ -273,7 +294,15 @@
  * buttons and a button inside a button is neither valid nor keyboard-reachable.
  * `.sbbs-card-open` is the primary action and fills everything above the tags.
  */
+/*
+ * The positioning context for the rating and source chips. They live in the
+ * card's footer row in the DOM, because the narrow list layout has no room for
+ * them on its thumbnail; here they are lifted back over the artwork. Anchoring
+ * to the card rather than to .sbbs-card-img works because the image is the
+ * card's first content, so the card's top corners are the image's top corners.
+ */
 .sbbs-card {
+    position: relative;
     background: var(--sb-card-bg, rgba(255, 255, 255, 0.04));
     border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
     border-radius: var(--sb-radius-md, 10px);
@@ -296,7 +325,14 @@
     color: inherit;
     font: inherit;
     width: 100%;
-    display: block;
+    /*
+     * Column flex rather than block: a <button> taller than its content centres
+     * that content vertically, so cards with fewer tags pushed their thumbnail
+     * down and the row of artwork came out ragged.
+     */
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
     flex: 1 1 auto;
 }
 
@@ -326,13 +362,21 @@
     }
 }
 
-/* Fixed ratio so the grid never reflows as thumbnails arrive. */
+/*
+ * Fixed ratio so the grid never reflows as thumbnails arrive.
+ *
+ * min-height:0 is what makes that true. This is a grid container, so its
+ * automatic minimum size is the thumbnail's own min-content height — a portrait
+ * image taller than the ratio pushes the box past it and the row grows. The
+ * image is cropped by object-fit: cover instead, which is the intent.
+ */
 .sbbs-card-img {
     aspect-ratio: 2 / 3;
+    min-height: 0;
+    overflow: hidden;
     background: var(--sb-surface-highlight, rgba(255, 255, 255, 0.06));
     display: grid;
     place-items: center;
-    position: relative;
 }
 
 .sbbs-card-img img {
@@ -446,6 +490,15 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     overflow: hidden;
+}
+
+/*
+ * The card's last line. On a wide screen the rating and source chips are lifted
+ * out of it onto the artwork, so only the popularity figures remain in flow.
+ * min-width:0 because it is a grid item wrapping non-wrapping text.
+ */
+.sbbs-card-footer {
+    min-width: 0;
 }
 
 .sbbs-card-stats {
@@ -836,34 +889,97 @@
 /* ---- mobile ---- */
 
 @media screen and (max-width: 768px) {
-    .sbbs-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+    /*
+     * A full-bleed sheet, following the fork's own contract for modal drawers
+     * (public/css/sillybunny-mobile-shell.css:1, :204). Without this the dialog
+     * loses about a quarter of a phone's width before any content: 10vw to
+     * `large`'s 90vw cap, 40px to .popup's padding (public/css/popup.css:14)
+     * and 16px to .popup-content's (:66).
+     *
+     * !important is needed here and nowhere else in this sheet: the width and
+     * height come from .large_dialogue_popup (public/style.css:4090), which
+     * declares them !important, so load order alone cannot win. Do not "tidy"
+     * these away.
+     *
+     * --sb-shell-viewport-height is kept in sync with the visual viewport by
+     * public/scripts/sillybunny-tabs.js:2750, so the sheet contracts when the
+     * software keyboard opens. dvh does not do that reliably on Android Chrome.
+     */
+    .popup:has(.sbbs-root) {
+        width: 100dvw !important;
+        max-width: 100dvw !important;
+        height: var(--sb-shell-viewport-height, 100dvh) !important;
+        max-height: var(--sb-shell-viewport-height, 100dvh) !important;
+        border-radius: 0 !important;
+        border-width: 0 !important;
+        padding:
+            calc(var(--spacing-sm, 8px) + env(safe-area-inset-top, 0px))
+            var(--spacing-sm, 8px)
+            calc(var(--spacing-sm, 8px) + env(safe-area-inset-bottom, 0px));
     }
 
+    .popup:has(.sbbs-root) .popup-content {
+        margin-top: 0;
+        padding: 0;
+    }
+
+    .popup:has(.sbbs-root) .popup-body {
+        max-height: none;
+    }
+
+    /*
+     * The close button is parked just outside the dialog's corner
+     * (public/css/popup.css:220), which on a full-bleed sheet is off-screen.
+     * Bring it inside and give it a real touch target.
+     */
+    .popup:has(.sbbs-root) .popup-button-close {
+        inset-block-start: calc(var(--spacing-xs, 4px) + env(safe-area-inset-top, 0px));
+        inset-inline-end: var(--spacing-xs, 4px);
+        width: var(--sb-mobile-touch-target, 44px);
+        height: var(--sb-mobile-touch-target, 44px);
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 1;
+    }
+
+    /* Row 1 is the search field; row 2 shares out source, sort and Filters. */
     .sbbs-bar {
+        position: -webkit-sticky;
         position: sticky;
         top: 0;
         z-index: 1;
         background: var(--sb-shell-surface, transparent);
     }
 
-    .sbbs-source {
-        max-width: none;
-    }
-
-    .sbbs-bar-row:first-child {
-        flex-wrap: wrap;
-    }
-
-    .sbbs-source {
-        flex: 1 1 100%;
-        width: 100%;
+    /* .text_pole's own 5px block margins add ~20px across two rows. */
+    .sbbs-source,
+    .sbbs-sort,
+    .sbbs-query {
+        margin-block: 0;
     }
 
     .sbbs-query {
         flex: 1 1 0;
         width: auto;
-        min-height: 44px;
+        min-height: var(--sb-mobile-touch-target, 44px);
+    }
+
+    /* The two pickers split whatever the Filters button leaves. Sizing all
+       three equally clips the button's label, and .menu_button does not
+       ellipsize. Sort is hidden when a source offers one sort or none, which
+       hands its share to the source picker. */
+    .sbbs-source,
+    .sbbs-sort {
+        flex: 1 1 0;
+        min-width: 0;
+        max-width: none;
+    }
+
+    .sbbs-filters-toggle {
+        flex: 0 0 auto;
+        padding-inline: 10px;
     }
 
     .sbbs-go,
@@ -872,8 +988,129 @@
     .sbbs-import,
     .sbbs-open-character,
     .sbbs-reveal {
-        min-width: 44px;
-        min-height: 44px;
+        min-width: var(--sb-mobile-touch-target, 44px);
+        min-height: var(--sb-mobile-touch-target, 44px);
+    }
+
+    .sbbs-filter-group {
+        gap: var(--spacing-xs, 4px) var(--spacing-md, 12px);
+    }
+
+    .sbbs-body {
+        gap: var(--spacing-sm, 8px);
+    }
+
+    /*
+     * Results become full-width rows: thumbnail left, text right. A two-column
+     * grid on a phone leaves each card about 135px wide, at which point every
+     * line of card text ellipsizes into a fragment.
+     */
+    .sbbs-grid {
+        grid-template-columns: 1fr;
+        gap: var(--spacing-sm, 8px);
+    }
+
+    .sbbs-card {
+        height: auto;
+    }
+
+    .sbbs-card-open {
+        flex-direction: row;
+        align-items: flex-start;
+        gap: var(--spacing-sm, 8px);
+        padding: var(--spacing-sm, 8px);
+    }
+
+    /* 2/3 is a poster ratio; in a row it just costs height. */
+    .sbbs-card-img {
+        flex: 0 0 72px;
+        aspect-ratio: 3 / 4;
+        border-radius: var(--sb-radius-sm, 6px);
+    }
+
+    .sbbs-card-initial {
+        font-size: 1.75rem;
+    }
+
+    .sbbs-card-meta {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 0;
+    }
+
+    /* There is room to wrap now, and a truncated name identifies nothing. */
+    .sbbs-card-name {
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+    }
+
+    .sbbs-card-sub {
+        white-space: normal;
+    }
+
+    /*
+     * Back into the flow as one metadata line: a 72px thumbnail cannot carry
+     * either chip legibly, and the content rating has to stay readable.
+     *
+     * It gets a whole row rather than sharing the creator's. Sharing squeezes
+     * the creator into whatever the chips leave — around 24px on a 360px phone,
+     * which wraps it to one character per line. The row is free anyway: the
+     * 96px thumbnail, not the text, sets the height of a typical result.
+     */
+    .sbbs-card-footer {
+        display: flex;
+        align-items: center;
+        flex-wrap: nowrap;
+        gap: var(--spacing-xs, 4px);
+    }
+
+    .sbbs-rating,
+    .sbbs-card-source {
+        position: static;
+    }
+
+    /* One line, and the popularity figures give way first: the rating is a
+       safety signal and must never be clipped, the source name identifies the
+       result, and the download count is the least of the three. */
+    .sbbs-rating {
+        flex: 0 0 auto;
+    }
+
+    /*
+     * Source labels are a single word, so shrinking one saves a few pixels and
+     * costs the whole name — "Chub" became "Ch…". The stats absorb all of it.
+     * The cap is only a guard against an unreasonably long label;
+     * calc(100% - 5.5rem) was sized for a poster card and leaves ~47px here.
+     */
+    .sbbs-card-source {
+        flex: 0 0 auto;
+        max-width: 50%;
+    }
+
+    .sbbs-card-stats {
+        flex: 0 1 auto;
+        min-width: 0;
+    }
+
+    /*
+     * A tag row costs ~40px on every result — about a third of a row — to
+     * repeat what the detail pane already lists and what the Filters panel can
+     * already search on. Off the card, three more results fit on screen.
+     */
+    .sbbs-card-tags {
+        display: none;
+    }
+
+    /* Skeletons are bare .sbbs-card-img nodes with no card around them, so
+       they need the row shape spelled out or the loading state shows twelve
+       posters where rows are about to appear. */
+    .sbbs-skeleton .sbbs-card-img {
+        aspect-ratio: auto;
+        height: 88px;
+        width: 100%;
     }
 
     .sbbs-detail {
@@ -886,16 +1123,28 @@
         flex-direction: column;
     }
 
+    /* Capped by height, not width: a portrait preview sized to 60% of the
+       column pushed the name and the Import button below the fold. */
     .sbbs-detail-image {
         flex: 0 0 auto;
-        max-width: 60%;
+        width: auto;
+        max-width: 100%;
+        max-height: 34dvh;
         align-self: center;
     }
 
+    .sbbs-detail-image img {
+        width: auto;
+        max-width: 100%;
+        max-height: 34dvh;
+    }
+
     .sbbs-detail-actions {
+        position: -webkit-sticky;
         position: sticky;
         bottom: 0;
         background: var(--sb-shell-surface, transparent);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
     }
 }
 

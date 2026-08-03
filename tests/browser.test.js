@@ -519,8 +519,20 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         assert.deepEqual(Object.keys(merged.sorts).sort(), ['botbooru', 'chub']);
         assert.equal(popup.content.querySelector('#sbbs_sort').hidden, true, 'one sort control cannot drive both');
         // Chub filters tags and Botbooru does not; offering the control would
-        // filter half the list silently.
-        assert.equal(popup.content.querySelector('#sbbs_filters_toggle').hidden, true);
+        // filter half the list silently. The panel itself stays reachable
+        // because it also holds SFW only, which applies to every source.
+        assert.equal(popup.content.querySelector('#sbbs_filters_toggle').hidden, false);
+        assert.equal(
+            popup.content.querySelector('#sbbs_filter_fields').children.length,
+            0,
+            'a filter only some sources honour must not be offered',
+        );
+        assert.equal(
+            popup.content.querySelector('.sbbs-filter-actions').hidden,
+            true,
+            'and "Clear filters" goes with them, having nothing to clear',
+        );
+        assert.equal(popup.content.querySelector('#sbbs_sfw').isConnected, true);
 
         searches[6].resolve(jsonResponse({
             total: 3,
