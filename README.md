@@ -45,6 +45,15 @@ Open the character import screen and select **Find cards online**, or use the sl
 
 The browser immediately loads the saved or default source's catalog. Enter a search term to narrow it, then open a result to review its details. Each source remembers its own sort choice.
 
+**Filters** opens the additional controls the selected source supports. These vary by source, because they are the filters that source's own API accepts; a source that offers none shows no Filters button rather than controls that would be ignored. Filters are cleared when you change source, since the same tag rarely means the same thing on two different sites.
+
+| Source | Filters |
+|---|---|
+| Chub | Tags, excluded tags, creator, minimum and maximum tokens |
+| All others | None yet |
+
+In a tag box, press Enter or type a comma to commit a tag, and Backspace on an empty box to remove the last one. Multiple tags narrow to cards carrying *all* of them.
+
 The details shown before import come from the selected source. A source may omit fields or report incomplete information. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
 ## Screenshots

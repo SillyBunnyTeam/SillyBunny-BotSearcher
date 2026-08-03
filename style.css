@@ -114,6 +114,109 @@
     display: none;
 }
 
+/* ---- filters ---- */
+
+.sbbs-filters-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+.sbbs-filters-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.4em;
+    height: 1.4em;
+    padding: 0 0.35em;
+    border-radius: 999px;
+    background: var(--sb-accent, currentColor);
+    color: var(--sb-accent-fg, canvas);
+    font-size: 0.8em;
+    font-variant-numeric: tabular-nums;
+}
+
+.sbbs-filters {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm, 8px);
+    padding: var(--spacing-md, 12px) 0 0;
+}
+
+.sbbs-filter-fields {
+    display: grid;
+    /* Wide enough for a tag list, narrow enough that two fit side by side. */
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: var(--spacing-sm, 8px) var(--spacing-md, 12px);
+}
+
+.sbbs-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.sbbs-filter-label {
+    font-size: 0.85em;
+    color: var(--sb-muted-fg, currentColor);
+}
+
+.sbbs-filter input {
+    min-width: 0;
+    width: 100%;
+}
+
+.sbbs-filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.sbbs-filter-chips:empty {
+    display: none;
+}
+
+.sbbs-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--sb-border, currentColor);
+    font-size: 0.85em;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.sbbs-filter-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* A real 24px target: these sit close together and are used on phones. */
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: inherit;
+    font-size: 1.1em;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.sbbs-filter-chip-remove:hover,
+.sbbs-filter-chip-remove:focus-visible {
+    background: var(--sb-hover-bg, rgb(128 128 128 / 25%));
+}
+
+.sbbs-filter-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
 /* ---- body ---- */
 
 .sbbs-body {

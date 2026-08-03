@@ -93,6 +93,24 @@ export const INGEST_KINDS = Object.freeze(['search', 'detail']);
 
 export const IMAGE_MODES = Object.freeze(['proxy', 'direct', 'off']);
 
+/**
+ * Filter control kinds an adapter may declare. The client builds its filter UI from
+ * what each source declares, so a control only ever appears when the source
+ * behind it can actually apply the filter — the same rule the SFW toggle
+ * follows. A source that declares nothing shows nothing, rather than showing a
+ * control that quietly does nothing.
+ */
+export const FILTER_TYPES = Object.freeze(['tags', 'text', 'number']);
+
+/** Caps applied to filter values server-side, before any adapter sees them. */
+export const FILTER_LIMITS = Object.freeze({
+    tagCount: 8,
+    tagLength: 48,
+    textLength: 64,
+    numberMin: 0,
+    numberMax: 1_000_000,
+});
+
 /** Honest content classification: unknown must never be presented as safe. */
 export const CONTENT_RATINGS = Object.freeze(['sfw', 'sensitive', 'unknown']);
 

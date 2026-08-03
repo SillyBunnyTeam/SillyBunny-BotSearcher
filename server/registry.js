@@ -85,6 +85,15 @@ export function describeSources(stateOf, reasonOf = () => null) {
                 sfwToggle: adapter.capabilities.sfwToggle,
                 hideAiToggle: adapter.capabilities.hideAiToggle === true,
                 detail: adapter.capabilities.detail,
+                // The client builds its filter controls from this, so a source
+                // that declares nothing shows no controls rather than showing
+                // ones that would be ignored.
+                filters: (adapter.capabilities.filters ?? []).map((filter) => ({
+                    key: filter.key,
+                    type: filter.type,
+                    label: filter.label,
+                    ...(filter.placeholder ? { placeholder: filter.placeholder } : {}),
+                })),
             },
         };
     });

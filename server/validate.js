@@ -7,6 +7,8 @@
  * to Object.prototype.
  */
 
+import { FILTER_LIMITS } from '../shared/schema.js';
+
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
@@ -166,6 +168,66 @@ export function hostCheckedUrl(raw, hosts) {
     }
 
     return url;
+}
+
+/**
+ * Reads the filter values a source has declared it can apply, and nothing else.
+ *
+ * The adapter's `capabilities.filters` list is the whitelist. A key the source
+ * did not declare is dropped rather than forwarded, so the UI can never imply a
+ * filter that is not happening — the same rule that already governs the SFW and
+ * hide-AI toggles.
+ *
+ * @param {unknown} raw the client's `filters` object
+ * @param {readonly {key: string, type: string}[]} declared
+ * @returns {Record<string, string[] | string | number>} own-keys-only, null prototype
+ */
+export function readFilters(raw, declared) {
+    const out = Object.create(null);
+    if (!Array.isArray(declared)) {
+        return out;
+    }
+
+    for (const spec of declared) {
+        const value = own(raw, spec?.key);
+        if (value === undefined || value === null) {
+            continue;
+        }
+
+        if (spec.type === 'tags') {
+            const tags = (Array.isArray(value) ? value : [value])
+                .filter((tag) => typeof tag === 'string')
+                .map((tag) => tag.trim().slice(0, FILTER_LIMITS.tagLength))
+                .filter((tag) => tag !== '')
+                .slice(0, FILTER_LIMITS.tagCount);
+            if (tags.length > 0) {
+                out[spec.key] = tags;
+            }
+            continue;
+        }
+
+        if (spec.type === 'text') {
+            if (typeof value === 'string') {
+                const text = value.trim().slice(0, FILTER_LIMITS.textLength);
+                if (text !== '') {
+                    out[spec.key] = text;
+                }
+            }
+            continue;
+        }
+
+        if (spec.type === 'number') {
+            const parsed = typeof value === 'number' ? value : Number(value);
+            if (Number.isFinite(parsed)) {
+                out[spec.key] = Math.min(
+                    FILTER_LIMITS.numberMax,
+                    Math.max(FILTER_LIMITS.numberMin, Math.floor(parsed)),
+                );
+            }
+        }
+    }
+
+    return out;
 }
 
 /**

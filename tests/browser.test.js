@@ -94,7 +94,7 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
                 version: '0.2.0',
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, hideAiToggle: true, detail: true } },
-                    { id: 'chub', label: 'Chub', tier: 1, state: 'up', clientHosts: ['chub.ai'], capabilities: { search: true, sorts: ['default'], sfwToggle: true, hideAiToggle: false, detail: true } },
+                    { id: 'chub', label: 'Chub', tier: 1, state: 'up', clientHosts: ['chub.ai'], capabilities: { search: true, sorts: ['default'], sfwToggle: true, hideAiToggle: false, detail: true, filters: [{ key: 'tags', type: 'tags', label: 'Tags' }] } },
                 ],
             });
         }
@@ -199,6 +199,32 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
 
         await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 2, 'append retry did not render');
         assert.match(popup.content.textContent, /Second/);
+
+        // ---- filters ----
+        // Botbooru declared none, Chub declares tags. The control follows the
+        // source, so switching sources must have revealed it.
+        const filtersToggle = popup.content.querySelector('#sbbs_filters_toggle');
+        assert.equal(filtersToggle.hidden, false, 'a source that declares filters must offer them');
+
+        filtersToggle.click();
+        assert.equal(popup.content.querySelector('#sbbs_filters').hidden, false);
+
+        const tagInput = popup.content.querySelector('#sbbs_filter_tags');
+        tagInput.value = 'Elf';
+        tagInput.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+
+        await waitFor(() => searches.length === 5, 'committing a tag did not re-run the search');
+        assert.deepEqual(searches[4].body.filters.tags, ['Elf'], 'the tag must reach the request');
+        // Still sent alongside, not replaced by, the filters the source declared.
+        assert.equal(searches[4].body.filters.sfwOnly, true);
+        assert.equal(searches[4].body.cursor, null, 'a filter change starts a new result set');
+        assert.equal(popup.content.querySelector('#sbbs_filters_badge').textContent, '1');
+
+        searches[4].resolve(jsonResponse({ total: 0, nextCursor: null, items: [] }));
+        await waitFor(
+            () => /No cards on Chub match these filters/.test(popup.content.textContent),
+            'an empty filtered result must say the filters are why',
+        );
 
         popup.complete();
         await firstOpen;

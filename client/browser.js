@@ -18,12 +18,14 @@ import { showDetail } from './detail.js';
 import {
     availabilityCopy,
     directRoutingNotice,
+    emptyResultMessage,
     formatCount,
     formatResultCount,
     searchErrorMessage,
     sortLabel,
     unreachableReason,
 } from './copy.js';
+import { buildFilters } from './filters.js';
 import { PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
 
 let openingPromise = null;
@@ -107,6 +109,11 @@ function wireBrowser(popup, health, options) {
         sfwNote: root.querySelector('#sbbs_sfw_note'),
         hideAiControl: root.querySelector('#sbbs_hide_ai_control'),
         hideAi: root.querySelector('#sbbs_hide_ai'),
+        filtersToggle: root.querySelector('#sbbs_filters_toggle'),
+        filtersBadge: root.querySelector('#sbbs_filters_badge'),
+        filters: root.querySelector('#sbbs_filters'),
+        filterFields: root.querySelector('#sbbs_filter_fields'),
+        filtersClear: root.querySelector('#sbbs_filters_clear'),
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
         body: root.querySelector('.sbbs-body'),
@@ -148,6 +155,8 @@ function wireBrowser(popup, health, options) {
         itemKeys: new Set(),
         /** Sources already told the user they are being fetched by the browser. */
         directNoted: new Set(),
+        /** Per-source filter panel handle; null when the source declares none. */
+        filters: null,
     };
 
     for (const source of usable) {
@@ -194,6 +203,20 @@ function wireBrowser(popup, health, options) {
         void runSearch({ append: false });
     });
 
+    dom.filtersToggle.addEventListener('click', () => {
+        const open = dom.filters.hidden;
+        dom.filters.hidden = !open;
+        dom.filtersToggle.setAttribute('aria-expanded', String(open));
+    });
+    dom.filtersClear.addEventListener('click', () => {
+        if (state.filters?.count() === 0) {
+            return;
+        }
+        state.filters?.clear();
+        updateFilterBadge();
+        void runSearch({ append: false });
+    });
+
     dom.form.addEventListener('submit', (event) => {
         event.preventDefault();
         void runSearch({ append: false });
@@ -232,6 +255,34 @@ function wireBrowser(popup, health, options) {
         }
 
         dom.hideAiControl.hidden = state.source.capabilities?.hideAiToggle !== true;
+
+        // Filters are per source and are not carried across a source change:
+        // "tags" on one site does not mean the same thing on another, and a
+        // silently-kept filter would explain a suddenly empty grid badly.
+        const declared = state.source.capabilities?.filters ?? [];
+        state.filters = declared.length > 0
+            ? buildFilters(dom.filterFields, declared, onFilterChange)
+            : null;
+        dom.filtersToggle.hidden = declared.length === 0;
+        if (declared.length === 0) {
+            dom.filters.hidden = true;
+            dom.filtersToggle.setAttribute('aria-expanded', 'false');
+            dom.filterFields.replaceChildren();
+        }
+        updateFilterBadge();
+    }
+
+    function onFilterChange() {
+        updateFilterBadge();
+        void runSearch({ append: false });
+    }
+
+    /** Shows how many filters are active, so a collapsed panel is not a trap. */
+    function updateFilterBadge() {
+        const active = state.filters?.count() ?? 0;
+        dom.filtersBadge.hidden = active === 0;
+        setText(dom.filtersBadge, String(active));
+        dom.filtersClear.disabled = active === 0;
     }
 
     async function runSearch({ append }) {
@@ -247,6 +298,9 @@ function wireBrowser(popup, health, options) {
         const query = dom.query.value.trim();
         const sort = dom.sort.value;
         const cursor = append ? state.nextCursor : null;
+        // Read once and reuse for the request and the empty-result message, so
+        // the two cannot disagree about what was asked for.
+        const filters = state.filters?.read() ?? {};
 
         state.loading = true;
         dom.body?.setAttribute('aria-busy', 'true');
@@ -274,6 +328,7 @@ function wireBrowser(popup, health, options) {
                 filters: {
                     sfwOnly: dom.sfw.checked,
                     hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
+                    ...filters,
                 },
             }, source, {
                 signal: controller.signal,
@@ -304,9 +359,7 @@ function wireBrowser(popup, health, options) {
             appendCards(fresh, source);
 
             if (state.items.length === 0) {
-                setText(dom.state, query
-                    ? `No results for "${query}" on ${source.label}. Try a broader search.`
-                    : `No cards are currently listed on ${source.label}.`);
+                setText(dom.state, emptyResultMessage(source.label, query, Object.keys(filters).length));
             } else {
                 setText(dom.state, '');
             }

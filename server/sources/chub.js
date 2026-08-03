@@ -229,9 +229,21 @@ export const chub = Object.freeze({
         sorts: SORTS,
         sfwToggle: true,
         detail: true,
+        /**
+         * Each of these was checked against the live API before being declared.
+         * `tags` narrows by every tag at once rather than any of them, which is
+         * why the label says "all of".
+         */
+        filters: Object.freeze([
+            Object.freeze({ key: 'tags', type: 'tags', label: 'Has all of these tags', placeholder: 'Elf, Romance' }),
+            Object.freeze({ key: 'excludeTags', type: 'tags', label: 'Without these tags', placeholder: 'NSFW' }),
+            Object.freeze({ key: 'creator', type: 'text', label: 'Creator', placeholder: 'Username' }),
+            Object.freeze({ key: 'minTokens', type: 'number', label: 'Min tokens' }),
+            Object.freeze({ key: 'maxTokens', type: 'number', label: 'Max tokens' }),
+        ]),
     }),
 
-    buildSearchUrl({ query, cursor, limit, sort, sfwOnly }) {
+    buildSearchUrl({ query, cursor, limit, sort, sfwOnly, filters }) {
         const perPage = clampInt(limit, 1, 48, 24);
         const page = pageCursor(cursor);
         const safe = sfwOnly === true;
@@ -248,7 +260,33 @@ export const chub = Object.freeze({
         url.searchParams.set('nsfl', String(!safe));
         url.searchParams.set('nsfw_only', 'false');
         url.searchParams.set('include_forks', 'true');
-        url.searchParams.set('count', 'false');
+        // Was 'false', which left the result count unknown and the UI reduced to
+        // "24 results shown". Chub answers with a real count either way, but only
+        // the counted one is accurate enough to page against.
+        url.searchParams.set('count', 'true');
+
+        // Values are already type-checked and capped by readFilters(); the keys
+        // here are the ones this adapter declared, so nothing else can arrive.
+        const tags = own(filters, 'tags');
+        if (Array.isArray(tags)) {
+            url.searchParams.set('tags', tags.join(','));
+        }
+        const excludeTags = own(filters, 'excludeTags');
+        if (Array.isArray(excludeTags)) {
+            url.searchParams.set('exclude_tags', excludeTags.join(','));
+        }
+        const creator = own(filters, 'creator');
+        if (typeof creator === 'string') {
+            url.searchParams.set('username', creator);
+        }
+        const minTokens = own(filters, 'minTokens');
+        if (typeof minTokens === 'number') {
+            url.searchParams.set('min_tokens', String(minTokens));
+        }
+        const maxTokens = own(filters, 'maxTokens');
+        if (typeof maxTokens === 'number') {
+            url.searchParams.set('max_tokens', String(maxTokens));
+        }
 
         return url;
     },

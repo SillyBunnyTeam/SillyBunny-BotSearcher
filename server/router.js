@@ -24,7 +24,7 @@ import {
 } from '../shared/schema.js';
 import { describeSources, getSource } from './registry.js';
 import { wrap, jsonGuard, jsonGuardWithLimit, fail } from './guards.js';
-import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey } from './validate.js';
+import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey, readFilters } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, callerKey } from './limits.js';
 import { mintCursor, verifyCursor, verifyRef } from './refs.js';
@@ -469,6 +469,7 @@ function buildSearchArgs(adapter, body) {
         // never able to imply filtering that is not happening.
         sfwOnly: adapter.capabilities.sfwToggle ? own(filters, 'sfwOnly') === true : false,
         hideAi: adapter.capabilities.hideAiToggle ? own(filters, 'hideAi') === true : false,
+        filters: readFilters(filters, adapter.capabilities.filters),
     };
 }
 

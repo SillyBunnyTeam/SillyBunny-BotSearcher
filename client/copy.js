@@ -174,6 +174,29 @@ export function insideRows(inside) {
 }
 
 /**
+ * What an empty grid means, which depends on what was actually asked for.
+ *
+ * "Try a broader search" is unhelpful advice when the query is empty and it is
+ * the filters doing the narrowing, so the sentence names whichever one applies.
+ *
+ * @param {string} sourceLabel
+ * @param {string} query
+ * @param {number} activeFilters
+ */
+export function emptyResultMessage(sourceLabel, query, activeFilters = 0) {
+    if (query && activeFilters > 0) {
+        return `No results for "${query}" on ${sourceLabel} with these filters. Try removing a filter or broadening the search.`;
+    }
+    if (activeFilters > 0) {
+        return `No cards on ${sourceLabel} match these filters. Try removing one.`;
+    }
+    if (query) {
+        return `No results for "${query}" on ${sourceLabel}. Try a broader search.`;
+    }
+    return `No cards are currently listed on ${sourceLabel}.`;
+}
+
+/**
  * Why a source could not be reached, in the words that fit what happened.
  *
  * "Not responding" is wrong for a refusal: the site answered, and it said no.
