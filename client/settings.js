@@ -14,9 +14,16 @@
  */
 
 import { SETTINGS_KEY, DOM_IDS, EXTENSION_NAME } from './constants.js';
-import { IMAGE_MODES } from '../shared/schema.js';
+import { IMAGE_MODES, REPOSITORY_URL, VERSION } from '../shared/schema.js';
 import { el, setText } from './render.js';
-import { getAvailability } from './api.js';
+import {
+    AVAILABILITY,
+    UPDATE_CAPABILITY,
+    getAvailability,
+    getServerPluginUpdateCapabilities,
+    updateServerPlugin,
+} from './api.js';
+import { compareReleaseVersions, serverPluginUpdateErrorMessage } from './copy.js';
 
 const PAGE_SIZES = [12, 24, 48];
 
@@ -275,14 +282,191 @@ export async function mountSettings() {
     // added. Appended after mounting so a missing plugin does not block the
     // rest of the panel.
     try {
-        const { health } = await getAvailability();
+        const availability = await getAvailability();
+        const { health } = availability;
         const sources = Array.isArray(health?.sources) ? health.sources : [];
         if (sources.length > 0) {
             content.prepend(sourceList(sources));
         }
+        content.prepend(serverPluginControl(availability));
     } catch {
         // Plugin not installed yet; the rest of the panel still works.
     }
+}
+
+function serverPluginControl(availability) {
+    const wrapper = el('div', 'sbbs-setting sbbs-setting-plugin');
+    wrapper.append(el('label', undefined, 'Server plugin'));
+
+    const status = el('span', 'sbbs-setting-note');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    wrapper.append(status);
+
+    const serverVersion = typeof availability.health?.version === 'string'
+        ? availability.health.version
+        : null;
+    const comparison = compareReleaseVersions(serverVersion, VERSION);
+    const isMounted = () => wrapper.isConnected;
+
+    if (availability.status === AVAILABILITY.MISSING) {
+        setText(status, `Not installed. Open BotSearcher for the v${VERSION} installation commands.`);
+        return wrapper;
+    }
+    if (availability.status === AVAILABILITY.ERROR) {
+        setText(status, 'Unavailable. Restart SillyBunny and check its server-plugin logs.');
+        return wrapper;
+    }
+    if (!serverVersion) {
+        setText(status, `Frontend v${VERSION}; the server did not report a release version.`);
+        return wrapper;
+    }
+    if (comparison === 1) {
+        setText(status, `Server v${serverVersion} is newer than frontend v${VERSION}. Update the frontend; server downgrades are blocked.`);
+        return wrapper;
+    }
+    if (comparison === 0 && availability.status === AVAILABILITY.OK) {
+        setText(status, `Server plugin v${serverVersion} matches this frontend.`);
+        return wrapper;
+    }
+    if (comparison === 0) {
+        setText(status, `Both components report v${VERSION}, but their protocols differ. Reinstall both from the same release tag.`);
+        return wrapper;
+    }
+    if (comparison !== -1) {
+        setText(status, `Frontend v${VERSION}; unrecognized server version ${serverVersion}.`);
+        return wrapper;
+    }
+
+    setText(status, `Server v${serverVersion} is older than frontend v${VERSION}. Checking automatic update support...`);
+    const actions = el('div', 'sbbs-plugin-update-actions');
+    const update = el('button', 'menu_button', 'Update server plugin and restart');
+    update.type = 'button';
+    update.hidden = true;
+    const commands = el('pre', 'sbbs-install-code sbbs-plugin-update-commands');
+    const code = el('code');
+    setText(code, manualUpdateCommands());
+    commands.append(code);
+    commands.hidden = true;
+    actions.append(update);
+    wrapper.append(actions, commands);
+
+    getServerPluginUpdateCapabilities().then((capability) => {
+        if (!isMounted()) {
+            return;
+        }
+        if (capability.status === UPDATE_CAPABILITY.AVAILABLE) {
+            setText(status, `Server v${serverVersion} is older than frontend v${VERSION}.`);
+            update.hidden = false;
+            return;
+        }
+
+        const messages = {
+            [UPDATE_CAPABILITY.FORBIDDEN]: 'Sign in as a SillyBunny administrator, or stop SillyBunny completely and use Git Bash to run these commands:',
+            [UPDATE_CAPABILITY.DISABLED]: 'Enable server plugins in config.yaml, stop SillyBunny completely, then use Git Bash to run these commands:',
+            [UPDATE_CAPABILITY.LEGACY]: 'This legacy SillyBunny host has no automatic updater. Stop it completely, then use Git Bash to run these commands:',
+        };
+        const toolingMissing = capability.capabilities
+            && (capability.capabilities.tooling?.git === false || capability.capabilities.tooling?.npm === false);
+        if (toolingMissing) {
+            setText(status, 'Automatic and manual updates require both Git and npm on the SillyBunny host.');
+            commands.hidden = true;
+            return;
+        }
+        if (messages[capability.status]) {
+            setText(status, messages[capability.status]);
+            commands.hidden = false;
+            return;
+        }
+        if (capability.status === UPDATE_CAPABILITY.UNSUPPORTED) {
+            setText(status, 'This host exposes an updater but does not provide the required exact-release and safe-restart guarantees. Manual replacement is not offered.');
+            commands.hidden = true;
+            return;
+        }
+        setText(status, 'Automatic updating is unavailable. Check the SillyBunny logs before updating manually.');
+        commands.hidden = true;
+    }).catch((error) => {
+        if (!isMounted()) {
+            return;
+        }
+        console.debug('[BotSearcher] update capability check failed:', error);
+        setText(status, 'Automatic updating could not be verified. Check the SillyBunny logs before updating manually.');
+        commands.hidden = true;
+    });
+
+    update.addEventListener('click', async () => {
+        update.disabled = true;
+        try {
+            const phases = {
+                staging: `Installing server plugin v${VERSION}...`,
+                restarting: 'Waiting for SillyBunny to restart...',
+                verifying: 'Verifying the restarted server plugin...',
+                complete: `Server plugin v${VERSION} is ready.`,
+            };
+            await updateServerPlugin({
+                onPhase: (phase) => {
+                    if (isMounted()) {
+                        setText(status, phases[phase] ?? 'Updating server plugin...');
+                    }
+                },
+            });
+            if (!isMounted()) {
+                return;
+            }
+            update.hidden = true;
+            commands.hidden = true;
+        } catch (error) {
+            if (!isMounted()) {
+                return;
+            }
+            setText(status, serverPluginUpdateErrorMessage(error));
+            commands.hidden = true;
+            update.disabled = false;
+        }
+    });
+
+    return wrapper;
+}
+
+function manualUpdateCommands() {
+    return [
+        'set -eu',
+        'PLUGIN=plugins/SillyBunny-BotSearcher',
+        `REPO=${REPOSITORY_URL}`,
+        `RELEASE=v${VERSION}`,
+        'test ! -L "$PLUGIN"',
+        'PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"',
+        'GIT_ROOT="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel)"',
+        'GIT_ROOT="$(cd "$GIT_ROOT" && pwd -P)"',
+        'test "$GIT_ROOT" = "$PLUGIN_ROOT"',
+        'REMOTE="$(git -C "$PLUGIN_ROOT" remote get-url origin)"',
+        'REPO_NO_SUFFIX="${REPO%.git}"',
+        'test "$REMOTE" = "$REPO" || test "$REMOTE" = "$REPO_NO_SUFFIX"',
+        'STATUS="$(git -C "$PLUGIN_ROOT" status --porcelain --untracked-files=no)"',
+        'test -z "$STATUS"',
+        'CURRENT="$(node -e \'process.stdout.write(require(process.argv[1] + "/package.json").version)\' "$PLUGIN_ROOT")"',
+        manualVersionGuardCommand(),
+        'OLD_COMMIT="$(git -C "$PLUGIN_ROOT" rev-parse HEAD)"',
+        'rollback() { git -C "$PLUGIN_ROOT" checkout --detach "$OLD_COMMIT"; npm --prefix "$PLUGIN_ROOT" ci --omit=dev --ignore-scripts --no-audit --no-fund; }',
+        'trap rollback ERR',
+        'git -C "$PLUGIN_ROOT" fetch --depth 1 "$REPO" "refs/tags/$RELEASE"',
+        'git -C "$PLUGIN_ROOT" checkout --detach FETCH_HEAD',
+        'TARGET="$(node -e \'process.stdout.write(require(process.argv[1] + "/package.json").version)\' "$PLUGIN_ROOT")"',
+        'test "$TARGET" = "${RELEASE#v}"',
+        'npm --prefix "$PLUGIN_ROOT" ci --omit=dev --ignore-scripts --no-audit --no-fund',
+        'trap - ERR',
+    ].join('\n');
+}
+
+function manualVersionGuardCommand() {
+    const script = [
+        'const parse=value=>/^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$/.test(value)?value.split(".").map(Number):null;',
+        'const [current,target]=process.argv.slice(1).map(parse);',
+        'let order=0;',
+        'if(current&&target){for(let i=0;i<3&&!order;i++)order=Math.sign(current[i]-target[i]);}',
+        'if(!current||!target||order>=0){console.error("Installed version is not a stable older release; refusing replacement.");process.exit(1);}',
+    ].join('');
+    return `node -e '${script}' "$CURRENT" "\${RELEASE#v}"`;
 }
 
 /**

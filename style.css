@@ -794,6 +794,10 @@
     gap: var(--spacing-sm, 8px);
 }
 
+.sbbs-settings [hidden][hidden] {
+    display: none;
+}
+
 .sbbs-settings-toggle {
     width: 100%;
     border: 0;
@@ -854,6 +858,26 @@
     padding-inline-start: calc(1em + 10px);
 }
 
+.sbbs-setting-plugin {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs, 4px);
+    padding-bottom: var(--spacing-sm, 8px);
+    border-bottom: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+}
+
+.sbbs-plugin-update-actions,
+.sbbs-install-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-sm, 8px);
+}
+
+.sbbs-plugin-update-commands {
+    font-size: 0.8em;
+}
+
 /* ---- install panel ---- */
 
 .sbbs-install {
@@ -898,6 +922,12 @@
 }
 
 .sbbs-install-note {
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.9em;
+}
+
+.sbbs-install-update-status {
+    margin: 0;
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.9em;
 }

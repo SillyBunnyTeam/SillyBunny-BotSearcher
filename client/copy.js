@@ -344,13 +344,34 @@ export function additionalImportContents(actual, reported) {
     return notes.length === 0 ? '' : `The imported card also contains ${list(notes)}.`;
 }
 
-export function availabilityCopy(status, health, frontendProtocol, frontendVersion) {
+/** Compares stable X.Y.Z releases, or returns null for an unknown format. */
+export function compareReleaseVersions(left, right) {
+    const parse = (value) => {
+        const match = String(value ?? '').match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+        return match ? match.slice(1).map((part) => Number.parseInt(part, 10)) : null;
+    };
+    const a = parse(left);
+    const b = parse(right);
+    if (!a || !b) {
+        return null;
+    }
+    for (let index = 0; index < a.length; index++) {
+        if (a[index] !== b[index]) {
+            return a[index] < b[index] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+export function availabilityCopy(status, health, frontendProtocol, frontendVersion, capabilityStatus = '') {
     if (status === 'missing') {
         return {
             title: 'Server plugin not found',
             lead: 'The frontend extension is installed, but BotSearcher could not find its server plugin. Both components are required for search.',
             guidance: '',
             showInstall: true,
+            showManualUpdate: false,
+            showUpdate: false,
         };
     }
 
@@ -359,11 +380,23 @@ export function availabilityCopy(status, health, frontendProtocol, frontendVersi
         const versions = health?.version
             ? ` Frontend version: ${frontendVersion}. Server version: ${health.version}.`
             : ` Frontend version: ${frontendVersion}.`;
+        const comparison = compareReleaseVersions(health?.version, frontendVersion);
+        let recovery = ' Reinstall both components from the same release, restart SillyBunny, then check again.';
+        if (comparison === -1) {
+            recovery = ` Update the server plugin to v${frontendVersion}, then let SillyBunny restart.`;
+        } else if (comparison === 1) {
+            recovery = ` The server is newer; update the frontend extension to v${health.version}. A server downgrade is not offered.`;
+        } else if (comparison === null) {
+            recovery = ' The server version cannot be ordered safely. Verify both deployments manually; no server replacement is offered.';
+        }
+        const manualFallback = ['forbidden', 'disabled', 'legacy'].includes(capabilityStatus);
         return {
             title: 'Frontend and server are incompatible',
             lead: 'The BotSearcher frontend and server plugin use different protocol versions.',
-            guidance: `${protocols}${versions} Update both components from the same release, restart SillyBunny, then check again.`,
+            guidance: `${protocols}${versions}${recovery}`,
             showInstall: false,
+            showManualUpdate: comparison === -1 && manualFallback,
+            showUpdate: comparison === -1 && capabilityStatus === 'available',
         };
     }
 
@@ -372,5 +405,31 @@ export function availabilityCopy(status, health, frontendProtocol, frontendVersi
         lead: 'BotSearcher could not connect to its server plugin.',
         guidance: 'Restart SillyBunny. If the problem continues, check the server logs for BotSearcher errors.',
         showInstall: false,
+        showManualUpdate: false,
+        showUpdate: false,
     };
+}
+
+export function serverPluginUpdateErrorMessage(error) {
+    const messages = {
+        managed_externally: 'This server plugin is externally managed. Use its owner or deployment process; automatic replacement is blocked.',
+        dirty_checkout: 'The server-plugin checkout has tracked local changes. Commit or discard them before updating.',
+        wrong_remote: 'The server-plugin Git remote does not match its declared repository.',
+        update_busy: 'Another server-plugin update is already running. Try again after it finishes.',
+        downgrade_blocked: 'SillyBunny refused to downgrade the server plugin.',
+        server_plugins_disabled: 'Server plugins are disabled in config.yaml.',
+        tooling_unavailable: 'SillyBunny needs Git and npm to install this server-plugin release.',
+        safe_restart_unavailable: 'This SillyBunny process cannot perform a supervised plugin restart.',
+        staging_timeout: 'Server-plugin staging did not finish before the safety timeout. Check the server logs before retrying.',
+        restart_marker_missing: 'SillyBunny did not provide the boot marker required to verify a safe restart.',
+        restart_timeout: 'SillyBunny did not return before the restart timeout. Check the server logs.',
+        plugin_verification_failed: 'SillyBunny restarted, but the matching server-plugin release did not become available. Check the update logs.',
+    };
+    if (typeof error?.code === 'string' && messages[error.code]) {
+        return messages[error.code];
+    }
+    if (error?.status === 403) {
+        return 'Only a SillyBunny administrator can update server plugins.';
+    }
+    return 'The server plugin could not be updated. Check the server logs before retrying.';
 }
