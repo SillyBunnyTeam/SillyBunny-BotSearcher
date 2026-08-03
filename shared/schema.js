@@ -56,9 +56,17 @@ export const CARD_DETAIL_FIELDS = Object.freeze([
     'inside',
 ]);
 
-/** Per-field length caps, applied server-side by `str()` before the client ever sees them. */
+/**
+ * Per-field length caps, applied server-side by `str()` before the client ever sees them.
+ *
+ * `id` is 256 rather than 128 because Chub's identifier is "creator/slug", whose
+ * own pattern allows 64 + 1 + 160 characters. At 128 a long slug was silently
+ * truncated, the truncated string still matched the adapter's id pattern, and the
+ * resulting detail request 404'd — which health.js classifies as a hard failure,
+ * so one such card removed the whole source for half an hour.
+ */
 export const FIELD_LIMITS = Object.freeze({
-    id: 128,
+    id: 256,
     shortText: 200,
     longText: 8000,
     tagLength: 48,
@@ -68,6 +76,20 @@ export const FIELD_LIMITS = Object.freeze({
 
 /** Request body cap. Anything larger is rejected with 413 before parsing. */
 export const MAX_REQUEST_BYTES = 8192;
+
+/**
+ * Body cap for /ingest only, which carries a source's raw search or detail
+ * response rather than a handful of query fields. Matched to the largest
+ * `maxBytes` any adapter passes to fetchJson, so the direct path cannot accept
+ * a payload the server-side path would have refused.
+ */
+export const MAX_INGEST_BYTES = 6 << 20;
+
+/**
+ * Kinds of upstream payload /ingest will normalize. Each maps to an adapter
+ * `parse*` method; nothing else is dispatchable.
+ */
+export const INGEST_KINDS = Object.freeze(['search', 'detail']);
 
 export const IMAGE_MODES = Object.freeze(['proxy', 'direct', 'off']);
 

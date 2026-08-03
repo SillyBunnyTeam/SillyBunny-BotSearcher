@@ -12,7 +12,7 @@ Operators and maintainers are the secondary audience. They install the server pl
 
 ## Product Purpose
 
-BotSearcher lets users search supported character-card sites, inspect the details those sites provide, and import selected cards into SillyBunny. Search and proxy-thumbnail requests run through the user's SillyBunny server rather than a public relay. The product should state the limits of that routing and distinguish source-reported details from contents verified during import.
+BotSearcher lets users search supported character-card sites, inspect the details those sites provide, and import selected cards into SillyBunny. Search and proxy-thumbnail requests run through the user's SillyBunny server rather than a public relay. Where a site refuses connections from the user's server, the request may be made from the user's browser instead; the server still reads and normalizes the response, and no public relay is involved. The product should state the limits of that routing, name which component made a request whenever that changes, and distinguish source-reported details from contents verified during import.
 
 Success means users can find and import a card, understand what information is known about it, and recover from common setup or source errors without having to understand the implementation.
 

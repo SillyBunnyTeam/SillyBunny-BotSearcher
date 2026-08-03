@@ -2,7 +2,7 @@
 
 BotSearcher adds a character-card browser to SillyBunny. It can search supported card sites, show the details each site provides, and import a selected card.
 
-The frontend extension and server plugin are both required. Search requests go through your SillyBunny server directly to the selected source. BotSearcher does not use a public relay.
+The frontend extension and server plugin are both required. Search requests go through your SillyBunny server directly to the selected source, except where a source refuses connections from your server and is requested from your browser instead. BotSearcher does not use a public relay in either case. See [Request routing and privacy](#request-routing-and-privacy).
 
 ## Requirements
 
@@ -68,6 +68,27 @@ Opening BotSearcher immediately requests the selected source's default catalog, 
 - If SillyBunny runs on your computer or home network, the server's public IP may be the same public IP used by your browser.
 - BotSearcher does not provide a route that fetches an arbitrary URL supplied by the frontend. Each adapter defines the hosts it may contact.
 
+### When a source refuses your server
+
+Some sites accept connections from home networks but refuse them from hosting providers. A SillyBunny running on a VPS or cloud instance can receive a refusal from such a site on every request, while the same request from your own browser succeeds.
+
+If the selected source supports it, BotSearcher then requests that source from your browser instead of from the server, and sends the response back to the server to be read. This is controlled by **Request a source from this browser when the server cannot reach it**, which is on by default.
+
+| | Through SillyBunny server | From this browser |
+|---|---|---|
+| Who connects to the source | Your SillyBunny server | Your browser |
+| Address the source sees | The server's outgoing IP address | Your browser's IP address |
+| Who reads the response | The BotSearcher server | The BotSearcher server |
+| Thumbnails for that source | Follow the **Thumbnails** setting | Load in the browser, unless **Thumbnails** is set to **No thumbnails** |
+
+Details that apply to both:
+
+- The URL is built by the server from the adapter's fixed base. The frontend does not construct it, and re-checks its host against the source's allowed hosts before requesting it.
+- The response is read, filtered and normalized by the server in both cases. Moving the request does not change what reaches the page.
+- The request carries no SillyBunny cookies, credentials, or referrer.
+- The browse dialog states which source has moved to this route, and why, while it is in effect.
+- Turning the setting off does not make such a source work through the server. It is removed from the source list instead.
+
 Thumbnail routing depends on the **Thumbnails** setting:
 
 | Mode | Behavior |
@@ -119,7 +140,7 @@ BotSearcher applies the following controls:
 - Card files downloaded by the BotSearcher server are size-limited and structurally validated before import.
 - Card descriptions are shown as plain text, not rendered as Markdown or HTML.
 
-These controls do not make third-party card instructions safe. They also do not hide a query from the selected source or hide the server's outgoing IP address from that source.
+These controls do not make third-party card instructions safe. They also do not hide a query from the selected source, or hide from that source the outgoing IP address of whichever component made the request — the server, or your browser when a source is being requested from it.
 
 ## Settings
 
@@ -131,6 +152,7 @@ These controls do not make third-party card instructions safe. They also do not 
 | Hide AI-generated cards | Off | Requests this filter only from Botbooru, the source that supports it. |
 | Blur sensitive and unrated thumbnails | On | Blurs thumbnails marked sensitive or lacking a reported rating until revealed. Rating labels remain visible when blur is off. |
 | Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
+| Request a source from this browser when the server cannot reach it | On | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source is removed from the source list. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
 
 ## Troubleshooting
@@ -150,6 +172,20 @@ Update both components from the same release, then restart SillyBunny. Updating 
 ### A source is unavailable
 
 Try another source. BotSearcher temporarily removes a source from the current browser session after a failed request and lets you retry it.
+
+### A source works on one machine but not another
+
+A site can accept your home connection and refuse your server's. This is common when SillyBunny runs on a VPS or cloud instance, and it usually appears as the source disappearing from the list rather than as an error.
+
+To confirm it, run this on the machine hosting SillyBunny and compare it with the same command run at home. A `403` on one and a `200` on the other is this case:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+  "https://gateway.chub.ai/search?namespace=characters&first=1&page=1&sort=default&asc=false&nsfw=false&count=false"
+```
+
+For sources that support it, BotSearcher handles this by requesting the source from your browser. See [When a source refuses your server](#when-a-source-refuses-your-server).
 
 ### SFW filtering is unavailable
 

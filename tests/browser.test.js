@@ -56,9 +56,12 @@ test('v1 settings migrate their sort to the saved source', async () => {
     const { getSettings } = await import('../client/settings.js?settings-migration');
     const settings = getSettings();
 
-    assert.equal(settings._v, 2);
+    assert.equal(settings._v, 3);
     assert.deepEqual(settings.sortBySource, { chub: 'trending' });
     assert.equal(settings.hideAiDefault, false);
+    // Settings saved before direct routing existed still get it, so a source the
+    // server cannot reach keeps working after an upgrade without being touched.
+    assert.equal(settings.allowDirectRequests, true);
 });
 
 test('the browser is single-flight, ignores stale searches, deduplicates, and preserves append results on retry', async () => {

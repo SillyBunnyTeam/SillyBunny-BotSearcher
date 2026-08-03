@@ -43,7 +43,14 @@ const DEFAULTS = Object.freeze({
     resultsPerPage: 24,
     sortBySource: Object.freeze({}),
     showTrustPanel: true,
-    _v: 2,
+    /**
+     * Allow requests for a source to move to this browser when the server is
+     * blocked from reaching it. On by default because the alternative is the
+     * source silently disappearing, which is what it used to do; the switch is
+     * always announced in the browse dialog when it happens.
+     */
+    allowDirectRequests: true,
+    _v: 3,
 });
 
 function context() {
@@ -92,6 +99,7 @@ export function getSettings() {
         resultsPerPage: PAGE_SIZES.includes(read('resultsPerPage')) ? read('resultsPerPage') : DEFAULTS.resultsPerPage,
         sortBySource: { ...sortBySource },
         showTrustPanel: read('showTrustPanel') !== false,
+        allowDirectRequests: read('allowDirectRequests') !== false,
         _v: DEFAULTS._v,
     };
 }
@@ -161,6 +169,13 @@ export async function mountSettings() {
         checkbox('sbbs_set_hide_ai', 'Hide AI-generated cards when the source supports it', settings.hideAiDefault, (v) => updateSettings({ hideAiDefault: v })),
         checkbox('sbbs_set_blur', 'Blur sensitive and unrated thumbnails until revealed', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
         checkbox('sbbs_set_trust', 'Show the Card contents panel', settings.showTrustPanel, (v) => updateSettings({ showTrustPanel: v })),
+        checkbox(
+            'sbbs_set_direct',
+            'Request a source from this browser when the server cannot reach it',
+            settings.allowDirectRequests,
+            (v) => updateSettings({ allowDirectRequests: v }),
+            'Some sites refuse connections from servers but not from home connections. With this off, such a source is removed from the list instead. With it on, the site sees your browser’s address rather than the server’s.',
+        ),
         select(
             'sbbs_set_images',
             'Thumbnails',
@@ -241,7 +256,7 @@ function sourceList(sources) {
     return wrapper;
 }
 
-function checkbox(id, label, checked, onChange) {
+function checkbox(id, label, checked, onChange, note) {
     const wrapper = el('label', 'checkbox_label sbbs-setting');
     const input = document.createElement('input');
     input.type = 'checkbox';
@@ -249,6 +264,16 @@ function checkbox(id, label, checked, onChange) {
     input.checked = checked === true;
     input.addEventListener('change', () => onChange(input.checked));
     wrapper.append(input, el('span', undefined, label));
+
+    // A setting that changes where a request comes from needs the consequence
+    // written down next to it, not left to the label.
+    if (note) {
+        const hint = el('span', 'sbbs-setting-note', note);
+        hint.id = `${id}_note`;
+        input.setAttribute('aria-describedby', hint.id);
+        wrapper.append(hint);
+    }
+
     return wrapper;
 }
 

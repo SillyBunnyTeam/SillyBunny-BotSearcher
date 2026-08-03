@@ -10,9 +10,18 @@
  * Only the first two are in allowedHosts, so nothing here can make the server
  * request chub.ai.
  *
- * Chub does send `access-control-allow-origin: *`, so a browser could call it
- * directly. Search still goes through the server so the browser does not make
- * that connection directly and every source follows the same request path.
+ * Chub does send `access-control-allow-origin: *`, so a browser can call it
+ * directly. Search still goes through the server by default, so the browser does
+ * not make that connection and every source follows the same request path.
+ *
+ * `corsDirect` marks that the browser path EXISTS, not that it is used. Chub sits
+ * behind Cloudflare and refuses datacenter ranges with a flat 403, so a server
+ * hosted anywhere but a home connection cannot reach it at all, while the user's
+ * own browser can. When the server is blocked the request moves to the browser
+ * and the response comes back here to be normalized — the parsing, the field
+ * whitelist and the host checks are unchanged, only the hop that fetches differs.
+ * That trade is the user's to make and is disclosed in Settings and the README,
+ * because it exposes the browser's address to Chub instead of the server's.
  */
 
 import { buildSummary, buildDetail } from '../normalize.js';
@@ -211,6 +220,8 @@ export const chub = Object.freeze({
     idPattern: FULL_PATH,
     tier: 1,
     nativeImport: true,
+    /** Verified against the live response headers, not assumed. */
+    corsDirect: true,
     capabilities: Object.freeze({
         search: true,
         query: true,
@@ -220,7 +231,7 @@ export const chub = Object.freeze({
         detail: true,
     }),
 
-    async search(ctx, { query, cursor, limit, sort, sfwOnly }) {
+    buildSearchUrl({ query, cursor, limit, sort, sfwOnly }) {
         const perPage = clampInt(limit, 1, 48, 24);
         const page = pageCursor(cursor);
         const safe = sfwOnly === true;
@@ -239,7 +250,13 @@ export const chub = Object.freeze({
         url.searchParams.set('include_forks', 'true');
         url.searchParams.set('count', 'false');
 
-        const data = await ctx.fetchJson(url, { maxBytes: 4 << 20, timeoutMs: 10000 });
+        return url;
+    },
+
+    parseSearch(data, { cursor, limit, sfwOnly }) {
+        const perPage = clampInt(limit, 1, 48, 24);
+        const page = pageCursor(cursor);
+        const safe = sfwOnly === true;
 
         const payload = own(data, 'data');
         const rawNodes = own(payload, 'nodes');
@@ -258,13 +275,25 @@ export const chub = Object.freeze({
         };
     },
 
-    async getDetail(ctx, id) {
+    async search(ctx, args) {
+        const data = await ctx.fetchJson(this.buildSearchUrl(args), { maxBytes: 4 << 20, timeoutMs: 10000 });
+        return this.parseSearch(data, args);
+    },
+
+    buildDetailUrl(id) {
         const url = new URL(`/api/characters/${id}`, API);
         url.searchParams.set('full', 'true');
+        return url;
+    },
 
-        const data = await ctx.fetchJson(url, { maxBytes: 6 << 20, timeoutMs: 12000 });
+    parseDetail(data, id) {
         const node = own(data, 'node') ?? data;
         return toDetail(node, id);
+    },
+
+    async getDetail(ctx, id) {
+        const data = await ctx.fetchJson(this.buildDetailUrl(id), { maxBytes: 6 << 20, timeoutMs: 12000 });
+        return this.parseDetail(data, id);
     },
 
     getImportTarget(_ctx, id) {

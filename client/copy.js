@@ -173,6 +173,37 @@ export function insideRows(inside) {
     return rows;
 }
 
+/**
+ * Why a source could not be reached, in the words that fit what happened.
+ *
+ * "Not responding" is wrong for a refusal: the site answered, and it said no.
+ * The two lead to different next actions, so they get different sentences.
+ *
+ * @param {string} sourceLabel
+ * @param {string | null | undefined} reason a `classify()` kind from the server
+ */
+export function unreachableReason(sourceLabel, reason) {
+    switch (reason) {
+        case 'forbidden':
+            return `${sourceLabel} refused the request from your SillyBunny server.`;
+        case 'dns':
+            return `${sourceLabel} could not be found from your SillyBunny server.`;
+        case 'not_found':
+            return `${sourceLabel} no longer offers the endpoint BotSearcher uses.`;
+        default:
+            return `${sourceLabel} is not responding.`;
+    }
+}
+
+/**
+ * Shown when requests for a source move from the server to this browser. States
+ * the consequence rather than only the mechanism, because the consequence is the
+ * part the user is being asked to accept.
+ */
+export function directRoutingNotice(sourceLabel, reason) {
+    return `${unreachableReason(sourceLabel, reason)} BotSearcher is now requesting ${sourceLabel} from this browser instead, so ${sourceLabel} sees your browser's address rather than the server's. You can turn this off in Extensions > BotSearcher.`;
+}
+
 export function searchErrorMessage(error, sourceLabel) {
     switch (error?.code) {
         case 'timeout':
@@ -183,6 +214,12 @@ export function searchErrorMessage(error, sourceLabel) {
             return `${sourceLabel} is busy. Try again shortly.`;
         case 'source_down':
             return `${sourceLabel} is not responding.`;
+        case 'direct_blocked':
+            return `${sourceLabel} refused the request from your SillyBunny server and from this browser.`;
+        case 'bad_direct_url':
+            return `BotSearcher will not request ${sourceLabel} from an unexpected address.`;
+        case 'direct_unsupported':
+            return `${sourceLabel} cannot be requested from this browser.`;
         case 'http_error':
             return `${sourceLabel} returned an error.`;
         case 'too_large':

@@ -23,13 +23,24 @@ const COOLDOWN_STEPS_MS = [60_000, 5 * 60_000, 30 * 60_000];
  */
 const HARD_FAILURES = new Set(['dns', 'forbidden', 'not_found', 'host_not_allowed', 'insecure_scheme']);
 
-/** @type {Map<string, { failures: number, downSince: number|null, cooldownUntil: number, step: number, lastOkAt: number|null }>} */
+/**
+ * Failures where the site is up but THIS server cannot reach it, so trying from
+ * a different network path is worth doing. Deliberately narrow: a timeout is far
+ * more likely to be an ordinary blip than a block, and routing every blip through
+ * the user's browser would trade their address away for nothing.
+ *
+ * `forbidden` is the observed case — Chub's Cloudflare answers datacenter ranges
+ * with a flat 403 while serving the same request from a home connection.
+ */
+export const REROUTABLE_FAILURES = Object.freeze(new Set(['forbidden', 'dns']));
+
+/** @type {Map<string, { failures: number, downSince: number|null, cooldownUntil: number, step: number, lastOkAt: number|null, lastKind: string|null }>} */
 const health = new Map();
 
 function entry(sourceId) {
     let record = health.get(sourceId);
     if (!record) {
-        record = { failures: 0, downSince: null, cooldownUntil: 0, step: 0, lastOkAt: null };
+        record = { failures: 0, downSince: null, cooldownUntil: 0, step: 0, lastOkAt: null, lastKind: null };
         health.set(sourceId, record);
     }
     return record;
@@ -79,6 +90,7 @@ export function markSuccess(sourceId) {
     record.cooldownUntil = 0;
     record.step = 0;
     record.lastOkAt = Date.now();
+    record.lastKind = null;
 }
 
 /**
@@ -91,6 +103,7 @@ export function markFailure(sourceId, error) {
     const kind = classify(error);
 
     record.failures += 1;
+    record.lastKind = kind;
 
     const isHard = HARD_FAILURES.has(kind);
     if (isHard || record.failures >= FAILURES_BEFORE_DOWN) {
@@ -132,6 +145,18 @@ export function stateOf(sourceId) {
         return 'unknown';
     }
     return 'up';
+}
+
+/**
+ * Why a source last failed, so the UI can say what actually happened instead of
+ * defaulting to "not responding". A refused request and a timed-out one need
+ * different words and lead to different next actions.
+ *
+ * @param {string} sourceId
+ * @returns {string | null} a `classify()` kind, or null if it has not failed
+ */
+export function reasonOf(sourceId) {
+    return health.get(sourceId)?.lastKind ?? null;
 }
 
 /**

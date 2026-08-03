@@ -136,6 +136,20 @@
     padding: 0;
 }
 
+/*
+ * Requests for this source now leave from the browser rather than the server.
+ * Deliberately persistent rather than a toast: it describes an ongoing state,
+ * not an event, and it is the user's only on-screen sign that their own address
+ * is reaching the card site.
+ */
+.sbbs-direct-notice {
+    padding: var(--spacing-sm, 8px) var(--spacing-md, 12px);
+    border-left: 3px solid var(--sb-muted-fg, currentColor);
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.9em;
+    line-height: 1.45;
+}
+
 /* ---- grid ---- */
 
 .sbbs-grid {
@@ -487,6 +501,18 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+}
+
+/*
+ * Explains what a setting costs. Full width under the label rather than beside
+ * it, because .checkbox_label is a row and a wrapped sentence in a row column
+ * becomes unreadable at narrow widths.
+ */
+.sbbs-setting-note {
+    flex: 1 0 100%;
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.85em;
+    line-height: 1.4;
 }
 
 /* ---- install panel ---- */

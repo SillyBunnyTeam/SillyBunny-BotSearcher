@@ -9,18 +9,37 @@
  *
  * The contract is deliberately narrow: the client names a SOURCE, never a URL.
  * There is no route on this router that will fetch a URL supplied by the caller.
+ * /ingest does not weaken that: it accepts a PAYLOAD the browser already fetched
+ * from a URL this server built, so there is still no path from client input to an
+ * outbound request.
  */
 
-import { PROTOCOL_VERSION, VERSION, FIELD_LIMITS, THUMB_SIZES } from '../shared/schema.js';
+import {
+    PROTOCOL_VERSION,
+    VERSION,
+    FIELD_LIMITS,
+    THUMB_SIZES,
+    MAX_INGEST_BYTES,
+    INGEST_KINDS,
+} from '../shared/schema.js';
 import { describeSources, getSource } from './registry.js';
-import { wrap, jsonGuard, fail } from './guards.js';
-import { clampInt, pick, own, readSourceId, isPlainObject } from './validate.js';
+import { wrap, jsonGuard, jsonGuardWithLimit, fail } from './guards.js';
+import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, callerKey } from './limits.js';
 import { mintCursor, verifyCursor, verifyRef } from './refs.js';
 import { BadCursorError } from './paging.js';
 import { detectImageType } from './imagetype.js';
-import { markSuccess, markFailure, isDown, stateOf, reset } from './health.js';
+import {
+    markSuccess,
+    markFailure,
+    isDown,
+    stateOf,
+    reset,
+    reasonOf,
+    classify,
+    REROUTABLE_FAILURES,
+} from './health.js';
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
 
 /** A character card is text plus one image; well past anything legitimate. */
@@ -49,7 +68,7 @@ export function createRouter(router, state) {
             protocol: PROTOCOL_VERSION,
             version: VERSION,
             uptimeMs: Date.now() - state.startedAt,
-            sources: describeSources(stateOf),
+            sources: describeSources(stateOf, reasonOf),
         });
     }));
 
@@ -153,38 +172,30 @@ export function createRouter(router, state) {
         }
         const { adapter } = resolved;
 
+        let args;
+        try {
+            args = buildSearchArgs(adapter, request.body);
+        } catch (error) {
+            if (error instanceof BadCursorError) {
+                fail(response, 400, 'bad_cursor');
+                return;
+            }
+            throw error;
+        }
+
+        // The server cannot reach this source, but the browser can. Hand back the
+        // URL to fetch instead of an error. No egress happens on this path, so it
+        // deliberately runs before the gate: a source in cooldown is exactly when
+        // this is needed.
+        if (directPlanWanted(adapter, request.body)) {
+            respondWithDirectPlan(response, adapter, 'search', args);
+            return;
+        }
+
         const gate = await gateRequest(request, response, adapter.id, 'search');
         if (!gate) {
             return;
         }
-
-        const body = request.body;
-        const filters = isPlainObject(own(body, 'filters')) ? own(body, 'filters') : {};
-        const rawQuery = own(body, 'query');
-        const rawCursor = own(body, 'cursor');
-        let cursor = null;
-
-        if (rawCursor !== undefined && rawCursor !== null) {
-            cursor = verifyCursor(adapter.id, rawCursor);
-            if (cursor === null) {
-                gate.release();
-                fail(response, 400, 'bad_cursor');
-                return;
-            }
-        }
-
-        const args = {
-            // Cap before the adapter sees it, so no adapter can be tricked into
-            // building a giant upstream URL.
-            query: typeof rawQuery === 'string' ? rawQuery.slice(0, 128).trim() : '',
-            limit: clampInt(own(body, 'limit'), 1, FIELD_LIMITS.itemsPerPage, 24),
-            cursor,
-            sort: pick(own(body, 'sort'), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
-            // Only honour a filter the source can actually apply, so the UI is
-            // never able to imply filtering that is not happening.
-            sfwOnly: adapter.capabilities.sfwToggle ? own(filters, 'sfwOnly') === true : false,
-            hideAi: adapter.capabilities.hideAiToggle ? own(filters, 'hideAi') === true : false,
-        };
 
         try {
             let result;
@@ -195,26 +206,96 @@ export function createRouter(router, state) {
                     fail(response, 400, 'bad_cursor');
                     return;
                 }
+                if (canReroute(adapter, error)) {
+                    respondWithDirectPlan(response, adapter, 'search', args);
+                    return;
+                }
                 throw error;
             }
 
-            const items = Array.isArray(result?.items)
-                ? result.items.slice(0, args.limit)
-                : [];
-            const nextCursor = result?.next && typeof result.next === 'object'
-                ? mintCursor(adapter.id, result.next)
-                : null;
-
-            response.json({
-                total: typeof result?.total === 'number' && Number.isFinite(result.total)
-                    ? Math.max(0, Math.floor(result.total))
-                    : null,
-                nextCursor,
-                items,
-            });
+            response.json(shapeSearchResponse(adapter, result, args.limit));
         } finally {
             gate.release();
         }
+    }));
+
+    /**
+     * Normalizes a payload the BROWSER fetched, for a source this server cannot
+     * reach. The client sends bytes, never a URL, so this adds no way to make the
+     * server request anything — and the payload runs through the same
+     * hasForbiddenKey scan and the same adapter parser as the server-side path,
+     * so the field whitelist in normalize.js still governs everything that
+     * reaches the DOM.
+     */
+    router.post('/ingest', jsonGuardWithLimit(MAX_INGEST_BYTES), wrap(async (request, response) => {
+        const resolved = resolveSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const { adapter } = resolved;
+
+        if (adapter.corsDirect !== true) {
+            fail(response, 400, 'direct_unsupported');
+            return;
+        }
+
+        const kind = pick(own(request.body, 'kind'), INGEST_KINDS, '');
+        if (kind === '') {
+            fail(response, 400, 'bad_ingest_kind');
+            return;
+        }
+
+        const payload = own(request.body, 'payload');
+        if (payload === undefined || payload === null) {
+            fail(response, 400, 'bad_payload');
+            return;
+        }
+        if (hasForbiddenKey(payload)) {
+            fail(response, 422, 'unsafe_json');
+            return;
+        }
+
+        // Ingesting costs no egress, but it still costs CPU on a small box, so it
+        // shares the per-user search budget.
+        const caller = callerKey(request);
+        const limited = await consume('search', caller);
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+
+        if (kind === 'detail') {
+            if (typeof adapter.parseDetail !== 'function') {
+                fail(response, 400, 'direct_unsupported');
+                return;
+            }
+            const id = readId(adapter, request.body);
+            if (id === null) {
+                fail(response, 400, 'bad_id');
+                return;
+            }
+            response.json(adapter.parseDetail(payload, id));
+            return;
+        }
+
+        if (typeof adapter.parseSearch !== 'function') {
+            fail(response, 400, 'direct_unsupported');
+            return;
+        }
+
+        let args;
+        try {
+            args = buildSearchArgs(adapter, request.body);
+        } catch (error) {
+            if (error instanceof BadCursorError) {
+                fail(response, 400, 'bad_cursor');
+                return;
+            }
+            throw error;
+        }
+
+        response.json(shapeSearchResponse(adapter, adapter.parseSearch(payload, args), args.limit));
     }));
 
     /**
@@ -328,17 +409,125 @@ export function createRouter(router, state) {
             return;
         }
 
+        if (directPlanWanted(adapter, request.body) && typeof adapter.buildDetailUrl === 'function') {
+            respondWithDirectPlan(response, adapter, 'detail', null, id);
+            return;
+        }
+
         const gate = await gateRequest(request, response, adapter.id, 'search');
         if (!gate) {
             return;
         }
 
         try {
-            response.json(await callAdapter(adapter, () => adapter.getDetail(contextFor(adapter), id)));
+            let detail;
+            try {
+                detail = await callAdapter(adapter, () => adapter.getDetail(contextFor(adapter), id));
+            } catch (error) {
+                if (canReroute(adapter, error) && typeof adapter.buildDetailUrl === 'function') {
+                    respondWithDirectPlan(response, adapter, 'detail', null, id);
+                    return;
+                }
+                throw error;
+            }
+            response.json(detail);
         } finally {
             gate.release();
         }
     }));
+}
+
+/**
+ * Builds the adapter argument set from a request body. Shared by /search and
+ * /ingest so the direct path cannot end up with different arguments than the
+ * server path would have used — the cursor, limit and filters are re-derived
+ * from the body both times rather than echoed back by the client.
+ *
+ * @throws {BadCursorError} when the cursor is not one this server minted
+ */
+function buildSearchArgs(adapter, body) {
+    const filters = isPlainObject(own(body, 'filters')) ? own(body, 'filters') : {};
+    const rawQuery = own(body, 'query');
+    const rawCursor = own(body, 'cursor');
+    let cursor = null;
+
+    if (rawCursor !== undefined && rawCursor !== null) {
+        cursor = verifyCursor(adapter.id, rawCursor);
+        if (cursor === null) {
+            throw new BadCursorError();
+        }
+    }
+
+    return {
+        // Cap before the adapter sees it, so no adapter can be tricked into
+        // building a giant upstream URL.
+        query: typeof rawQuery === 'string' ? rawQuery.slice(0, 128).trim() : '',
+        limit: clampInt(own(body, 'limit'), 1, FIELD_LIMITS.itemsPerPage, 24),
+        cursor,
+        sort: pick(own(body, 'sort'), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
+        // Only honour a filter the source can actually apply, so the UI is
+        // never able to imply filtering that is not happening.
+        sfwOnly: adapter.capabilities.sfwToggle ? own(filters, 'sfwOnly') === true : false,
+        hideAi: adapter.capabilities.hideAiToggle ? own(filters, 'hideAi') === true : false,
+    };
+}
+
+/** Shapes an adapter search result into the wire response. */
+function shapeSearchResponse(adapter, result, limit) {
+    return {
+        total: typeof result?.total === 'number' && Number.isFinite(result.total)
+            ? Math.max(0, Math.floor(result.total))
+            : null,
+        nextCursor: result?.next && typeof result.next === 'object'
+            ? mintCursor(adapter.id, result.next)
+            : null,
+        items: Array.isArray(result?.items) ? result.items.slice(0, limit) : [],
+    };
+}
+
+/**
+ * Whether to hand this request to the browser instead of fetching it here.
+ *
+ * True when the source supports it AND either the breaker already knows this
+ * server is blocked, or the user has chosen to always route this source through
+ * their browser. Not a fallback the client can demand for an arbitrary source:
+ * `corsDirect` is declared in the adapter, in this repo.
+ */
+function directPlanWanted(adapter, body) {
+    if (adapter.corsDirect !== true || typeof adapter.buildSearchUrl !== 'function') {
+        return false;
+    }
+    if (own(body, 'route') === 'direct') {
+        return true;
+    }
+    return isDown(adapter.id) && REROUTABLE_FAILURES.has(reasonOf(adapter.id));
+}
+
+/** Whether a failure that just happened is worth retrying from the browser. */
+function canReroute(adapter, error) {
+    return adapter.corsDirect === true
+        && typeof adapter.buildSearchUrl === 'function'
+        && REROUTABLE_FAILURES.has(classify(error));
+}
+
+/**
+ * Tells the client to fetch this URL itself and post the result back to /ingest.
+ *
+ * The URL is built here, from the adapter's own fixed base — the client never
+ * constructs one. It re-checks the host against the source's published
+ * clientHosts before fetching anyway, the same double-check images already get.
+ */
+function respondWithDirectPlan(response, adapter, kind, args, id) {
+    const url = kind === 'detail'
+        ? adapter.buildDetailUrl(id)
+        : adapter.buildSearchUrl(args);
+
+    response.json({
+        mode: 'direct',
+        kind,
+        url: String(url),
+        reason: reasonOf(adapter.id) ?? 'forbidden',
+    });
 }
 
 /**

@@ -57,8 +57,9 @@ export function getSource(id) {
  * contacts — SillyBunny's own importer does.
  *
  * @param {(id: string) => string} stateOf
+ * @param {(id: string) => string | null} [reasonOf]
  */
-export function describeSources(stateOf) {
+export function describeSources(stateOf, reasonOf = () => null) {
     return Object.keys(SOURCES).map((id) => {
         const adapter = SOURCES[id];
         return {
@@ -68,7 +69,14 @@ export function describeSources(stateOf) {
             clientHosts: [...new Set([...adapter.allowedHosts, ...(adapter.linkHosts ?? [])])],
             tier: adapter.tier,
             state: stateOf(id),
+            // Why the last request failed, so the UI can distinguish a refusal
+            // from a timeout rather than calling both "not responding".
+            reason: reasonOf(id),
             nativeImport: adapter.nativeImport === true,
+            // Whether this source's API sends permissive CORS, so the browser can
+            // fetch it when the server's own IP is blocked. Declared per adapter
+            // after checking the response headers — never assumed.
+            corsDirect: adapter.corsDirect === true,
             capabilities: {
                 search: adapter.capabilities.search,
                 query: adapter.capabilities.query,

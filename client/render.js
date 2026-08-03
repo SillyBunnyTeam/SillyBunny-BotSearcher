@@ -35,14 +35,30 @@ export function setText(element, value) {
  * @returns {boolean}
  */
 export function isAllowedImageUrl(raw, allowedHosts) {
-    if (typeof raw !== 'string' || raw === '') {
-        return false;
-    }
-
     // Our own proxy endpoint. Anchored to the full base so a scheme-relative
     // "//evil.example" or a bare "/apiX" cannot slip through.
-    if (raw.startsWith(`${PLUGIN_BASE}/`)) {
+    if (typeof raw === 'string' && raw.startsWith(`${PLUGIN_BASE}/`)) {
         return true;
+    }
+
+    return isAllowedUpstreamUrl(raw, allowedHosts);
+}
+
+/**
+ * The same check without the same-origin exemption: an https URL on one of the
+ * source's own hosts, and nothing else.
+ *
+ * Used before the browser fetches a source directly on the server's behalf.
+ * There the plugin's own path is not a valid answer, so accepting it would be a
+ * hole rather than a convenience.
+ *
+ * @param {unknown} raw
+ * @param {readonly string[]} allowedHosts
+ * @returns {boolean}
+ */
+export function isAllowedUpstreamUrl(raw, allowedHosts) {
+    if (typeof raw !== 'string' || raw === '') {
+        return false;
     }
 
     let url;

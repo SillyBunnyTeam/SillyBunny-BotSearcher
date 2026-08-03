@@ -9,7 +9,7 @@
  */
 
 import { el, setText, setImgSafe, setLinkSafe } from './render.js';
-import { post, thumbSrc } from './api.js';
+import { postRouted, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
 import { importCard, importCardBytes, openCharacter } from './importer.js';
 import {
@@ -51,7 +51,10 @@ export async function showDetail(container, summary, source, onBack, { signal } 
 
     let card;
     try {
-        card = await post('/detail', { source: source.id, id: summary.id }, { signal });
+        card = await postRouted('/detail', { source: source.id, id: summary.id }, source, {
+            signal,
+            allowDirect: settings.allowDirectRequests,
+        });
     } catch (error) {
         if (error?.name === 'AbortError' || signal?.aborted) {
             return;

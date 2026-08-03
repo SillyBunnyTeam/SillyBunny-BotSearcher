@@ -72,31 +72,43 @@ export function wrap(handler) {
 }
 
 /**
- * Rejects anything that is not a small JSON object body.
- * Also rejects multipart, which the global multer would otherwise spool to disk.
+ * Builds a guard that rejects anything which is not a JSON object body within
+ * `maxBytes`. Also rejects multipart, which the global multer would otherwise
+ * spool to disk.
+ *
+ * The limit is a parameter because /ingest carries a source's raw response
+ * rather than a few query fields. Every other route keeps the small cap: a
+ * per-route limit is the point, not an inconvenience.
+ *
+ * @param {number} maxBytes
  */
-export function jsonGuard(request, response, next) {
-    const contentType = String(request.headers['content-type'] ?? '').toLowerCase();
+export function jsonGuardWithLimit(maxBytes) {
+    return function guard(request, response, next) {
+        const contentType = String(request.headers['content-type'] ?? '').toLowerCase();
 
-    if (!contentType.startsWith('application/json')) {
-        response.status(415).json({ error: 'unsupported_media_type' });
-        return;
-    }
+        if (!contentType.startsWith('application/json')) {
+            response.status(415).json({ error: 'unsupported_media_type' });
+            return;
+        }
 
-    const declaredLength = Number(request.headers['content-length']);
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
-        response.status(413).json({ error: 'payload_too_large' });
-        return;
-    }
+        const declaredLength = Number(request.headers['content-length']);
+        if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+            response.status(413).json({ error: 'payload_too_large' });
+            return;
+        }
 
-    const body = request.body;
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        response.status(400).json({ error: 'bad_request' });
-        return;
-    }
+        const body = request.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            response.status(400).json({ error: 'bad_request' });
+            return;
+        }
 
-    next();
+        next();
+    };
 }
+
+/** The default guard, used by every route that takes a small envelope. */
+export const jsonGuard = jsonGuardWithLimit(MAX_REQUEST_BYTES);
 
 /**
  * Sends a machine-readable error. Never includes upstream text.

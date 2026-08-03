@@ -11,16 +11,18 @@
  */
 
 import { EXTENSION_PATH, LOG_TAG } from './constants.js';
-import { AVAILABILITY, getAvailability, invalidateAvailability, post, thumbSrc } from './api.js';
+import { AVAILABILITY, getAvailability, invalidateAvailability, post, postRouted, thumbSrc } from './api.js';
 import { el, setText, setImgSafe } from './render.js';
 import { getSettings, updateSettings, isSourceEnabled } from './settings.js';
 import { showDetail } from './detail.js';
 import {
     availabilityCopy,
+    directRoutingNotice,
     formatCount,
     formatResultCount,
     searchErrorMessage,
     sortLabel,
+    unreachableReason,
 } from './copy.js';
 import { PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
 
@@ -144,6 +146,8 @@ function wireBrowser(popup, health, options) {
         disposed: false,
         items: [],
         itemKeys: new Set(),
+        /** Sources already told the user they are being fetched by the browser. */
+        directNoted: new Set(),
     };
 
     for (const source of usable) {
@@ -261,7 +265,7 @@ function wireBrowser(popup, health, options) {
         dom.more.hidden = true;
 
         try {
-            const result = await post('/search', {
+            const result = await postRouted('/search', {
                 source: source.id,
                 query,
                 sort,
@@ -271,7 +275,11 @@ function wireBrowser(popup, health, options) {
                     sfwOnly: dom.sfw.checked,
                     hideAi: source.capabilities?.hideAiToggle === true && dom.hideAi.checked,
                 },
-            }, { signal: controller.signal });
+            }, source, {
+                signal: controller.signal,
+                allowDirect: getSettings().allowDirectRequests,
+                onDirect: (reason) => noteDirectRouting(source, reason),
+            });
 
             if (state.disposed || generation !== state.requestGeneration) {
                 return;
@@ -312,7 +320,7 @@ function wireBrowser(popup, health, options) {
             clearSkeletons();
 
             if (error?.code === 'source_down') {
-                retireSource(source);
+                retireSource(source, source.reason);
                 return;
             }
 
@@ -333,18 +341,46 @@ function wireBrowser(popup, health, options) {
     }
 
     /**
+     * Says, once per source per session, that its requests are now coming from
+     * this browser rather than from the SillyBunny server.
+     *
+     * This is a routing change the user did not ask for, made because the
+     * alternative is the source not working at all. It changes which address the
+     * card site sees, so it is stated plainly and left on screen rather than
+     * announced in a toast that disappears.
+     */
+    function noteDirectRouting(source, reason) {
+        if (state.directNoted.has(source.id)) {
+            return;
+        }
+        state.directNoted.add(source.id);
+
+        const notice = el('div', 'sbbs-direct-notice');
+        setText(notice, directRoutingNotice(source.label, reason));
+        notice.setAttribute('role', 'status');
+        dom.state.after(notice);
+    }
+
+    /**
      * A source that has gone away is removed from the picker rather than left
      * to spin. The Retry clears its server-side cooldown, so a site that comes
      * back does not require a restart.
+     *
+     * A source the browser can still reach is never retired here — /search hands
+     * back a direct plan instead of `source_down`, so this is only reached when
+     * there is genuinely no path left.
      */
-    function retireSource(dead) {
+    function retireSource(dead, reason) {
         const index = usable.findIndex((entry) => entry.id === dead.id);
         if (index >= 0) {
             usable.splice(index, 1);
         }
         dom.source.querySelector(`option[value="${CSS.escape(dead.id)}"]`)?.remove();
 
-        toastr.info(`${dead.label} is not responding and has been removed from this list.`, 'BotSearcher');
+        toastr.info(
+            `${unreachableReason(dead.label, reason)} It has been removed from this list.`,
+            'BotSearcher',
+        );
 
         dom.grid.replaceChildren();
         records.clear();

@@ -15,6 +15,8 @@ import {
     importErrorMessage,
     insideRows,
     searchErrorMessage,
+    unreachableReason,
+    directRoutingNotice,
     sortLabel,
     sourceStatLine,
 } from '../client/copy.js';
@@ -178,6 +180,27 @@ test('availability states give different recovery instructions', () => {
     assert.match(mismatch.guidance, /Frontend version: 0\.1\.0\. Server version: 0\.1\.0\./);
 });
 
+test('an unreachable source is described by what actually happened', () => {
+    // A refusal and a timeout are different events with different next actions.
+    // Collapsing both into "not responding" was wrong for the case that turned
+    // out to be the common one: a site that answers, and says no.
+    assert.equal(unreachableReason('Chub', 'forbidden'), 'Chub refused the request from your SillyBunny server.');
+    assert.equal(unreachableReason('Chub', 'dns'), 'Chub could not be found from your SillyBunny server.');
+    assert.equal(unreachableReason('Chub', 'not_found'), 'Chub no longer offers the endpoint BotSearcher uses.');
+    assert.equal(unreachableReason('Chub', 'transient'), 'Chub is not responding.');
+    assert.equal(unreachableReason('Chub', null), 'Chub is not responding.');
+});
+
+test('the direct-routing notice states the consequence, not just the mechanism', () => {
+    const notice = directRoutingNotice('Chub', 'forbidden');
+
+    assert.match(notice, /refused the request from your SillyBunny server/);
+    // The part the user is actually being asked to accept.
+    assert.match(notice, /sees your browser's address rather than the server's/);
+    // And where to undo it.
+    assert.match(notice, /Extensions > BotSearcher/);
+});
+
 test('search and detail errors use direct recovery copy', () => {
     const searchCases = {
         timeout: 'Botbooru did not respond in time. Try again.',
@@ -193,6 +216,13 @@ test('search and detail errors use direct recovery copy', () => {
         assert.equal(searchErrorMessage({ code }, 'Botbooru'), expected);
     }
     assert.equal(searchErrorMessage({ code: 'unknown' }, 'Botbooru'), 'Could not connect to Botbooru.');
+
+    // Both routes failed, so say both. "Not responding" would be wrong twice
+    // over: the site answered, and the browser was tried as well.
+    assert.equal(
+        searchErrorMessage({ code: 'direct_blocked' }, 'Chub'),
+        'Chub refused the request from your SillyBunny server and from this browser.',
+    );
 
     assert.equal(detailErrorMessage({ code: 'timeout' }, 'Chub'), 'Chub did not respond in time.');
     assert.equal(detailErrorMessage({ code: 'rate_limited' }, 'Chub'), 'Too many requests. Wait a moment and try again.');
