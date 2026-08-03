@@ -268,34 +268,62 @@
     display: none;
 }
 
+/*
+ * The card is a container, not a button: the tags inside it are their own
+ * buttons and a button inside a button is neither valid nor keyboard-reachable.
+ * `.sbbs-card-open` is the primary action and fills everything above the tags.
+ */
 .sbbs-card {
     background: var(--sb-card-bg, rgba(255, 255, 255, 0.04));
     border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
     border-radius: var(--sb-radius-md, 10px);
     overflow: hidden;
-    cursor: pointer;
-    text-align: start;
-    padding: 0;
-    color: inherit;
-    font: inherit;
-    width: 100%;
-    display: block;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
     transition:
         transform var(--sb-transition-fast, 120ms) ease,
         border-color var(--sb-transition-fast, 120ms) ease;
 }
 
+.sbbs-card-open {
+    cursor: pointer;
+    text-align: start;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    width: 100%;
+    display: block;
+    flex: 1 1 auto;
+}
+
 @media (hover: hover) {
-    .sbbs-card:hover {
+    .sbbs-card:has(.sbbs-card-open:hover) {
         transform: translateY(-2px);
         border-color: var(--sb-accent, currentColor);
     }
 }
 
-.sbbs-card:focus-visible {
-    outline: none;
+/* The ring goes on the card, so it frames the whole thing rather than the
+   inner button's edge. */
+.sbbs-card:has(.sbbs-card-open:focus-visible) {
     border-color: var(--sb-accent, currentColor);
     box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--sb-focus-ring, currentColor) 58%, transparent);
+}
+
+.sbbs-card-open:focus-visible {
+    outline: none;
+}
+
+/* :has() is widely supported, but a browser without it must still show focus. */
+@supports not selector(:has(*)) {
+    .sbbs-card-open:focus-visible {
+        outline: 2px solid var(--sb-focus-ring, currentColor);
+        outline-offset: -2px;
+    }
 }
 
 /* Fixed ratio so the grid never reflows as thumbnails arrive. */
@@ -363,6 +391,68 @@
 .sbbs-card-sub {
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.85em;
+}
+
+/*
+ * The source's own summary line. Clamped to two lines so a long tagline cannot
+ * push cards to different heights across the grid; the full text is in the
+ * detail pane, which is where reading it belongs.
+ */
+.sbbs-card-tagline {
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.8em;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+}
+
+.sbbs-card-stats {
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.78em;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sbbs-card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 0 var(--spacing-sm, 8px) var(--spacing-sm, 8px);
+}
+
+.sbbs-card-tag {
+    border: 1px solid var(--sb-shell-border, currentColor);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 0.72em;
+    color: var(--sb-muted-fg, currentColor);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sbbs-card-tag-button {
+    background: none;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+@media (hover: hover) {
+    .sbbs-card-tag-button:hover {
+        border-color: var(--sb-accent, currentColor);
+        color: inherit;
+    }
+}
+
+.sbbs-card-tag-button:focus-visible {
+    outline: 2px solid var(--sb-focus-ring, currentColor);
+    outline-offset: 1px;
 }
 
 .sbbs-more {
@@ -488,6 +578,27 @@
 
 .sbbs-chip-link {
     text-decoration: none;
+}
+
+.sbbs-tag-button {
+    background: none;
+    color: inherit;
+    font-family: inherit;
+    line-height: inherit;
+    /* Comfortable to hit on a phone without changing how the row reads. */
+    min-height: 28px;
+    cursor: pointer;
+}
+
+@media (hover: hover) {
+    .sbbs-tag-button:hover {
+        border-color: var(--sb-accent, currentColor);
+    }
+}
+
+.sbbs-tag-button:focus-visible {
+    outline: 2px solid var(--sb-focus-ring, currentColor);
+    outline-offset: 1px;
 }
 
 .sbbs-detail-stats {

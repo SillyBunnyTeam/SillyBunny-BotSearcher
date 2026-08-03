@@ -30,7 +30,7 @@ function jsonResponse(body, status = 200) {
     });
 }
 
-function card(source, id, name) {
+function card(source, id, name, extra = {}) {
     return {
         source,
         id,
@@ -40,6 +40,7 @@ function card(source, id, name) {
         stats: {},
         thumbUrl: null,
         thumbRef: null,
+        ...extra,
     };
 }
 
@@ -174,12 +175,38 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         searches[1].resolve(jsonResponse({
             total: 2,
             nextCursor: 'cursor-1',
-            items: [card('chub', 'author/one', 'Fresh'), card('chub', 'author/one', 'Duplicate')],
+            items: [
+                card('chub', 'author/one', 'Fresh', {
+                    tagline: 'A short summary from the source',
+                    tags: ['Elf', 'Romance'],
+                    stats: { downloads: 1200, favorites: 34 },
+                }),
+                card('chub', 'author/one', 'Duplicate'),
+            ],
         }));
 
         await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 1, 'fresh result did not render');
         assert.match(popup.content.textContent, /Fresh/);
         assert.doesNotMatch(popup.content.textContent, /Duplicate/);
+
+        // ---- what a card shows ----
+        // tagline, tags and stats all arrived in the summary already; before
+        // this they were fetched and then dropped on the floor.
+        assert.match(popup.content.textContent, /A short summary from the source/);
+        assert.match(popup.content.textContent, /1,200 downloads/);
+        assert.match(popup.content.textContent, /34 favorites/);
+
+        const cardTags = [...popup.content.querySelectorAll('.sbbs-card-tag')];
+        assert.deepEqual(cardTags.map((tag) => tag.textContent), ['Elf', 'Romance']);
+        // Chub declares a tag filter, so its tags are actionable.
+        assert.ok(cardTags.every((tag) => tag.tagName === 'BUTTON'), 'tags must be buttons where filtering is possible');
+        assert.equal(cardTags[0].getAttribute('aria-label'), 'Filter by tag Elf');
+
+        // The card's own action is a single button, not the whole card, so the
+        // tag buttons are reachable rather than nested inside it.
+        const open = popup.content.querySelector('.sbbs-card-open');
+        assert.ok(open, 'the card needs one primary action');
+        assert.equal(open.querySelector('button'), null, 'a button inside a button is not keyboard-reachable');
 
         const more = popup.content.querySelector('#sbbs_more');
         more.click();
@@ -220,7 +247,20 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         assert.equal(searches[4].body.cursor, null, 'a filter change starts a new result set');
         assert.equal(popup.content.querySelector('#sbbs_filters_badge').textContent, '1');
 
-        searches[4].resolve(jsonResponse({ total: 0, nextCursor: null, items: [] }));
+        searches[4].resolve(jsonResponse({
+            total: 1,
+            nextCursor: null,
+            items: [card('chub', 'author/three', 'Tagged', { tags: ['Vampire'] })],
+        }));
+        await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 1, 'filtered result did not render');
+
+        // ---- clicking a tag on a card filters by it ----
+        popup.content.querySelector('.sbbs-card-tag-button').click();
+        await waitFor(() => searches.length === 6, 'clicking a tag did not re-run the search');
+        assert.deepEqual(searches[5].body.filters.tags, ['Elf', 'Vampire'], 'a clicked tag adds to the filter');
+        assert.equal(popup.content.querySelector('#sbbs_filters').hidden, false, 'the panel must open so the change is visible');
+
+        searches[5].resolve(jsonResponse({ total: 0, nextCursor: null, items: [] }));
         await waitFor(
             () => /No cards on Chub match these filters/.test(popup.content.textContent),
             'an empty filtered result must say the filters are why',

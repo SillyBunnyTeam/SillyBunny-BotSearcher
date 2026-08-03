@@ -23,11 +23,11 @@ import {
 /**
  * @param {HTMLElement} container the #sbbs_detail node
  * @param {any} summary the card as it appeared in the grid
- * @param {{ id: string, label: string, clientHosts: string[] }} source
+ * @param {{ id: string, label: string, clientHosts: string[], capabilities?: any }} source
  * @param {() => void} onBack
- * @param {{ signal?: AbortSignal }} [options]
+ * @param {{ signal?: AbortSignal, onTag?: (tag: string) => void }} [options]
  */
-export async function showDetail(container, summary, source, onBack, { signal } = {}) {
+export async function showDetail(container, summary, source, onBack, { signal, onTag } = {}) {
     container.replaceChildren();
 
     const settings = getSettings();
@@ -62,7 +62,7 @@ export async function showDetail(container, summary, source, onBack, { signal } 
         setText(loading, detailErrorMessage(error, source.label));
         const retry = el('button', 'menu_button', 'Try again');
         retry.type = 'button';
-        retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, { signal }));
+        retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, { signal, onTag }));
         container.append(retry);
         return;
     }
@@ -130,9 +130,23 @@ export async function showDetail(container, summary, source, onBack, { signal } 
 
     // ---- tags ----
     if (Array.isArray(card.tags) && card.tags.length > 0) {
+        // Clickable only where the source declares a tag filter, and only when
+        // the caller gave us somewhere to send the click. Elsewhere they stay
+        // plain text rather than looking interactive and doing nothing.
+        const canFilter = typeof onTag === 'function'
+            && (source.capabilities?.filters ?? []).some((filter) => filter.key === 'tags');
+
         const tagRow = el('div', 'sbbs-tags');
         for (const tag of card.tags.slice(0, 24)) {
-            tagRow.append(el('span', 'sbbs-tag', tag));
+            if (!canFilter) {
+                tagRow.append(el('span', 'sbbs-tag', tag));
+                continue;
+            }
+            const button = el('button', 'sbbs-tag sbbs-tag-button', tag);
+            button.type = 'button';
+            button.setAttribute('aria-label', `Search ${source.label} for tag ${tag}`);
+            button.addEventListener('click', () => onTag(tag));
+            tagRow.append(button);
         }
         main.append(tagRow);
     }

@@ -489,10 +489,24 @@ function wireBrowser(popup, health, options) {
     function appendCards(items, source) {
         const settingsNow = getSettings();
         for (const item of items) {
-            const card = buildCard(item, source, settingsNow);
-            records.set(card, { item, source });
-            card.addEventListener('click', () => {
-                const record = records.get(card);
+            const { card, open, tags } = buildCard(item, source, settingsNow);
+            records.set(open, { item, source });
+
+            // Clicking a tag narrows the search instead of opening the card.
+            // Only offered when the source declares a tag filter, so it never
+            // looks like it should work and then does nothing.
+            for (const { button, tag } of tags) {
+                button.addEventListener('click', () => {
+                    if (state.filters?.set('tags', tag)) {
+                        dom.filters.hidden = false;
+                        dom.filtersToggle.setAttribute('aria-expanded', 'true');
+                        onFilterChange();
+                    }
+                });
+            }
+
+            open.addEventListener('click', () => {
+                const record = records.get(open);
                 if (!record) {
                     return;
                 }
@@ -507,10 +521,27 @@ function wireBrowser(popup, health, options) {
                     dom.detail.replaceChildren();
                     // Return focus where it was, so keyboard and screen-reader
                     // users are not dropped back at the top of the dialog.
-                    if (card.isConnected) {
-                        card.focus();
+                    if (open.isConnected) {
+                        open.focus();
                     }
-                }, { signal: detailController.signal });
+                }, {
+                    signal: detailController.signal,
+                    // Filtering from the detail pane only makes sense back in
+                    // the grid, so it returns there rather than leaving the user
+                    // on a card while the results behind it change.
+                    onTag: (tag) => {
+                        if (!state.filters?.set('tags', tag)) {
+                            return;
+                        }
+                        detailController.abort();
+                        state.detailController = null;
+                        dom.root.dataset.view = 'grid';
+                        dom.detail.replaceChildren();
+                        dom.filters.hidden = false;
+                        dom.filtersToggle.setAttribute('aria-expanded', 'true');
+                        onFilterChange();
+                    },
+                });
             });
             const li = document.createElement('li');
             li.append(card);
@@ -545,13 +576,23 @@ function wireBrowser(popup, health, options) {
 }
 
 /**
+ * Builds one result card.
+ *
+ * The card is a container rather than a single button because the tags inside
+ * it are their own buttons, and a button inside a button is neither valid nor
+ * reachable by keyboard. `open` is the primary action and carries the card's
+ * accessible name; the tags are siblings of it.
+ *
  * @param {any} item
- * @param {{ label: string, clientHosts: string[] }} source
+ * @param {{ label: string, clientHosts: string[], capabilities?: any }} source
  * @param {ReturnType<typeof getSettings>} settings
+ * @returns {{ card: HTMLElement, open: HTMLButtonElement, tags: {button: HTMLElement, tag: string}[] }}
  */
 function buildCard(item, source, settings) {
-    const card = el('button', 'sbbs-card');
-    card.type = 'button';
+    const card = el('div', 'sbbs-card');
+
+    const open = el('button', 'sbbs-card-open');
+    open.type = 'button';
 
     const figure = el('div', 'sbbs-card-img');
     // Always present, revealed if no image arrives. A source may have no
@@ -590,18 +631,86 @@ function buildCard(item, source, settings) {
     }
     meta.append(el('div', 'sbbs-card-sub', sub.join(' · ')));
 
-    card.append(figure, meta);
-    card.title = item.name || '';
+    // The source's own one-line summary. Already fetched and normalized, and the
+    // single most useful thing for telling two similarly-named cards apart.
+    if (typeof item.tagline === 'string' && item.tagline.trim() !== '') {
+        meta.append(el('div', 'sbbs-card-tagline', item.tagline.trim()));
+    }
 
-    // One accessible name covers both lines and the content flag.
+    const popularity = popularityOf(item);
+    if (popularity !== '') {
+        meta.append(el('div', 'sbbs-card-stats', popularity));
+    }
+
+    open.append(figure, meta);
+    open.title = item.name || '';
+
+    // One accessible name covers the whole card, so the tagline and stats are
+    // not read out twice.
     const parts = [item.name || 'Untitled'];
     if (item.creator) {
         parts.push(`by ${item.creator}`);
     }
     parts.push(rating.accessible);
-    card.setAttribute('aria-label', parts.join(', '));
+    open.setAttribute('aria-label', parts.join(', '));
 
-    return card;
+    card.append(open);
+
+    const tags = buildCardTags(item, source, card);
+    return { card, open, tags };
+}
+
+/** Up to four tags, as filter buttons where the source supports tag filtering. */
+function buildCardTags(item, source, card) {
+    const list = Array.isArray(item.tags)
+        ? item.tags.filter((tag) => typeof tag === 'string' && tag.trim() !== '').slice(0, 4)
+        : [];
+    if (list.length === 0) {
+        return [];
+    }
+
+    const canFilter = (source.capabilities?.filters ?? []).some((filter) => filter.key === 'tags');
+    const row = el('div', 'sbbs-card-tags');
+    const handles = [];
+
+    for (const tag of list) {
+        if (!canFilter) {
+            // Still worth showing; just not clickable, because on this source
+            // clicking could not do anything.
+            row.append(el('span', 'sbbs-card-tag', tag));
+            continue;
+        }
+        const button = el('button', 'sbbs-card-tag sbbs-card-tag-button', tag);
+        button.type = 'button';
+        button.setAttribute('aria-label', `Filter by tag ${tag}`);
+        row.append(button);
+        handles.push({ button, tag });
+    }
+
+    card.append(row);
+    return handles;
+}
+
+/**
+ * The popularity figures a source reported, and only those.
+ *
+ * Sources count different things under the same names — Chub's "downloads" is
+ * its star count — so each is labelled rather than shown as a bare number, and
+ * a figure the source did not report is omitted rather than shown as zero.
+ */
+function popularityOf(item) {
+    const stats = item?.stats;
+    const parts = [];
+    if (stats?.downloads) {
+        parts.push(formatCount(stats.downloads, 'download'));
+    }
+    if (stats?.favorites) {
+        parts.push(formatCount(stats.favorites, 'favorite'));
+    }
+    if (stats?.views) {
+        parts.push(formatCount(stats.views, 'chat'));
+    }
+    return parts.slice(0, 2).join(' · ');
 }
 
 function ratingOf(item) {
