@@ -1,24 +1,24 @@
 <div class="sbbs-install">
     <h3 class="sbbs-install-title">Server half not installed</h3>
 
-    <p class="sbbs-install-lead">lorum ipsum</p>
+    <p class="sbbs-install-lead">BotSearcher comes in two halves. The extension is installed — this part — but the server half is missing, and searching needs it. The card sites do not allow a browser to call them directly, so your own server has to make the requests.</p>
 
     <ol class="sbbs-install-steps">
         <li>
-            <p>lorum ipsum</p>
+            <p>From your SillyBunny folder, install the plugin:</p>
             <pre class="sbbs-install-code"><code>bun plugins.js install https://github.com/platberlitz/SillyBunny-BotSearcher</code></pre>
         </li>
         <li>
-            <p>lorum ipsum</p>
+            <p>Open <code>config.yaml</code> and set both of these:</p>
             <pre class="sbbs-install-code"><code>enableServerPlugins: true
 enableServerPluginsAutoUpdate: false</code></pre>
         </li>
         <li>
-            <p>lorum ipsum</p>
+            <p>Restart SillyBunny, then come back here and press Recheck.</p>
         </li>
     </ol>
 
-    <p class="sbbs-install-note">lorum ipsum</p>
+    <p class="sbbs-install-note">Turning auto-update off is deliberate: with it on, every start pulls the latest code for each plugin and runs it. Updating on purpose, after reading what changed, is the safer habit.</p>
 
     <button id="sbbs_recheck" class="menu_button" type="button">Recheck</button>
 </div>

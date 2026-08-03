@@ -427,8 +427,20 @@
     border-radius: var(--sb-radius-sm, 6px);
     padding: var(--spacing-sm, 8px);
     margin: var(--spacing-xs, 4px) 0 0;
-    overflow-x: auto;
-    white-space: pre;
+}
+
+/*
+ * The host theme gives every <code> its own background box. Inside a <pre> that
+ * means a wrapped command renders as several boxes and reads as several
+ * commands. Let the block own the background and the code just be text.
+ */
+.sbbs-install-code code {
+    background: none;
+    border: none;
+    padding: 0;
+    display: block;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .sbbs-install-note {

@@ -1,6 +1,10 @@
 # SillyBunny-BotSearcher
 
-lorum ipsum
+Browse character card sites from inside SillyBunny and import with one click.
+
+SillyBunny can already import a card from a file or from a link you paste. What it has no way to do is help you *find* one. This adds that: a search box, a grid of results across seven sites, a detail view, and an Import button.
+
+It is built so that the sites you browse learn nothing about you, and so that nothing they send can act on your machine. That constraint shaped most of the design, and the [Security](#security) section is honest about where it stops.
 
 ## Installing
 
@@ -31,7 +35,13 @@ Both halves are needed. The extension alone opens to install instructions.
 
 ## Why there is a server half
 
-lorum ipsum
+Most extensions are frontend-only. This one cannot be, for a boring reason and a good one.
+
+The boring reason: Botbooru — and most of these sites — send no CORS headers, so a browser is simply not allowed to call them from another page. Something server-side has to make the request.
+
+The good reason is what that makes possible. Because the server is doing the fetching anyway, it can own every address. The browser never says "fetch this URL"; it says "search *this source*", and the server decides what that means. There is no route in this plugin that will fetch a URL supplied by the client — which is the single property that makes the rest of the security story hold up.
+
+It also means your searches never leave your own machine except to the site you actually chose. The obvious alternative — a public CORS relay — sends every query you type through a stranger's server. [CleanBotBrowser](https://github.com/Nulliik/SillyTavern-CleanBotBrowser), the extension this one is modelled on, falls back to three of them, plus a fourth for two of its sources. That is the main thing this project does differently.
 
 ## Sources
 
@@ -65,7 +75,13 @@ Checked 2026-08-03. Re-run `node scripts/probe-sources.mjs` to see the current s
 
 ## Security
 
-lorum ipsum
+Two things are being defended against, and they are different problems.
+
+The first is the sites themselves learning about you — your IP address, what you search for, which cards you linger on. That is solved by routing everything through your own server, which is the default.
+
+The second is content from those sites acting on your machine. Every name, description and tag in the grid was typed by a stranger. The rule throughout is that such text is never allowed to become anything other than text: the server rebuilds each record field by field against a fixed whitelist, and the browser writes it with `textContent` and nothing else. There is no HTML parsing anywhere in the frontend, no `innerHTML`, and a test fails the build if any appears. This matters more than usual because SillyBunny runs with its Content-Security-Policy disabled, so these checks are not a second line of defence — they are the only one.
+
+Card descriptions render as plain text rather than markdown. Rendering markdown would mean turning a stranger's string into HTML and relying on a sanitizer to be perfect, which is a bypass surface, for very little gain when you are deciding whether you like a character.
 
 ### What is actually guaranteed
 
@@ -77,7 +93,7 @@ lorum ipsum
 
 ### What is not, and cannot be
 
-lorum ipsum
+Everything above is about plumbing, and plumbing is the part that can genuinely be made safe. Importing a card is a different kind of risk, and no amount of validation touches it.
 
 A character card is a document written by a stranger. Cards carry lorebooks that fire on ordinary words, prompts that override your own, and regex scripts that rewrite messages in flight. The format exists to be partly executed. No browser extension makes that safe.
 
