@@ -47,6 +47,16 @@ Choose a source, enter a search term, and open a result to review its details. A
 
 The details shown before import come from the selected source. A source may omit fields or report incomplete information. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
+## Screenshots
+
+### Desktop
+
+![BotSearcher card details on desktop](docs/screenshots/card-detail-desktop.png)
+
+### Mobile
+
+<img src="docs/screenshots/card-detail-mobile.png" alt="BotSearcher card details on mobile" width="390">
+
 ## Request routing and privacy
 
 For search and detail requests, the browser contacts the BotSearcher plugin on your SillyBunny server. The server then contacts only the selected source through a fixed source adapter.
