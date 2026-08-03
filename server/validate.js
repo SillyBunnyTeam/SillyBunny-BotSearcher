@@ -55,15 +55,30 @@ export function pick(value, allowed, fallback) {
 }
 
 /**
- * Depth-limited scan for prototype-poisoning keys. Also acts as a cheap
- * structural bomb guard: deeply nested upstream JSON is rejected rather than
- * recursed into.
+ * How deep a legitimate upstream payload may nest.
+ *
+ * This started at 6 and rejected Chub's own character responses, which reach 7
+ * (node/definition/extensions/chub/extensions/0/is_editing) with no poisoning
+ * keys at all — a guard that quietly killed a working source. Real card JSON
+ * nests: a card holds a definition, which holds extensions and an embedded
+ * lorebook, whose entries hold their own arrays. 32 is far above anything
+ * observed and still bounds the recursion.
+ */
+const MAX_SCAN_DEPTH = 32;
+
+/**
+ * Scans for prototype-poisoning keys, and bounds its own recursion.
+ *
+ * Two jobs in one pass, and the distinction matters: a forbidden key is
+ * evidence of an attack, whereas exceeding the depth limit only means the
+ * payload is too unusual to vouch for. Both are refused, but the limit is set
+ * so that no real card ever trips it.
  *
  * @param {unknown} value
  * @param {number} [maxDepth]
  * @returns {boolean} true if the value is unsafe to process
  */
-export function hasForbiddenKey(value, maxDepth = 6) {
+export function hasForbiddenKey(value, maxDepth = MAX_SCAN_DEPTH) {
     return scan(value, maxDepth, 0);
 }
 
@@ -112,6 +127,42 @@ export function own(object, key) {
         return undefined;
     }
     return object[key];
+}
+
+/**
+ * Accepts an upstream-supplied URL only if it is https and its host is an exact
+ * member of `hosts`.
+ *
+ * Most adapters rebuild their URLs from a fixed base and never need this. It
+ * exists for the sources where a URL genuinely cannot be reconstructed — for
+ * example Pygmalion's avatars, which live under an asset id unrelated to the
+ * character id. Those still get host-checked before they go anywhere near a
+ * response.
+ *
+ * @param {unknown} raw
+ * @param {readonly string[]} hosts
+ * @returns {URL | null}
+ */
+export function hostCheckedUrl(raw, hosts) {
+    if (typeof raw !== 'string' || raw === '' || raw.length > 2048) {
+        return null;
+    }
+
+    let url;
+    try {
+        url = new URL(raw);
+    } catch {
+        return null;
+    }
+
+    if (url.protocol !== 'https:') {
+        return null;
+    }
+    if (!Array.isArray(hosts) || !hosts.includes(url.hostname.toLowerCase())) {
+        return null;
+    }
+
+    return url;
 }
 
 /**

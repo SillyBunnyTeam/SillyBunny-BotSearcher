@@ -21,8 +21,17 @@ import { verifyRef } from './refs.js';
 import { detectImageType } from './imagetype.js';
 import { markSuccess, markFailure, isDown, stateOf, reset } from './health.js';
 
-/** A 320px preview is 20-60 KB; anything near this cap is not a thumbnail. */
-const MAX_THUMB_BYTES = 512 * 1024;
+/**
+ * Default thumbnail cap. A 320px preview is 20-60 KB, so anything near this is
+ * not a thumbnail. Adapters whose source has no preview endpoint raise it via
+ * `maxThumbBytes` — Pygmalion serves full-resolution avatars of 40 KB to 4.3 MB
+ * and its CDN ignores every resize parameter, so at 512 KB three quarters of
+ * its grid failed to load.
+ */
+const DEFAULT_MAX_THUMB_BYTES = 512 * 1024;
+
+/** Ceiling no adapter may exceed, so one source cannot dominate a small box. */
+const HARD_MAX_THUMB_BYTES = 6 * 1024 * 1024;
 
 /**
  * @param {import('express').Router} router
@@ -82,7 +91,7 @@ export function createRouter(router, state) {
         }
 
         // One grid render fires a whole page of these at once.
-        const release = acquire('thumb', caller);
+        const release = await acquire('thumb', caller);
         if (!release) {
             fail(response, 503, 'busy');
             return;
@@ -97,10 +106,15 @@ export function createRouter(router, state) {
                 return;
             }
 
+            const maxBytes = Math.min(
+                clampInt(adapter.maxThumbBytes, 1024, HARD_MAX_THUMB_BYTES, DEFAULT_MAX_THUMB_BYTES),
+                HARD_MAX_THUMB_BYTES,
+            );
+
             const result = await fetchBytes(adapter, url, {
                 accept: 'image/webp,image/png,image/jpeg,image/avif,image/gif;q=0.8,*/*;q=0.5',
-                maxBytes: MAX_THUMB_BYTES,
-                timeoutMs: 10000,
+                maxBytes,
+                timeoutMs: 15000,
             });
 
             // Magic bytes decide, not the upstream header. SVG is not in the
@@ -276,7 +290,7 @@ async function gateRequest(request, response, sourceId, limiterName) {
         return null;
     }
 
-    const release = acquire('source', sourceId);
+    const release = await acquire('source', sourceId);
     if (!release) {
         fail(response, 503, 'source_busy');
         return null;

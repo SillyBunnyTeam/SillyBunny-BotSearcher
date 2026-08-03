@@ -168,7 +168,7 @@ function wireBrowser(popup, health, options) {
         for (const sort of sorts) {
             const option = document.createElement('option');
             option.value = sort;
-            setText(option, sort.charAt(0).toUpperCase() + sort.slice(1));
+            setText(option, sortLabel(sort));
             dom.sort.append(option);
         }
         if (sorts.includes(settings.sortDefault)) {
@@ -342,7 +342,7 @@ function wireBrowser(popup, health, options) {
 
 /**
  * @param {any} item
- * @param {{ label: string, allowedHosts: string[] }} source
+ * @param {{ label: string, clientHosts: string[] }} source
  * @param {ReturnType<typeof getSettings>} settings
  */
 function buildCard(item, source, settings) {
@@ -350,14 +350,19 @@ function buildCard(item, source, settings) {
     card.type = 'button';
 
     const figure = el('div', 'sbbs-card-img');
+    // Always present, revealed if no image arrives. A source may have no
+    // thumbnail, or one too large for the proxy's cap.
+    figure.append(el('span', 'sbbs-card-initial', initialOf(item.name)));
+
     const src = thumbSrc(item, source, 'grid', settings.imageMode);
     if (src) {
         const img = document.createElement('img');
         img.alt = '';
-        if (setImgSafe(img, src, source.allowedHosts)) {
+        if (setImgSafe(img, src, source.clientHosts)) {
             if (item.nsfw && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
             }
+            img.addEventListener('error', () => img.remove(), { once: true });
             figure.append(img);
         }
     }
@@ -377,6 +382,25 @@ function buildCard(item, source, settings) {
     card.append(figure, meta);
     card.title = item.name || '';
     return card;
+}
+
+/**
+ * Sort values are whatever each API calls them — "approved_at",
+ * "trending_downloads", "n_tokens". Show something readable without
+ * maintaining a translation table per source.
+ */
+const SORT_WORDS = { n: 'number of', asc: 'ascending', desc: 'descending' };
+
+function sortLabel(sort) {
+    const words = String(sort).split(/[_\s]+/).filter(Boolean);
+    const text = words.map((word) => SORT_WORDS[word] ?? word).join(' ');
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** First character of a name, for the no-image tile. */
+function initialOf(name) {
+    const text = typeof name === 'string' ? name.trim() : '';
+    return text === '' ? '?' : [...text][0].toUpperCase();
 }
 
 function describeError(error, sourceLabel) {

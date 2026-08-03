@@ -16,7 +16,7 @@ import { importCard, openCharacter } from './importer.js';
 /**
  * @param {HTMLElement} container the #sbbs_detail node
  * @param {any} summary the card as it appeared in the grid
- * @param {{ id: string, label: string, allowedHosts: string[] }} source
+ * @param {{ id: string, label: string, clientHosts: string[] }} source
  * @param {() => void} onBack
  */
 export async function showDetail(container, summary, source, onBack) {
@@ -57,7 +57,7 @@ export async function showDetail(container, summary, source, onBack) {
         const figure = el('div', 'sbbs-detail-image');
         const img = document.createElement('img');
         img.alt = '';
-        if (setImgSafe(img, previewSrc, source.allowedHosts)) {
+        if (setImgSafe(img, previewSrc, source.clientHosts)) {
             if (card.nsfw && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
                 figure.title = 'Click to reveal';
@@ -81,7 +81,7 @@ export async function showDetail(container, summary, source, onBack) {
         const link = document.createElement('a');
         link.className = 'sbbs-chip sbbs-chip-link';
         setText(link, `View on ${source.label}`);
-        if (setLinkSafe(link, card.pageUrl, source.allowedHosts)) {
+        if (setLinkSafe(link, card.pageUrl, source.clientHosts)) {
             meta.append(link);
         }
     }
@@ -205,7 +205,7 @@ function actionBar(card, source) {
         setText(status, '');
 
         try {
-            const added = await importCard(card, source.allowedHosts);
+            const added = await importCard(card, source.clientHosts);
             setText(button, 'Imported');
 
             const open = el('button', 'menu_button sbbs-open-character', 'Go to character');

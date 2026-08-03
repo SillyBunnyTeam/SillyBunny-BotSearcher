@@ -17,10 +17,10 @@ function context() {
 
 /**
  * @param {any} card a normalized CardSummary/CardDetail
- * @param {readonly string[]} allowedHosts the source's hosts, from /healthz
+ * @param {readonly string[]} clientHosts the source's display hosts, from /healthz
  * @returns {Promise<{ avatar: string, name: string }>} the newly added character
  */
-export async function importCard(card, allowedHosts) {
+export async function importCard(card, clientHosts) {
     if (card?.nativeImport !== true || typeof card.importUrl !== 'string') {
         throw new Error('import_unsupported');
     }
@@ -28,7 +28,7 @@ export async function importCard(card, allowedHosts) {
     // Belt and braces: the server built this URL, but re-check scheme and host
     // here too, so a server-side mistake still cannot send the host importer
     // somewhere unexpected.
-    if (!isAllowedImageUrl(card.importUrl, allowedHosts)) {
+    if (!isAllowedImageUrl(card.importUrl, clientHosts)) {
         throw new Error('import_url_rejected');
     }
 

@@ -164,11 +164,27 @@
     display: block;
 }
 
+.sbbs-card-img {
+    position: relative;
+    display: grid;
+    place-items: center;
+}
+
 .sbbs-card-img img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
+    /* Sits above the initial, which shows through when no image loads. */
+    grid-area: 1 / 1;
+}
+
+.sbbs-card-initial {
+    grid-area: 1 / 1;
+    font-size: 2.5rem;
+    font-weight: 600;
+    opacity: 0.35;
+    user-select: none;
 }
 
 .sbbs-card-meta {

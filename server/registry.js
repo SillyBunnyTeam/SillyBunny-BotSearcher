@@ -7,10 +7,16 @@
  */
 
 import { botbooru } from './sources/botbooru.js';
+import { chub } from './sources/chub.js';
+import { pygmalion } from './sources/pygmalion.js';
+import { risurealm } from './sources/risurealm.js';
 
 /** @type {Readonly<Record<string, any>>} */
 export const SOURCES = Object.freeze({
     botbooru,
+    chub,
+    pygmalion,
+    risurealm,
 });
 
 /**
@@ -32,9 +38,17 @@ export function getSource(id) {
 /**
  * Public, non-secret description of every source, for /healthz.
  *
- * `allowedHosts` is included deliberately: the client re-checks every image and
+ * `clientHosts` is included deliberately: the client re-checks every image and
  * link URL against it before touching the DOM, so a bug on the server side
- * still cannot point an <img> at an arbitrary host.
+ * still cannot point an <img> or an <a> at an arbitrary host.
+ *
+ * It is the union of two DIFFERENT lists, which must not be conflated:
+ *   allowedHosts — hosts this server may make a request to (the egress rule)
+ *   linkHosts    — hosts that may appear in a link or import URL but that we
+ *                  never fetch ourselves
+ * Chub is why: its API is gateway.chub.ai and its images are avatars.charhub.io,
+ * but a character's page and import URL live on chub.ai, which this plugin never
+ * contacts — SillyBunny's own importer does.
  *
  * @param {(id: string) => string} stateOf
  */
@@ -45,7 +59,7 @@ export function describeSources(stateOf) {
             id,
             label: adapter.label,
             homepage: adapter.homepage,
-            allowedHosts: [...adapter.allowedHosts],
+            clientHosts: [...new Set([...adapter.allowedHosts, ...(adapter.linkHosts ?? [])])],
             tier: adapter.tier,
             state: stateOf(id),
             nativeImport: adapter.nativeImport === true,

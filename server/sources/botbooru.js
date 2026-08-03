@@ -73,8 +73,12 @@ function isNsfw(names) {
 /**
  * The image filename becomes a path segment, so it must not be able to
  * introduce one. This is the only field from the payload that reaches a URL.
+ *
+ * The lookahead requires at least one letter or digit, which rules out ".."
+ * and ".". Those cannot leave the host — the allow-list sees to that — but a
+ * URL we build should never contain a traversal in the first place.
  */
-const FILENAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const FILENAME_PATTERN = /^(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{1,128}$/;
 
 /**
  * @param {unknown} post

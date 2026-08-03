@@ -46,42 +46,108 @@ export async function consume(name, key) {
     }
 }
 
-/** In-flight caps, so a burst cannot open many sockets at once. */
+/**
+ * In-flight caps, so a burst cannot open many sockets at once.
+ *
+ * These QUEUE rather than reject. That distinction is the whole point: a grid
+ * renders 24 <img> tags at once and the browser opens about six connections
+ * immediately. A cap that answered 503 at capacity permanently broke every
+ * image past the limit — an <img> does not retry — so most of the grid stayed
+ * blank while the server reported no errors at all.
+ */
 const inFlight = new Map();
+
+/** @type {Map<string, Array<{ resolve: (v: unknown) => void, timer: NodeJS.Timeout }>>} */
+const waiting = new Map();
 
 const CONCURRENCY = Object.freeze({
     source: 2,
-    thumb: 6,
+    // Bounds peak memory. A source without a preview endpoint may be capped at
+    // 5 MB per image, so four in flight is ~20 MB.
+    thumb: 4,
 });
 
-/**
- * @param {'source' | 'thumb'} kind
- * @param {string} key
- * @returns {(() => void) | null} a release function, or null if at capacity
- */
-export function acquire(kind, key) {
-    const slot = `${kind}:${key}`;
-    const current = inFlight.get(slot) ?? 0;
+/** Longer than any single thumbnail fetch, short enough not to pile up. */
+const DEFAULT_WAIT_MS = 20000;
 
-    if (current >= CONCURRENCY[kind]) {
-        return null;
+function releaseSlot(slot) {
+    const queue = waiting.get(slot);
+    if (queue && queue.length > 0) {
+        // Hand the slot straight to the next waiter; the count stays the same.
+        const next = queue.shift();
+        if (queue.length === 0) {
+            waiting.delete(slot);
+        }
+        clearTimeout(next.timer);
+        next.resolve(true);
+        return;
     }
 
-    inFlight.set(slot, current + 1);
+    const remaining = (inFlight.get(slot) ?? 1) - 1;
+    if (remaining <= 0) {
+        inFlight.delete(slot);
+    } else {
+        inFlight.set(slot, remaining);
+    }
+}
 
+function makeRelease(slot) {
     let released = false;
     return () => {
         if (released) {
             return;
         }
         released = true;
-        const next = (inFlight.get(slot) ?? 1) - 1;
-        if (next <= 0) {
-            inFlight.delete(slot);
-        } else {
-            inFlight.set(slot, next);
-        }
+        releaseSlot(slot);
     };
+}
+
+/**
+ * Waits for a slot rather than refusing one.
+ *
+ * @param {'source' | 'thumb'} kind
+ * @param {string} key
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<(() => void) | null>} a release function, or null if the wait timed out
+ */
+export async function acquire(kind, key, { timeoutMs = DEFAULT_WAIT_MS } = {}) {
+    const slot = `${kind}:${key}`;
+    const current = inFlight.get(slot) ?? 0;
+
+    if (current < CONCURRENCY[kind]) {
+        inFlight.set(slot, current + 1);
+        return makeRelease(slot);
+    }
+
+    const granted = await new Promise((resolve) => {
+        const entry = {
+            resolve,
+            timer: setTimeout(() => {
+                const queue = waiting.get(slot);
+                if (queue) {
+                    const index = queue.indexOf(entry);
+                    if (index >= 0) {
+                        queue.splice(index, 1);
+                    }
+                    if (queue.length === 0) {
+                        waiting.delete(slot);
+                    }
+                }
+                resolve(false);
+            }, timeoutMs),
+        };
+        // Never hold the process open waiting on a queued request.
+        entry.timer.unref?.();
+
+        const queue = waiting.get(slot);
+        if (queue) {
+            queue.push(entry);
+        } else {
+            waiting.set(slot, [entry]);
+        }
+    });
+
+    return granted ? makeRelease(slot) : null;
 }
 
 /**
