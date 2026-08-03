@@ -159,6 +159,7 @@ function wireBrowser(popup, health, options) {
         count: root.querySelector('#sbbs_count'),
         state: root.querySelector('#sbbs_state'),
         partial: root.querySelector('#sbbs_partial'),
+        reload: root.querySelector('#sbbs_reload'),
         queryHistory: root.querySelector('#sbbs_query_history'),
         body: root.querySelector('.sbbs-body'),
         grid: root.querySelector('#sbbs_grid'),
@@ -169,18 +170,16 @@ function wireBrowser(popup, health, options) {
     const settings = getSettings();
     const sources = Array.isArray(health?.sources) ? health.sources : [];
     const searchable = sources.filter((source) => source?.capabilities?.search);
-    const enabled = searchable.filter((source) => isSourceEnabled(source, settings.enabledSources));
-    const usable = enabled.filter((source) => source.state !== 'down');
+    // Every enabled source stays in the picker, including one the server
+    // currently has in cooldown. Selecting it explains why and offers a reload,
+    // which is more useful than the source not being there to select.
+    const usable = searchable.filter((source) => isSourceEnabled(source, settings.enabledSources));
 
     if (usable.length === 0) {
         dom.bar.hidden = true;
-        if (searchable.length === 0) {
-            setText(dom.state, 'The server did not report any searchable sources.');
-        } else if (enabled.length === 0) {
-            setText(dom.state, 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.');
-        } else {
-            setText(dom.state, 'Enabled sources are unavailable right now.');
-        }
+        setText(dom.state, searchable.length === 0
+            ? 'The server did not report any searchable sources.'
+            : 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.');
         return () => {};
     }
 
@@ -218,7 +217,11 @@ function wireBrowser(popup, health, options) {
     for (const source of usable) {
         const option = document.createElement('option');
         option.value = source.id;
-        setText(option, source.label ?? source.id);
+        // A source the server has in cooldown is still selectable, so say which
+        // one it is rather than letting it look identical to a working one.
+        setText(option, source.state === 'down'
+            ? `${source.label ?? source.id} (unavailable)`
+            : (source.label ?? source.id));
         dom.source.append(option);
     }
     dom.source.value = state.source.id;
@@ -403,6 +406,7 @@ function wireBrowser(popup, health, options) {
         dom.body?.setAttribute('aria-busy', 'true');
         dom.more.disabled = true;
         setText(dom.more, 'Load more');
+        hideSourceFailure();
         setText(dom.state, append ? `Loading more from ${source.label}...` : `Searching ${source.label}...`);
 
         if (!append) {
@@ -499,8 +503,10 @@ function wireBrowser(popup, health, options) {
             }
             clearSkeletons();
 
+            // The server is in cooldown for this source, so re-searching would
+            // be answered without it trying. Offer the reload that clears it.
             if (error?.code === 'source_down') {
-                retireSource(source, source.reason);
+                showSourceFailure(source, source.reason);
                 return;
             }
 
@@ -572,75 +578,62 @@ function wireBrowser(popup, health, options) {
     }
 
     /**
-     * A source that has gone away is removed from the picker rather than left
-     * to spin. The Retry clears its server-side cooldown, so a site that comes
-     * back does not require a restart.
+     * Reports a source that could not be reached, and offers to try it again.
      *
-     * A source the browser can still reach is never retired here — /search hands
-     * back a direct plan instead of `source_down`, so this is only reached when
-     * there is genuinely no path left.
+     * The source stays selected and stays in the picker. It used to be removed,
+     * which meant a site having a bad minute disappeared from the list and the
+     * dialog silently switched to a different one — so the results on screen
+     * were from somewhere the user had not chosen, and getting back needed a
+     * button that appeared somewhere else.
+     *
+     * The server-side cooldown is the reason a plain re-search would not help:
+     * while a source is in cooldown the server answers immediately without
+     * trying. Reload clears that first, then searches again.
      */
-    function retireSource(dead, reason) {
-        const index = usable.findIndex((entry) => entry.id === dead.id);
-        if (index >= 0) {
-            usable.splice(index, 1);
-        }
-        dom.source.querySelector(`option[value="${CSS.escape(dead.id)}"]`)?.remove();
-
-        toastr.info(
-            `${unreachableReason(dead.label, reason)} It has been removed from this list.`,
-            'BotSearcher',
-        );
-
+    function showSourceFailure(dead, reason) {
         dom.grid.replaceChildren();
         records.clear();
         state.items = [];
         state.itemKeys.clear();
         state.nextCursor = null;
+        dom.more.hidden = true;
+        setText(dom.count, '');
+        setText(dom.state, `${unreachableReason(dead.label, reason)} It is still in the list.`);
 
-        if (usable.length === 0) {
-            dom.bar.hidden = true;
-            setText(dom.state, 'No sources are available right now.');
-        } else {
-            state.source = usable[0];
-            dom.source.value = state.source.id;
-            applySourceCapabilities();
-            setText(dom.state, `Switched to ${state.source.label}.`);
-            void runSearch({ append: false });
-        }
+        // Rebuilt each time rather than accumulating one per failed attempt.
+        dom.reload.replaceChildren();
+        dom.reload.hidden = false;
 
-        const retry = el('button', 'menu_button sbbs-retry-source', `Retry ${dead.label}`);
-        retry.type = 'button';
-        retry.addEventListener('click', async () => {
-            retry.disabled = true;
+        const reload = el('button', 'menu_button sbbs-reload-source');
+        reload.type = 'button';
+        setText(reload, `Reload ${dead.label}`);
+        reload.addEventListener('click', async () => {
+            reload.disabled = true;
+            setText(reload, `Reloading ${dead.label}...`);
             try {
                 await post('/retry', { source: dead.id });
                 invalidateAvailability();
-                toastr.success(`Trying ${dead.label} again.`, 'BotSearcher');
-                restoreSource(dead, retry);
             } catch {
-                retry.disabled = false;
-                toastr.error(`${dead.label} is still unavailable.`, 'BotSearcher');
+                // The cooldown could not be cleared, but the search below still
+                // reports what happened, so there is nothing extra to say here.
             }
+            if (state.disposed) {
+                return;
+            }
+            dom.reload.hidden = true;
+            dom.reload.replaceChildren();
+            void runSearch({ append: false });
         });
-        dom.state.after(retry);
+
+        dom.reload.append(reload);
     }
 
-    function restoreSource(revived, retryButton) {
-        retryButton.remove();
-        if (usable.some((entry) => entry.id === revived.id)) {
-            return;
+    /** Clears the reload prompt once a search is under way again. */
+    function hideSourceFailure() {
+        if (!dom.reload.hidden) {
+            dom.reload.hidden = true;
+            dom.reload.replaceChildren();
         }
-        usable.push(revived);
-        const option = document.createElement('option');
-        option.value = revived.id;
-        setText(option, revived.label ?? revived.id);
-        dom.source.append(option);
-        dom.bar.hidden = false;
-        dom.source.value = revived.id;
-        state.source = revived;
-        applySourceCapabilities();
-        void runSearch({ append: false });
     }
 
     function appendCards(items, selection) {

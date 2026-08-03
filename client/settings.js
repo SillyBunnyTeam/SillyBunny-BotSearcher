@@ -213,7 +213,7 @@ export async function mountSettings() {
             'Request a source from this browser when the server cannot reach it',
             settings.allowDirectRequests,
             (v) => updateSettings({ allowDirectRequests: v }),
-            'Some sites refuse connections from servers but not from home connections. With this off, such a source is removed from the list instead. With it on, the site sees your browser’s address rather than the server’s.',
+            'Some sites refuse connections from servers but not from home connections. With this on, the site sees your browser’s address rather than the server’s. With it off, such a source stays in the list but cannot return results.',
         ),
         select(
             'sbbs_set_images',

@@ -393,6 +393,19 @@
     font-size: 0.85em;
 }
 
+/*
+ * Offers a failed source another try. Aligned to the start rather than centred
+ * so it reads as a continuation of the message above it.
+ */
+.sbbs-reload {
+    display: flex;
+    justify-content: flex-start;
+}
+
+.sbbs-reload-source {
+    flex: 0 0 auto;
+}
+
 .sbbs-rating-sensitive {
     border-color: var(--sb-color-warning, var(--sb-accent, currentColor));
 }

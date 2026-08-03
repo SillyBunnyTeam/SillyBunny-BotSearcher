@@ -165,6 +165,147 @@ test('a setting note sits beside its label, not inside it', async () => {
     }
 });
 
+test('a source that fails stays in the picker and offers a reload', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        MutationObserver: globalThis.MutationObserver,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        CSS: globalThis.CSS,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        MutationObserver: dom.window.MutationObserver,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+        CSS: { escape: (value) => String(value) },
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    const searches = [];
+    const retries = [];
+    globalThis.fetch = async (url, options = {}) => {
+        if (String(url).endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: 3,
+                version: '0.2.0',
+                sources: [
+                    // Reported down before the dialog even opens. It must still
+                    // be offered, not quietly missing from the list.
+                    { id: 'chub', label: 'Chub', tier: 1, state: 'down', reason: 'forbidden', clientHosts: ['chub.ai'], capabilities: { search: true, sorts: ['default'], sfwToggle: true, detail: true } },
+                    { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, detail: true } },
+                ],
+            });
+        }
+        if (String(url).endsWith('/retry')) {
+            retries.push(JSON.parse(options.body));
+            return jsonResponse({ ok: true, state: 'unknown' });
+        }
+        if (String(url).endsWith('/search')) {
+            return new Promise((resolve, reject) => {
+                searches.push({ body: JSON.parse(options.body), resolve, reject });
+                options.signal?.addEventListener('abort', () => {
+                    reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                }, { once: true });
+            });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popupInstances = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popupInstances.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    const extensionSettings = { SillyBunnyBotSearcher: { defaultSource: 'chub' } };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+            renderExtensionTemplateAsync: async () => TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { openBrowser } = await import('../client/browser.js?source-reload');
+        const opened = openBrowser();
+        await waitFor(() => popupInstances.length === 1 && searches.length === 1, 'initial search did not start');
+        const popup = popupInstances[0];
+        const picker = popup.content.querySelector('#sbbs_source');
+
+        // A source already in cooldown is still selectable, and says so.
+        const options = [...picker.options].map((option) => option.textContent);
+        assert.ok(options.includes('Chub (unavailable)'), `Chub must remain selectable, got ${options.join(' / ')}`);
+        assert.equal(picker.value, 'chub', 'and stays the saved default rather than being switched away from');
+
+        searches[0].resolve(jsonResponse({ error: 'source_down' }, 503));
+
+        await waitFor(
+            () => popup.content.querySelector('#sbbs_reload')?.hidden === false,
+            'a failed source must offer a reload',
+        );
+
+        // The whole point: it is still there, still selected.
+        assert.equal(picker.value, 'chub', 'the failed source must stay selected');
+        assert.equal([...picker.options].some((option) => option.value === 'chub'), true, 'and stay in the list');
+        assert.match(popup.content.querySelector('#sbbs_state').textContent, /Chub refused the request/);
+        assert.match(popup.content.querySelector('#sbbs_state').textContent, /still in the list/);
+
+        // Reload clears the server-side cooldown first, or the next search would
+        // be answered from it without the source being tried at all.
+        const reload = popup.content.querySelector('.sbbs-reload-source');
+        assert.match(reload.textContent, /Reload Chub/);
+        reload.click();
+
+        await waitFor(() => searches.length === 2, 'reload did not search again');
+        assert.deepEqual(retries, [{ source: 'chub' }], 'the cooldown must be cleared before retrying');
+        assert.equal(searches[1].body.source, 'chub', 'and it retries the same source');
+        assert.equal(popup.content.querySelector('#sbbs_reload').hidden, true, 'the prompt clears while retrying');
+
+        searches[1].resolve(jsonResponse({
+            total: 1,
+            nextCursor: null,
+            items: [card('chub', 'author/one', 'Back again')],
+        }));
+        await waitFor(() => /Back again/.test(popup.content.textContent), 'the recovered source did not render');
+
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('the browser is single-flight, ignores stale searches, deduplicates, and preserves append results on retry', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {

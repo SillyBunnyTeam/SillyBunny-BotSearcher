@@ -106,7 +106,7 @@ Details that apply to both:
 - The response is read, filtered and normalized by the server in both cases. Moving the request does not change what reaches the page.
 - The request carries no SillyBunny cookies, credentials, or referrer.
 - The browse dialog states which source has moved to this route, and why, while it is in effect.
-- Turning the setting off does not make such a source work through the server. It is removed from the source list instead.
+- Turning the setting off does not make such a source work through the server. It stays in the source list and reports that the server was refused, with a **Reload** option.
 
 Thumbnail routing depends on the **Thumbnails** setting:
 
@@ -171,7 +171,7 @@ These controls do not make third-party card instructions safe. They also do not 
 | Hide AI-generated cards | Off | Requests this filter only from Botbooru, the source that supports it. |
 | Blur sensitive and unrated thumbnails | On | Blurs thumbnails marked sensitive or lacking a reported rating until revealed. Rating labels remain visible when blur is off. |
 | Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
-| Request a source from this browser when the server cannot reach it | On | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source is removed from the source list. |
+| Request a source from this browser when the server cannot reach it | On | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source stays listed but cannot return results. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
 | Search history | — | Clears the search terms saved for the search box's suggestions. |
 
@@ -191,7 +191,9 @@ Update both components from the same release, then restart SillyBunny. Updating 
 
 ### A source is unavailable
 
-Try another source. BotSearcher temporarily removes a source from the current browser session after a failed request and lets you retry it.
+The source stays in the list and stays selected. BotSearcher explains what happened and offers **Reload &lt;source&gt;**, which clears the server's cooldown for that source and searches again.
+
+The cooldown is why the button exists: after a failed request the server stops contacting that site for a while and answers immediately instead, so simply searching again would not reach it. A source already in that state when you open the browser is shown as **(unavailable)** in the list and can still be selected and reloaded.
 
 ### A source works on one machine but not another
 
