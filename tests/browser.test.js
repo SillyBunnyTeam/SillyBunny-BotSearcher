@@ -138,6 +138,57 @@ test('a corrupt stored history is repaired rather than trusted', async () => {
     assert.equal(history[1].length, 128, 'and an oversized entry is capped');
 });
 
+test('a source without detail support opens its listing without a detail request', async () => {
+    const dom = new JSDOM('<!doctype html><body><div id="detail"></div></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        fetch: globalThis.fetch,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+
+    let requests = 0;
+    globalThis.fetch = async () => {
+        requests += 1;
+        throw new Error('summary-only detail must not fetch');
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({ extensionSettings: {}, saveSettingsDebounced() {} }),
+    };
+
+    try {
+        const { showDetail } = await import('../client/detail.js?summary-only-detail');
+        const summary = card('jannyai', '311a6844-61d6-4468-aa98-91ecc7fbae86', 'elf trucker', {
+            tagline: 'A cropped listing description.',
+            contentRating: 'sfw',
+            stats: { tokens: 2727 },
+            tags: ['Elf', 'OC'],
+            pageUrl: 'https://jannyai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-elf-trucker',
+            importUrl: 'https://janitorai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-elf-trucker',
+            nativeImport: true,
+        });
+        const source = {
+            id: 'jannyai',
+            label: 'JannyAI',
+            clientHosts: ['jannyai.com', 'janitorai.com', 'image.jannyai.com'],
+            nativeImport: true,
+            capabilities: { detail: false },
+        };
+
+        await showDetail(dom.window.document.getElementById('detail'), summary, source, () => {});
+
+        assert.equal(requests, 0);
+        assert.match(dom.window.document.querySelector('.sbbs-detail-name').textContent, /elf trucker/);
+        assert.equal(dom.window.document.querySelector('.sbbs-description').textContent, summary.tagline);
+        assert.equal(dom.window.document.querySelector('.sbbs-chip-link').href, summary.pageUrl);
+        assert.ok(dom.window.document.querySelector('.sbbs-import'), 'native import action must remain available');
+    } finally {
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('a setting note sits beside its label, not inside it', async () => {
     const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div></body>', { url: 'https://local.test/' });
     const previous = {

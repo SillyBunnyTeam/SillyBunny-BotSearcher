@@ -328,6 +328,47 @@ test('only an explicit BotBooru context can send a bearer to its exact host', as
     }
 });
 
+test('JannyAI public authorization is fixed to one source and request shape', async () => {
+    const server = await upstream((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+    });
+
+    try {
+        const base = `http://127.0.0.1:${server.port}`;
+        const jannyai = {
+            id: 'jannyai',
+            allowedHosts: ['127.0.0.1'],
+            publicAuthHostForTests: '127.0.0.1',
+            allowInsecureForTests: true,
+        };
+        const post = {
+            method: 'POST', body: '{"queries":[]}', contentType: 'application/json', timeoutMs: 5000,
+        };
+
+        await fetchJson(jannyai, `${base}/multi-search`, post);
+        assert.equal(
+            server.requests[0].headers.authorization,
+            'Bearer 88a6463b66e04fb07ba87ee3db06af337f492ce511d93df6e2d2968cb2ff2b30',
+        );
+        for (const header of ['cookie', 'referer', 'origin', 'x-csrf-token', 'x-forwarded-for']) {
+            assert.equal(server.requests[0].headers[header], undefined);
+        }
+
+        await fetchJson(jannyai, `${base}/other`, post);
+        await fetchJson(jannyai, `${base}/multi-search`, { timeoutMs: 5000 });
+        await fetchJson(jannyai, `${base}/multi-search?extra=1`, post);
+        await fetchJson(testAdapter(['127.0.0.1']), `${base}/multi-search`, post);
+        await fetchJson({ ...jannyai, publicAuthHostForTests: 'different.test' }, `${base}/multi-search`, post);
+
+        for (const request of server.requests.slice(1)) {
+            assert.equal(request.headers.authorization, undefined, `${request.url} received public authorization`);
+        }
+    } finally {
+        await server.close();
+    }
+});
+
 test('credential-bearing requests refuse redirects without replaying the secret', async () => {
     const server = await upstream((req, res) => {
         if (req.url === '/start') {
@@ -355,6 +396,41 @@ test('credential-bearing requests refuse redirects without replaying the secret'
         );
         assert.equal(server.requests.length, 1);
         assert.equal(server.requests[0].headers.authorization, 'Bearer opaque-token');
+        assert.equal(server.requests.some((request) => request.url === '/redirected'), false);
+    } finally {
+        await server.close();
+    }
+});
+
+test('JannyAI public authorization and POST body are not replayed across redirects', async () => {
+    const server = await upstream((req, res) => {
+        if (req.url === '/multi-search') {
+            res.writeHead(302, { Location: '/redirected' });
+            res.end();
+            return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"leaked":true}');
+    });
+
+    try {
+        const adapter = {
+            id: 'jannyai',
+            allowedHosts: ['127.0.0.1'],
+            publicAuthHostForTests: '127.0.0.1',
+            allowInsecureForTests: true,
+        };
+        await assert.rejects(
+            () => fetchJson(adapter, `http://127.0.0.1:${server.port}/multi-search`, {
+                method: 'POST',
+                body: '{"queries":[]}',
+                contentType: 'application/json',
+                timeoutMs: 5000,
+            }),
+            (error) => error.code === 'credential_redirect',
+        );
+        assert.equal(server.requests.length, 1);
+        assert.ok(server.requests[0].headers.authorization?.startsWith('Bearer '));
         assert.equal(server.requests.some((request) => request.url === '/redirected'), false);
     } finally {
         await server.close();

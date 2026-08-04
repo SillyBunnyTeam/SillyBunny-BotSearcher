@@ -1,0 +1,63 @@
+{
+  "results": [
+    {
+      "indexUid": "janny-characters",
+      "page": 1,
+      "totalPages": 183,
+      "totalHits": 365,
+      "hitsPerPage": 2,
+      "hits": [
+        {
+          "name": "elf trucker",
+          "id": "311a6844-61d6-4468-aa98-91ecc7fbae86",
+          "avatar": "6uFreFjzwJDEAkdXBvLg0.webp",
+          "tagIds": [1, 5, 11, 15, 25, 47, 50, 55],
+          "isNsfw": false,
+          "permanentToken": 1827,
+          "totalToken": 2727,
+          "isLowQuality": false,
+          "createdAt": "2026-05-12T01:07:17.082Z",
+          "createdAtStamp": 1778548037.082,
+          "_formatted": {
+            "name": "elf trucker",
+            "description": "<p style=\"text-align: center;\"><em>\"It's free, don't offer me money or  , otherwise I'll leave you right here and you can walk.\"</em></p><p class=\"is-empty...",
+            "id": "311a6844-61d6-4468-aa98-91ecc7fbae86",
+            "avatar": "6uFreFjzwJDEAkdXBvLg0.webp",
+            "tagIds": ["1", "5", "11", "15", "25", "47", "50", "55"],
+            "isNsfw": false,
+            "permanentToken": "1827",
+            "totalToken": "2727",
+            "isLowQuality": false,
+            "createdAt": "2026-05-12T01:07:17.082Z",
+            "createdAtStamp": "1778548037.082"
+          }
+        },
+        {
+          "name": "Elf On The Shelf",
+          "id": "1880aad4-b9ff-4069-a070-8c18049f8a7e",
+          "avatar": "2x58QLPRdJ7vRGEu55-Oy.webp",
+          "tagIds": [2, 5, 15, 25, 28, 42, 45],
+          "isNsfw": false,
+          "permanentToken": 1395,
+          "totalToken": 2363,
+          "isLowQuality": false,
+          "createdAt": "2025-12-18T19:17:54.753Z",
+          "createdAtStamp": 1766085474.753,
+          "_formatted": {
+            "name": "Elf On The Shelf",
+            "description": "...you lucky duck, you've been blessed with the best elf this side of the North Pole to whip your butt into shape and transform you into the most boring, well-behaved...",
+            "id": "1880aad4-b9ff-4069-a070-8c18049f8a7e",
+            "avatar": "2x58QLPRdJ7vRGEu55-Oy.webp",
+            "tagIds": ["2", "5", "15", "25", "28", "42", "45"],
+            "isNsfw": false,
+            "permanentToken": "1395",
+            "totalToken": "2363",
+            "isLowQuality": false,
+            "createdAt": "2025-12-18T19:17:54.753Z",
+            "createdAtStamp": "1766085474.753"
+          }
+        }
+      ]
+    }
+  ]
+}

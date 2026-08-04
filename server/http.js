@@ -32,6 +32,42 @@ const MAX_REDIRECTS = 2;
 const METHODS = new Set(['GET', 'POST', 'PATCH']);
 const CONTENT_TYPES = new Set(['application/json', 'application/x-www-form-urlencoded']);
 
+/**
+ * Public service authorization is fixed here rather than supplied by adapters.
+ * The JannyAI key is published by its own web clients and grants read-only
+ * search access. It is still scoped like a credential so it cannot be replayed
+ * to another endpoint or after a redirect.
+ */
+const PUBLIC_AUTH = Object.freeze({
+    jannyai: Object.freeze({
+        host: 'search.jannyai.com',
+        pathname: '/multi-search',
+        method: 'POST',
+        contentType: 'application/json',
+        token: '88a6463b66e04fb07ba87ee3db06af337f492ce511d93df6e2d2968cb2ff2b30',
+    }),
+});
+
+function publicBearerFor(adapter, url, method, contentType) {
+    const profile = PUBLIC_AUTH[adapter.id];
+    if (!profile) {
+        return undefined;
+    }
+
+    // This override only lets hardening tests use a throwaway local server. No
+    // shipped adapter may carry allowInsecureForTests (asserted by the suite).
+    const host = adapter.allowInsecureForTests === true && typeof adapter.publicAuthHostForTests === 'string'
+        ? adapter.publicAuthHostForTests.toLowerCase()
+        : profile.host;
+    return url.hostname.toLowerCase() === host
+        && url.pathname === profile.pathname
+        && url.search === ''
+        && method === profile.method
+        && contentType === profile.contentType
+        ? profile.token
+        : undefined;
+}
+
 function requestShape(adapter, url, options) {
     const method = typeof options.method === 'string' ? options.method.toUpperCase() : 'GET';
     if (!METHODS.has(method)) {
@@ -67,7 +103,8 @@ function requestShape(adapter, url, options) {
         }
     }
 
-    return { method, body, contentType, bearerToken };
+    const publicBearerToken = publicBearerFor(adapter, url, method, contentType);
+    return { method, body, contentType, bearerToken, publicBearerToken };
 }
 
 /**
@@ -115,8 +152,9 @@ async function request(adapter, target, options) {
         if (shape.contentType) {
             headers['Content-Type'] = shape.contentType;
         }
-        if (shape.bearerToken) {
-            headers.Authorization = `Bearer ${shape.bearerToken}`;
+        const authorization = shape.bearerToken ?? shape.publicBearerToken;
+        if (authorization) {
+            headers.Authorization = `Bearer ${authorization}`;
         }
 
         let response;
@@ -148,7 +186,7 @@ async function request(adapter, target, options) {
 
         // Never replay a password, account mutation, or bearer token after an
         // upstream redirect, even when the destination is on the same host.
-        if (shape.body !== undefined || shape.bearerToken !== undefined) {
+        if (shape.body !== undefined || shape.bearerToken !== undefined || shape.publicBearerToken !== undefined) {
             discard(response);
             throw new UpstreamError('credential_redirect', adapter.id);
         }

@@ -42,6 +42,8 @@ test('every advertised sort has an intentional display label', () => {
     assert.equal(sortLabel('approved_at'), 'Recently approved');
     assert.equal(sortLabel('chatCount'), 'Most chats');
     assert.equal(sortLabel('createdAt'), 'Newest');
+    assert.equal(sortLabel('relevant'), 'Most relevant');
+    assert.equal(sortLabel('tokens_asc'), 'Fewest tokens');
 });
 
 test('counts are localized and pluralized', () => {
@@ -90,6 +92,7 @@ test('detail statistics use each source field meaning', () => {
         formatCount(3, 'download'),
         formatCount(4, 'like'),
     ].join(', '));
+    assert.equal(sourceStatLine('jannyai', stats), formatCount(1, 'token'));
     assert.equal(sourceStatLine('quillgen', stats), '');
 });
 

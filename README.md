@@ -123,7 +123,7 @@ Search history is off by default. If you enable it, terms are stored in SillyBun
 
 Each result shows the name, creator, token count, the source's own one-line summary, the popularity figures that source reported, and up to four tags. Where the source supports tag filtering, clicking a tag adds it to the filters; on other sources the tags are shown but are not clickable. Figures a source does not report are omitted rather than shown as zero, and the labels follow that source's own meaning — Chub's download count is its star count.
 
-The details shown before import come from the selected source. A source may omit fields or report incomplete information. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
+The details shown before import come from the selected source. A source may omit fields or report incomplete information. JannyAI's public index has no reliable per-card detail endpoint, so its detail pane uses the cropped description and metadata from the search listing. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
 ## Screenshots
 
@@ -155,6 +155,10 @@ Use HTTPS when the browser connects to a remote SillyBunny server. Without it, t
 SFW Botbooru searches and public detail requests remain anonymous. Non-SFW searches and account-visible detail requests use the bearer, so BotBooru can associate them with the account and the SillyBunny server's outgoing IP address. Account-visible thumbnails are session-checked when proxied, but the preview fetch itself is anonymous; direct thumbnail requests are also credential-free. Sessions are isolated by SillyBunny profile and disappear on logout, server restart, crash, or plugin replacement.
 
 The NSFW switch in BotSearcher updates BotBooru's account-wide `show_nsfw` preference. BotSearcher's status also reports whether NSFL is enabled and active, but does not change either NSFL preference. Logging out removes BotSearcher's in-memory bearer; it does not revoke the token at BotBooru because BotBooru exposes no revocation endpoint.
+
+### JannyAI search requests
+
+JannyAI search uses the read-only public search key published by JannyAI's own web clients. BotSearcher keeps that value server-side and sends it only for an exact `POST` to `search.jannyai.com/multi-search`; it is not accepted from the browser, sent to other paths, or replayed across redirects. The request uses no relay and does not forge an `Origin` or `Referer` header. If JannyAI rotates the public key, the adapter must be updated before searches work again.
 
 ### When a source refuses your server
 
@@ -197,6 +201,7 @@ Direct browser thumbnails can follow image-host redirects and use browser image-
 | Chub | Yes | Native | Preview images |
 | Pygmalion | Yes | Native | Full-size images; no preview endpoint |
 | RisuRealm | Yes | Native | Full-size images; data comes from SvelteKit page data |
+| JannyAI | Yes | Native | Preview images; listing metadata only |
 | Wyvern | Yes | Assembled | Resized CDN images |
 | Character Tavern | Yes | Assembled | Thumbnails are unavailable through the server |
 | Quillgen | No | Downloaded | Limited public catalog |
@@ -210,6 +215,8 @@ Import modes:
 Sources with tiers 0, 1, and 2 are enabled by default. Tier 3 sources are opt-in under **Extensions > BotSearcher > Sources**. Source APIs can change without notice; use `node scripts/probe-sources.mjs` to check their current status.
 
 Botbooru native imports use its documented bare `/download/png/<id>` URL. BotSearcher never puts the bearer in an import URL.
+
+JannyAI native imports are delegated to SillyBunny's existing Janny downloader through a JanitorAI-hosted URL containing the card UUID. The downloader may still be blocked by Cloudflare, especially when SillyBunny runs on a hosted or datacenter IP address.
 
 ## Card contents and import risks
 

@@ -52,29 +52,36 @@ export async function showDetail(container, summary, source, onBack, options = {
     container.append(loading);
 
     let card;
-    try {
-        const body = { source: source.id, id: summary.id };
-        if (typeof summary.accountRef === 'string' && summary.accountRef !== '') {
-            body.accountRef = summary.accountRef;
-        }
-        card = await postRouted('/detail', body, source, {
-            signal,
-            allowDirect: settings.allowDirectRequests,
-            onDirect,
-        });
-    } catch (error) {
-        if (error?.name === 'AbortError' || signal?.aborted) {
+    if (source.capabilities?.detail === false) {
+        // Some public indexes expose useful listing metadata but no reliable
+        // per-card endpoint. Keep those cards reviewable without making a
+        // request the source explicitly declared unsupported.
+        card = { ...summary, description: summary.tagline };
+    } else {
+        try {
+            const body = { source: source.id, id: summary.id };
+            if (typeof summary.accountRef === 'string' && summary.accountRef !== '') {
+                body.accountRef = summary.accountRef;
+            }
+            card = await postRouted('/detail', body, source, {
+                signal,
+                allowDirect: settings.allowDirectRequests,
+                onDirect,
+            });
+        } catch (error) {
+            if (error?.name === 'AbortError' || signal?.aborted) {
+                return;
+            }
+            if (source.id === 'botbooru' && noteBotbooruAccountError(error)) {
+                return;
+            }
+            setText(loading, detailErrorMessage(error, source.label));
+            const retry = el('button', 'menu_button', 'Try again');
+            retry.type = 'button';
+            retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, options));
+            container.append(retry);
             return;
         }
-        if (source.id === 'botbooru' && noteBotbooruAccountError(error)) {
-            return;
-        }
-        setText(loading, detailErrorMessage(error, source.label));
-        const retry = el('button', 'menu_button', 'Try again');
-        retry.type = 'button';
-        retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, options));
-        container.append(retry);
-        return;
     }
 
     if (signal?.aborted) {

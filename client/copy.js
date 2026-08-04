@@ -34,6 +34,10 @@ export const SORT_LABELS = Object.freeze({
     recommended: 'Recommended',
     download: 'Most downloaded',
     newest: 'Newest',
+    relevant: 'Most relevant',
+    oldest: 'Oldest',
+    tokens_desc: 'Most tokens',
+    tokens_asc: 'Fewest tokens',
 });
 
 const STAT_FIELDS = Object.freeze({
@@ -64,6 +68,9 @@ const STAT_FIELDS = Object.freeze({
         ['views', 'message'],
         ['downloads', 'download'],
         ['favorites', 'like'],
+    ]),
+    jannyai: Object.freeze([
+        ['tokens', 'token'],
     ]),
 });
 
