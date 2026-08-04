@@ -280,14 +280,47 @@
  * Requests for this source now leave from the browser rather than the server.
  * Deliberately persistent rather than a toast: it describes an ongoing state,
  * not an event, and it is the user's only on-screen sign that their own address
- * is reaching the card site.
+ * is reaching the card site until they dismiss it.
  */
 .sbbs-direct-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-sm, 8px);
     padding: var(--spacing-sm, 8px) var(--spacing-md, 12px);
     border-left: 3px solid var(--sb-muted-fg, currentColor);
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.9em;
     line-height: 1.45;
+}
+
+.sbbs-direct-notice-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.sbbs-direct-notice-dismiss {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+    display: grid;
+    place-items: center;
+}
+
+.sbbs-direct-notice-dismiss:hover {
+    opacity: 1;
+}
+
+.sbbs-direct-notice-dismiss:focus-visible {
+    outline: 2px solid var(--sb-focus-ring, currentColor);
+    outline-offset: 2px;
 }
 
 /* ---- grid ---- */
@@ -815,12 +848,26 @@
 }
 
 #sbbs_wand_item {
+    box-sizing: border-box;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
     width: 100%;
+    margin: 0;
+    padding: 5px;
     border: 0;
+    border-radius: 0;
+    appearance: none;
     background: transparent;
     color: inherit;
     font: inherit;
     text-align: start;
+    cursor: pointer;
+    opacity: 0.5;
+}
+
+#sbbs_wand_item:hover {
+    opacity: 1;
 }
 
 .sbbs-setting-select {
@@ -1077,6 +1124,11 @@
     .sbbs-reveal {
         min-width: var(--sb-mobile-touch-target, 44px);
         min-height: var(--sb-mobile-touch-target, 44px);
+    }
+
+    .sbbs-direct-notice-dismiss {
+        width: var(--sb-mobile-touch-target, 44px);
+        height: var(--sb-mobile-touch-target, 44px);
     }
 
     .sbbs-filter-group {

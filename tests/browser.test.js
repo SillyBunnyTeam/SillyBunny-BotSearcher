@@ -654,6 +654,149 @@ test('closing the recovery popup does not abort an in-progress server update', a
     }
 });
 
+test('a direct-routing notice can be dismissed without disabling the route', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        MutationObserver: globalThis.MutationObserver,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        CSS: globalThis.CSS,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        MutationObserver: dom.window.MutationObserver,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+        CSS: { escape: (value) => String(value) },
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    const DIRECT_URL = 'https://gateway.chub.ai/api/search';
+    let directRequests = 0;
+    let ingests = 0;
+    globalThis.fetch = async (url) => {
+        const requestPath = String(url);
+        if (requestPath.endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: 5,
+                version: '0.3.0',
+                sources: [{
+                    id: 'chub',
+                    label: 'Chub',
+                    tier: 1,
+                    state: 'up',
+                    clientHosts: ['chub.ai'],
+                    directHosts: ['gateway.chub.ai'],
+                    capabilities: { search: true, sorts: ['default'], sfwToggle: true, detail: true },
+                }],
+            });
+        }
+        if (requestPath === DIRECT_URL) {
+            directRequests += 1;
+            return jsonResponse({ data: { nodes: [] } });
+        }
+        if (requestPath.endsWith('/search')) {
+            return jsonResponse({ mode: 'direct', kind: 'search', url: DIRECT_URL, reason: 'forbidden' });
+        }
+        if (requestPath.endsWith('/ingest')) {
+            ingests += 1;
+            return jsonResponse({
+                total: 1,
+                nextCursor: null,
+                items: [card('chub', 'author/direct', 'Direct result')],
+            });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popupInstances = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popupInstances.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    const extensionSettings = {
+        SillyBunnyBotSearcher: { defaultSource: 'chub', allowDirectRequests: true },
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+            renderExtensionTemplateAsync: async () => TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { openBrowser } = await import('../client/browser.js?dismiss-direct-routing-notice');
+        const opened = openBrowser();
+        await waitFor(
+            () => popupInstances.length === 1 && popupInstances[0].content.querySelector('.sbbs-direct-notice'),
+            'direct-routing notice did not render',
+        );
+        const popup = popupInstances[0];
+        const notice = popup.content.querySelector('.sbbs-direct-notice');
+        const dismiss = notice.querySelector('.sbbs-direct-notice-dismiss');
+
+        assert.match(notice.textContent, /sees your browser's address rather than the server's/);
+        assert.equal(dismiss.type, 'button');
+        assert.equal(dismiss.getAttribute('aria-label'), 'Dismiss direct routing notice');
+        assert.match(popup.content.textContent, /Direct result/, 'the direct result must still render');
+
+        dismiss.click();
+        assert.equal(popup.content.querySelector('.sbbs-direct-notice'), null, 'dismissal hides the notice');
+
+        // A distinct search repeats the direct route, but the acknowledged
+        // source must not recreate the dismissed notice during this dialog.
+        popup.content.querySelector('#sbbs_query').value = 'second search';
+        popup.content.querySelector('#sbbs_search_form').dispatchEvent(new dom.window.Event('submit', {
+            bubbles: true,
+            cancelable: true,
+        }));
+        await waitFor(
+            () => directRequests === 2 && ingests === 2,
+            'the second direct route did not finish',
+        );
+        assert.equal(popup.content.querySelector('.sbbs-direct-notice'), null, 'the dismissed notice must stay hidden');
+        assert.match(popup.content.textContent, /Direct result/, 'dismissal must not disable direct routing');
+
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('a source that fails stays in the picker and offers a reload', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {

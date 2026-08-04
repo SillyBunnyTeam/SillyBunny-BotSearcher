@@ -770,7 +770,8 @@ function wireBrowser(popup, health, options) {
      * This is a routing change the user did not ask for, made because the
      * alternative is the source not working at all. It changes which address the
      * card site sees, so it is stated plainly and left on screen rather than
-     * announced in a toast that disappears.
+     * announced in a toast that disappears. The user can dismiss the disclosure
+     * after reading it without changing the routing decision.
      */
     function noteDirectRouting(source, reason) {
         if (state.directNoted.has(source.id)) {
@@ -779,8 +780,26 @@ function wireBrowser(popup, health, options) {
         state.directNoted.add(source.id);
 
         const notice = el('div', 'sbbs-direct-notice');
-        setText(notice, directRoutingNotice(source.label, reason));
-        notice.setAttribute('role', 'status');
+        const message = el('span', 'sbbs-direct-notice-text');
+        setText(message, directRoutingNotice(source.label, reason));
+        message.setAttribute('role', 'status');
+
+        const dismiss = document.createElement('button');
+        dismiss.className = 'sbbs-direct-notice-dismiss';
+        dismiss.type = 'button';
+        dismiss.setAttribute('aria-label', 'Dismiss direct routing notice');
+        dismiss.title = 'Dismiss direct routing notice';
+
+        const icon = el('i', 'fa-solid fa-xmark');
+        icon.setAttribute('aria-hidden', 'true');
+        dismiss.append(icon);
+        dismiss.addEventListener('click', () => {
+            // Keep directNoted intact: closing the disclosure does not turn off
+            // the route or make the same notice reappear during this dialog.
+            notice.remove();
+        });
+
+        notice.append(message, dismiss);
         dom.state.after(notice);
     }
 
