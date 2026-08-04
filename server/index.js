@@ -13,6 +13,7 @@
 import { PLUGIN_ID } from '../shared/schema.js';
 import { createRouter } from './router.js';
 import { LOG_TAG } from './guards.js';
+import { createBotbooruAccounts } from './accounts.js';
 
 export const info = {
     id: PLUGIN_ID,
@@ -24,6 +25,7 @@ const state = {
     startedAt: Date.now(),
     /** @type {Set<NodeJS.Timeout>} Any timer created later must land here so exit() can clear it. */
     timers: new Set(),
+    accounts: createBotbooruAccounts(),
 };
 
 /**
@@ -43,6 +45,7 @@ export async function exit() {
             clearInterval(timer);
         }
         state.timers.clear();
+        state.accounts.clear();
     } catch {
         // Nothing actionable during shutdown.
     }

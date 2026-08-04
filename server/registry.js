@@ -91,6 +91,8 @@ export function describeSources(stateOf, reasonOf = () => null) {
                 hideAiToggle: adapter.capabilities.hideAiToggle === true,
                 detail: adapter.capabilities.detail,
                 tagVocabulary: adapter.capabilities.tagVocabulary === true,
+                accountLogin: adapter.capabilities.accountLogin === true,
+                nsfwRequiresAccount: adapter.capabilities.nsfwRequiresAccount === true,
                 // The client builds its filter controls from this, so a source
                 // that declares nothing shows no controls rather than showing
                 // ones that would be ignored.

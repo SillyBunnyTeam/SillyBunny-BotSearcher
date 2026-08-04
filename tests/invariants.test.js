@@ -90,6 +90,7 @@ test('version is identical across schema.js, package metadata and manifest.json'
 test('manifest and package agree on the extension identity', async () => {
     const { PLUGIN_ID, EXTENSION_NAME, REPOSITORY_URL } = await import('../shared/schema.js');
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 
     // src/plugin-loader.js:266 rejects anything else, and the route path is derived from it.
     assert.match(PLUGIN_ID, /^[a-z0-9_-]+$/);
@@ -101,9 +102,11 @@ test('manifest and package agree on the extension identity', async () => {
         'the host updater trust boundary depends on the pinned repository identity',
     );
     const repositoryForms = new Set([REPOSITORY_URL, REPOSITORY_URL.replace(/\.git$/, '')]);
-    for (const relativePath of ['README.md', 'templates/plugin-missing.html']) {
+    assert.equal(REPOSITORY_URL, 'https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git');
+    assert.equal(manifest.homePage, REPOSITORY_URL.replace(/\.git$/, ''));
+    for (const relativePath of ['README.md', 'templates/plugin-missing.html', 'SECURITY.md']) {
         const text = fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
-        const urls = text.match(/https:\/\/github\.com\/platberlitz\/SillyBunny-BotSearcher(?:\.git)?/g) ?? [];
+        const urls = text.match(/https:\/\/github\.com\/[A-Za-z0-9-]+\/SillyBunny-BotSearcher(?:\.git)?/g) ?? [];
         assert.ok(urls.length > 0, `${relativePath} must identify the pinned repository`);
         assert.ok(urls.every((url) => repositoryForms.has(url)), `${relativePath} contains an unpinned repository URL`);
     }
@@ -115,4 +118,16 @@ test('manifest and package agree on the extension identity', async () => {
     );
     const ignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
     assert.match(ignore, /^\.sillybunny-release\.json$/m, 'host release metadata must not dirty the managed checkout');
+});
+
+test('mobile filter fields collapse without changing the desktop grid', () => {
+    const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8');
+    assert.match(css, /\.sbbs-filter-fields\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(180px,\s*1fr\)\)/s);
+
+    const mobile = css.match(/@media screen and \(max-width:\s*768px\)\s*\{([\s\S]*)\}\s*$/)?.[1] ?? '';
+    assert.match(mobile, /\.sbbs-filter-fields\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+    assert.match(mobile, /\.sbbs-filter \.text_pole,\s*\.sbbs-filter-checkbox\s*\{[^}]*margin-block:\s*0/s);
+    assert.match(mobile, /\.sbbs-filter-boolean\s*\{[^}]*justify-content:\s*flex-start/s);
+    assert.match(mobile, /\.sbbs-filters\s*\{[^}]*max-height:\s*calc\([^}]*100dvh[^}]*overflow-y:\s*auto/s);
+    assert.match(mobile, /\.sbbs-filters\s*\{[^}]*overscroll-behavior:\s*contain/s);
 });

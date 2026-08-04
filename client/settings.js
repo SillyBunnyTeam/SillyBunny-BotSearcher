@@ -3,9 +3,9 @@
  *
  * Everything is re-clamped on read with the same discipline the server uses on
  * requests, so a hand-edited settings.json cannot inject an unknown source id or
- * an absurd page size. No secret is ever stored here; this extension needs no
- * credentials for any source, and deliberately does not implement the API-key
- * features some sites offer.
+ * an absurd page size. No secret is ever stored here. BotBooru credentials are
+ * sent once to the server-side account route, and its bearer remains in server
+ * memory rather than profile settings.
  *
  * The panel is built with createElement rather than from a template, so that
  * client/ contains no HTML parsing of any kind. The only HTML this extension
@@ -23,7 +23,15 @@ import {
     getServerPluginUpdateCapabilities,
     updateServerPlugin,
 } from './api.js';
-import { compareReleaseVersions, serverPluginUpdateErrorMessage } from './copy.js';
+import {
+    getBotbooruAccount,
+    loginBotbooruAccount,
+    logoutBotbooruAccount,
+    refreshBotbooruAccount,
+    setBotbooruNsfw,
+    subscribeBotbooruAccount,
+} from './account.js';
+import { accountErrorMessage, compareReleaseVersions, serverPluginUpdateErrorMessage } from './copy.js';
 
 const PAGE_SIZES = [12, 24, 48];
 
@@ -288,10 +296,228 @@ export async function mountSettings() {
         if (sources.length > 0) {
             content.prepend(sourceList(sources));
         }
+        const botbooru = sources.find((source) => source?.id === 'botbooru');
+        if (availability.status === AVAILABILITY.OK && botbooru?.capabilities?.accountLogin === true) {
+            content.prepend(botbooruAccountControl());
+        }
         content.prepend(serverPluginControl(availability));
     } catch {
         // Plugin not installed yet; the rest of the panel still works.
     }
+}
+
+function botbooruAccountControl() {
+    const wrapper = el('section', 'sbbs-setting sbbs-setting-account');
+    const heading = el('strong', undefined, 'BotBooru account');
+    heading.id = 'sbbs_botbooru_account_heading';
+    wrapper.setAttribute('aria-labelledby', heading.id);
+
+    const status = el('span', 'sbbs-account-status');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+
+    const loginForm = el('form', 'sbbs-account-login');
+    const fields = el('div', 'sbbs-account-fields');
+    const usernameField = accountField('sbbs_botbooru_username', 'Username', 'text', 'username');
+    const passwordField = accountField('sbbs_botbooru_password', 'Password', 'password', 'current-password');
+    fields.append(usernameField.wrapper, passwordField.wrapper);
+
+    const login = el('button', 'menu_button', 'Log in');
+    login.type = 'submit';
+    loginForm.append(fields, login);
+
+    const sessionNote = el(
+        'span',
+        'sbbs-setting-note',
+        'Your password is not retained. BotSearcher keeps the BotBooru bearer in server memory until logout or server restart.',
+    );
+
+    const signedIn = el('div', 'sbbs-account-signed-in');
+    const nsfwRow = el('label', 'checkbox_label sbbs-account-nsfw');
+    const nsfw = document.createElement('input');
+    nsfw.type = 'checkbox';
+    nsfw.id = 'sbbs_botbooru_nsfw';
+    nsfwRow.append(nsfw, el('span', undefined, 'Allow NSFW results'));
+
+    const nsfwNote = el(
+        'span',
+        'sbbs-setting-note',
+        'This changes the BotBooru account preference on every device using that account.',
+    );
+    nsfwNote.id = 'sbbs_botbooru_nsfw_note';
+    nsfw.setAttribute('aria-describedby', nsfwNote.id);
+
+    const nsflStatus = el('span', 'sbbs-setting-note sbbs-account-nsfl');
+    const logout = el('button', 'menu_button', 'Log out');
+    logout.type = 'button';
+    const logoutNote = el(
+        'span',
+        'sbbs-setting-note',
+        'Logout removes BotSearcher\'s in-memory copy. BotBooru does not provide token revocation, so this does not revoke the token upstream.',
+    );
+    signedIn.append(nsfwRow, nsfwNote, nsflStatus, logout, logoutNote);
+
+    wrapper.append(heading, status, loginForm, sessionNote, signedIn);
+
+    let pending = false;
+    let message = '';
+
+    const render = (account) => {
+        const loggedIn = account.loggedIn === true;
+        loginForm.hidden = loggedIn;
+        sessionNote.hidden = loggedIn;
+        signedIn.hidden = !loggedIn;
+        login.disabled = pending;
+        usernameField.input.disabled = pending;
+        passwordField.input.disabled = pending;
+        nsfw.disabled = pending || !loggedIn;
+        logout.disabled = pending;
+        nsfw.checked = account.nsfwEnabled === true;
+
+        if (message !== '') {
+            setText(status, message);
+        } else if (!account.known) {
+            setText(status, 'Checking account...');
+        } else if (loggedIn) {
+            setText(status, `Logged in as ${account.username}.`);
+        } else {
+            setText(status, 'Not logged in. Login is required only for non-SFW BotBooru results.');
+        }
+
+        if (!loggedIn) {
+            setText(nsflStatus, '');
+        } else if (!account.nsflEnabled) {
+            setText(nsflStatus, 'NSFL is disabled for this BotBooru account.');
+        } else if (account.nsflActive === false) {
+            setText(nsflStatus, 'NSFL is enabled on the account but currently paused in BotBooru.');
+        } else if (account.nsflActive === null) {
+            setText(nsflStatus, 'BotBooru did not report whether NSFL is active. Non-SFW searches may include NSFL content.');
+        } else {
+            setText(nsflStatus, 'NSFL is active for this account. Non-SFW searches may include NSFL content.');
+        }
+    };
+
+    let renderedLoggedIn = null;
+    const unsubscribeAccount = subscribeBotbooruAccount((account) => {
+        const hadFocus = wrapper.contains(document.activeElement);
+        const loginStateChanged = renderedLoggedIn !== null && renderedLoggedIn !== account.loggedIn;
+        message = '';
+        render(account);
+        renderedLoggedIn = account.loggedIn;
+        if (hadFocus && loginStateChanged) {
+            requestAnimationFrame(() => {
+                if (wrapper.isConnected) {
+                    (account.loggedIn ? logout : usernameField.input).focus();
+                }
+            });
+        }
+    });
+
+    // The host can rebuild extension settings without a page navigation. Stop
+    // retaining detached inputs, and erase an unsent password if that happens.
+    requestAnimationFrame(() => {
+        if (!wrapper.isConnected) {
+            passwordField.input.value = '';
+            unsubscribeAccount();
+            return;
+        }
+        const Observer = document.defaultView?.MutationObserver ?? globalThis.MutationObserver;
+        if (typeof Observer !== 'function') {
+            return;
+        }
+        const observer = new Observer(() => {
+            if (!wrapper.isConnected) {
+                passwordField.input.value = '';
+                unsubscribeAccount();
+                observer.disconnect();
+            }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+    });
+
+    loginForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (pending) {
+            return;
+        }
+        pending = true;
+        message = 'Logging in to BotBooru...';
+        render(getBotbooruAccount());
+        try {
+            await loginBotbooruAccount(usernameField.input.value, passwordField.input.value);
+        } catch (error) {
+            message = accountErrorMessage(error);
+        } finally {
+            passwordField.input.value = '';
+            pending = false;
+            if (wrapper.isConnected) {
+                render(getBotbooruAccount());
+            }
+        }
+    });
+
+    nsfw.addEventListener('change', async () => {
+        if (pending) {
+            return;
+        }
+        const enabled = nsfw.checked;
+        pending = true;
+        message = 'Updating the BotBooru account...';
+        render(getBotbooruAccount());
+        try {
+            await setBotbooruNsfw(enabled);
+        } catch (error) {
+            message = accountErrorMessage(error);
+        } finally {
+            pending = false;
+            if (wrapper.isConnected) {
+                render(getBotbooruAccount());
+            }
+        }
+    });
+
+    logout.addEventListener('click', async () => {
+        if (pending) {
+            return;
+        }
+        pending = true;
+        message = 'Removing the BotBooru login...';
+        render(getBotbooruAccount());
+        try {
+            await logoutBotbooruAccount();
+        } catch (error) {
+            message = accountErrorMessage(error);
+        } finally {
+            pending = false;
+            if (wrapper.isConnected) {
+                render(getBotbooruAccount());
+            }
+        }
+    });
+
+    void refreshBotbooruAccount().catch((error) => {
+        message = accountErrorMessage(error);
+        if (wrapper.isConnected) {
+            render(getBotbooruAccount());
+        }
+    });
+
+    return wrapper;
+}
+
+function accountField(id, label, type, autocomplete) {
+    const wrapper = el('div', 'sbbs-account-field');
+    const caption = el('label', undefined, label);
+    caption.htmlFor = id;
+    const input = document.createElement('input');
+    input.id = id;
+    input.className = 'text_pole';
+    input.type = type;
+    input.autocomplete = autocomplete;
+    input.required = true;
+    input.maxLength = type === 'password' ? 1024 : 64;
+    wrapper.append(caption, input);
+    return { wrapper, input };
 }
 
 function serverPluginControl(availability) {

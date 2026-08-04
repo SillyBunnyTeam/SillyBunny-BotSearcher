@@ -18,7 +18,7 @@ Install both components from the same verified immutable release tag or full com
 
 ```bash
 RELEASE=<verified-release-tag-or-full-commit>
-REPO=https://github.com/platberlitz/SillyBunny-BotSearcher.git
+REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 
 git clone "$REPO" data/default-user/extensions/SillyBunny-BotSearcher
 git -C data/default-user/extensions/SillyBunny-BotSearcher checkout "$RELEASE"
@@ -57,7 +57,7 @@ Stop SillyBunny completely, then run the complete block in Git Bash (including o
 set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
 RELEASE=v0.3.0
-REPO=https://github.com/platberlitz/SillyBunny-BotSearcher.git
+REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
 GIT_ROOT="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel)"
@@ -115,6 +115,8 @@ Botbooru tag boxes also suggest matching names from its tag catalogue. Suggestio
 
 Botbooru sends ordinary words to its name and description search. Its exact query syntax can be used in the main search box too: for example, `-male` excludes a tag and `writer:name` selects a writer. Exact values entered through filter controls have spaces converted to underscores.
 
+Botbooru's public catalog is SFW-only. To search its account-visible catalog, log in under **Extensions > BotSearcher > BotBooru account**, enable **Allow NSFW results**, then turn off **SFW only** in the browser. The NSFW control changes the BotBooru account preference on every device using that account. BotSearcher does not change the account's NSFL settings; when NSFL is active, non-SFW searches may include NSFL content and the settings panel says so.
+
 Results update shortly after you stop typing, from three characters onward; pressing Enter or the search button skips the wait. Repeating a search you already ran — clearing a filter, switching back to a source you were just looking at — is answered from memory rather than by asking the site again. That memory lasts five minutes and is discarded when the dialog closes.
 
 Search history is off by default. If you enable it, terms are stored in SillyBunny profile settings and may be included in server backups; card names and filters are not stored. Clear saved terms under **Extensions > BotSearcher > Search history**.
@@ -143,6 +145,16 @@ Opening BotSearcher immediately requests the selected source's default catalog, 
 - The selected source receives the search query and sees the SillyBunny server's outgoing IP address.
 - If SillyBunny runs on your computer or home network, the server's public IP may be the same public IP used by your browser.
 - BotSearcher does not provide a route that fetches an arbitrary URL supplied by the frontend. Each adapter defines the hosts it may contact.
+
+### BotBooru account requests
+
+BotBooru login is optional. The browser sends the entered username and password to the BotSearcher plugin on the SillyBunny server. The server forwards them to BotBooru's fixed login endpoint, discards the password, verifies the returned bearer, and keeps that bearer only in server-process memory for the current SillyBunny profile. It is not saved to profile settings, disk, backups, URLs, browser storage, or logs.
+
+Use HTTPS when the browser connects to a remote SillyBunny server. Without it, the password is not protected on that hop. The SillyBunny server operator and a process-level compromise can access the password while login is in progress and the full BotBooru bearer afterward.
+
+SFW Botbooru searches and public detail requests remain anonymous. Non-SFW searches and account-visible detail requests use the bearer, so BotBooru can associate them with the account and the SillyBunny server's outgoing IP address. Account-visible thumbnails are session-checked when proxied, but the preview fetch itself is anonymous; direct thumbnail requests are also credential-free. Sessions are isolated by SillyBunny profile and disappear on logout, server restart, crash, or plugin replacement.
+
+The NSFW switch in BotSearcher updates BotBooru's account-wide `show_nsfw` preference. BotSearcher's status also reports whether NSFL is enabled and active, but does not change either NSFL preference. Logging out removes BotSearcher's in-memory bearer; it does not revoke the token at BotBooru because BotBooru exposes no revocation endpoint.
 
 ### When a source refuses your server
 
@@ -181,7 +193,7 @@ Direct browser thumbnails can follow image-host redirects and use browser image-
 
 | Source | Default | Import mode | Thumbnail notes |
 |---|---:|---|---|
-| Botbooru | Yes | Native | 320 or 640 pixel previews |
+| Botbooru | Yes | Native | Public catalog is SFW-only; optional account login unlocks account-visible results |
 | Chub | Yes | Native | Preview images |
 | Pygmalion | Yes | Native | Full-size images; no preview endpoint |
 | RisuRealm | Yes | Native | Full-size images; data comes from SvelteKit page data |
@@ -196,6 +208,8 @@ Import modes:
 - **Assembled:** The source provides card data but no downloadable card file. The BotSearcher server builds and validates a card from that data.
 
 Sources with tiers 0, 1, and 2 are enabled by default. Tier 3 sources are opt-in under **Extensions > BotSearcher > Sources**. Source APIs can change without notice; use `node scripts/probe-sources.mjs` to check their current status.
+
+Botbooru native imports use its documented bare `/download/png/<id>` URL. BotSearcher never puts the bearer in an import URL.
 
 ## Card contents and import risks
 
@@ -215,6 +229,7 @@ BotSearcher applies the following controls:
 - Source records are rebuilt from an allowed set of fields and normalized before they reach the frontend.
 - Untrusted source text is not parsed as HTML. The frontend writes it through text properties and uses safe properties or attributes where needed.
 - Source links and native import URLs are checked against source-specific hosts before use. Browser-direct API requests use a narrower direct-fetch host list.
+- BotBooru account credentials are accepted only by fixed same-origin account routes. Bearer authorization is restricted to the exact BotBooru host and is rejected across redirects.
 - Card files downloaded by the BotSearcher server are size-limited and structurally validated before import.
 - Card descriptions are shown as plain text, not rendered as Markdown or HTML.
 
@@ -233,6 +248,8 @@ These controls do not make third-party card instructions safe. They also do not 
 | Request a source from this browser when the server cannot reach it | Off | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source stays listed but cannot return results. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
 | Save search history in SillyBunny profile settings | Off | Stores search terms for suggestions. Disable it to clear saved terms. |
+
+The **BotBooru account** section is server state rather than a saved setting. It provides login, logout, the account-wide NSFW preference, and read-only NSFL status. The password is discarded after login and the bearer is retained only until logout or server restart.
 
 ## Troubleshooting
 
@@ -271,6 +288,12 @@ For sources that support it, BotSearcher handles this by requesting the source f
 ### SFW filtering is unavailable
 
 Some sources do not provide a reliable SFW filter. BotSearcher disables the control for those sources rather than claiming to filter their results.
+
+### BotBooru asks for a login
+
+Botbooru requires an account for non-SFW results. Log in under **Extensions > BotSearcher > BotBooru account**, enable **Allow NSFW results**, then turn off **SFW only** in the browser. If the session expired or SillyBunny restarted, log in again.
+
+If the settings panel says NSFL is active, BotSearcher honors that BotBooru account setting and non-SFW searches may include NSFL content. Change the NSFL setting on BotBooru itself if that is not wanted.
 
 ## Development
 

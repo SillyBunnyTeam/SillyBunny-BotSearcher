@@ -866,6 +866,47 @@
     border-bottom: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
 }
 
+.sbbs-setting-account {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs, 4px);
+    padding-bottom: var(--spacing-sm, 8px);
+    border-bottom: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+}
+
+.sbbs-account-status {
+    color: var(--sb-muted-fg, currentColor);
+}
+
+.sbbs-account-login,
+.sbbs-account-signed-in,
+.sbbs-account-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs, 4px);
+}
+
+.sbbs-account-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: var(--spacing-sm, 8px);
+}
+
+.sbbs-account-field .text_pole {
+    width: 100%;
+    min-width: 0;
+    margin-block: 0;
+}
+
+.sbbs-account-login > .menu_button,
+.sbbs-account-signed-in > .menu_button {
+    align-self: flex-start;
+}
+
+.sbbs-account-nsfw {
+    margin: 0;
+}
+
 .sbbs-plugin-update-actions,
 .sbbs-install-actions {
     display: flex;
@@ -1040,6 +1081,34 @@
 
     .sbbs-filter-group {
         gap: var(--spacing-xs, 4px) var(--spacing-md, 12px);
+    }
+
+    /* Ten BotBooru fields become one readable column. Keep that expanded panel
+       independently scrollable so its last controls remain reachable on short
+       screens and while the software keyboard reduces the visual viewport. */
+    .sbbs-filters {
+        min-height: 0;
+        max-height: calc(var(--sb-shell-viewport-height, 100dvh) - 11rem);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding-inline-end: var(--spacing-xs, 4px);
+    }
+
+    .sbbs-filter-fields {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .sbbs-filter .text_pole,
+    .sbbs-filter-checkbox {
+        margin-block: 0;
+    }
+
+    .sbbs-filter-boolean {
+        justify-content: flex-start;
+    }
+
+    .sbbs-account-fields {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .sbbs-body {

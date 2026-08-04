@@ -7,7 +7,7 @@
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "homePage": "https://github.com/platberlitz/SillyBunny-BotSearcher",
+    "homePage": "https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher",
     "loading_order": 100,
     "auto_update": false,
     "hooks": {

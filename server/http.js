@@ -15,6 +15,7 @@
 
 import nodeFetch from 'node-fetch';
 
+import { FIELD_LIMITS, MAX_REQUEST_BYTES } from '../shared/schema.js';
 import { hasForbiddenKey } from './validate.js';
 import { UpstreamError } from './guards.js';
 
@@ -28,6 +29,46 @@ const BASE_HEADERS = Object.freeze({
 });
 
 const MAX_REDIRECTS = 2;
+const METHODS = new Set(['GET', 'POST', 'PATCH']);
+const CONTENT_TYPES = new Set(['application/json', 'application/x-www-form-urlencoded']);
+
+function requestShape(adapter, url, options) {
+    const method = typeof options.method === 'string' ? options.method.toUpperCase() : 'GET';
+    if (!METHODS.has(method)) {
+        throw new UpstreamError('method_not_allowed', adapter.id);
+    }
+
+    const body = options.body;
+    if (method === 'GET' && body !== undefined) {
+        throw new UpstreamError('body_not_allowed', adapter.id);
+    }
+    if (method !== 'GET' && (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BYTES)) {
+        throw new UpstreamError('bad_request_body', adapter.id);
+    }
+
+    const contentType = options.contentType;
+    if (body !== undefined && !CONTENT_TYPES.has(contentType)) {
+        throw new UpstreamError('content_type_not_allowed', adapter.id);
+    }
+
+    const bearerToken = options.bearerToken;
+    if (bearerToken !== undefined) {
+        if (typeof bearerToken !== 'string'
+            || bearerToken.length > FIELD_LIMITS.accountToken
+            || !/^[\x21-\x7e]+$/.test(bearerToken)) {
+            throw new UpstreamError('bad_authorization', adapter.id);
+        }
+        const authHost = typeof adapter.authHost === 'string' ? adapter.authHost.toLowerCase() : '';
+        const allowedAuthHost = authHost === 'botbooru.com' || adapter.allowInsecureForTests === true;
+        if (adapter.id !== 'botbooru'
+            || !allowedAuthHost
+            || url.hostname.toLowerCase() !== authHost) {
+            throw new UpstreamError('authorization_not_allowed', adapter.id);
+        }
+    }
+
+    return { method, body, contentType, bearerToken };
+}
 
 /**
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
@@ -60,23 +101,33 @@ function assertReachable(adapter, url) {
  *
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  * @param {URL | string} target
- * @param {{ accept: string, maxBytes: number, signal: AbortSignal, timedOut: () => boolean }} options
+ * @param {{ accept: string, maxBytes: number, signal: AbortSignal, timedOut: () => boolean, method?: string, body?: string, contentType?: string, bearerToken?: string }} options
  */
-async function request(adapter, target, { accept, maxBytes, signal, timedOut }) {
+async function request(adapter, target, options) {
     let url = target instanceof URL ? target : new URL(String(target));
     const startedAt = Date.now();
+    const { accept, maxBytes, signal, timedOut } = options;
 
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
         assertReachable(adapter, url);
+        const shape = requestShape(adapter, url, options);
+        const headers = { ...BASE_HEADERS, Accept: accept };
+        if (shape.contentType) {
+            headers['Content-Type'] = shape.contentType;
+        }
+        if (shape.bearerToken) {
+            headers.Authorization = `Bearer ${shape.bearerToken}`;
+        }
 
         let response;
         try {
             response = await nodeFetch(url.toString(), {
-                method: 'GET',
+                method: shape.method,
                 redirect: 'manual',
                 size: maxBytes,
                 signal,
-                headers: { ...BASE_HEADERS, Accept: accept },
+                headers,
+                ...(shape.body === undefined ? {} : { body: shape.body }),
             });
         } catch (error) {
             const aborted = abortCode(error, signal, timedOut);
@@ -93,6 +144,13 @@ async function request(adapter, target, { accept, maxBytes, signal, timedOut }) 
         if (!isRedirect) {
             logUpstream(adapter, url, response.status, Date.now() - startedAt);
             return response;
+        }
+
+        // Never replay a password, account mutation, or bearer token after an
+        // upstream redirect, even when the destination is on the same host.
+        if (shape.body !== undefined || shape.bearerToken !== undefined) {
+            discard(response);
+            throw new UpstreamError('credential_redirect', adapter.id);
         }
 
         const location = response.headers.get('location');
@@ -171,10 +229,18 @@ function declaredTooLarge(response, maxBytes) {
  *
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  * @param {URL | string} url
- * @param {{ maxBytes?: number, timeoutMs?: number, signal?: AbortSignal }} [options]
+ * @param {{ maxBytes?: number, timeoutMs?: number, signal?: AbortSignal, method?: string, body?: string, contentType?: string, bearerToken?: string }} [options]
  * @returns {Promise<any>}
  */
-export async function fetchJson(adapter, url, { maxBytes = 2 << 20, timeoutMs = 8000, signal } = {}) {
+export async function fetchJson(adapter, url, {
+    maxBytes = 2 << 20,
+    timeoutMs = 8000,
+    signal,
+    method,
+    body,
+    contentType,
+    bearerToken,
+} = {}) {
     const deadline = createDeadline(timeoutMs, signal);
     let response;
     try {
@@ -183,6 +249,10 @@ export async function fetchJson(adapter, url, { maxBytes = 2 << 20, timeoutMs = 
             maxBytes,
             signal: deadline.signal,
             timedOut: deadline.timedOut,
+            method,
+            body,
+            contentType,
+            bearerToken,
         });
 
         if (!response.ok) {
@@ -231,10 +301,16 @@ export async function fetchJson(adapter, url, { maxBytes = 2 << 20, timeoutMs = 
  *
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  * @param {URL | string} url
- * @param {{ accept?: string, maxBytes?: number, timeoutMs?: number, signal?: AbortSignal }} [options]
+ * @param {{ accept?: string, maxBytes?: number, timeoutMs?: number, signal?: AbortSignal, bearerToken?: string }} [options]
  * @returns {Promise<{ buffer: Buffer, contentType: string, status: number }>}
  */
-export async function fetchBytes(adapter, url, { accept = '*/*', maxBytes = 8 << 20, timeoutMs = 20000, signal } = {}) {
+export async function fetchBytes(adapter, url, {
+    accept = '*/*',
+    maxBytes = 8 << 20,
+    timeoutMs = 20000,
+    signal,
+    bearerToken,
+} = {}) {
     const deadline = createDeadline(timeoutMs, signal);
     let response;
     try {
@@ -243,6 +319,7 @@ export async function fetchBytes(adapter, url, { accept = '*/*', maxBytes = 8 <<
             maxBytes,
             signal: deadline.signal,
             timedOut: deadline.timedOut,
+            bearerToken,
         });
 
         if (!response.ok) {
@@ -290,9 +367,9 @@ function logUpstream(adapter, url, status, ms) {
  * Builds the per-adapter context handed to search()/getDetail().
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  */
-export function contextFor(adapter) {
+export function contextFor(adapter, { bearerToken } = {}) {
     return Object.freeze({
-        fetchJson: (url, options) => fetchJson(adapter, url, options),
-        fetchBytes: (url, options) => fetchBytes(adapter, url, options),
+        fetchJson: (url, options) => fetchJson(adapter, url, { ...(options ?? {}), bearerToken }),
+        fetchBytes: (url, options) => fetchBytes(adapter, url, { ...(options ?? {}), bearerToken }),
     });
 }

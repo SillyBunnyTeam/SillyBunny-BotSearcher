@@ -11,7 +11,7 @@
  */
 
 /** Bumped only when the request/response contract changes incompatibly. */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /**
  * How many sources one search may fan out to.
@@ -32,7 +32,7 @@ export const PLUGIN_ID = 'sillybunny-botsearcher';
 export const EXTENSION_NAME = 'SillyBunny-BotSearcher';
 
 /** Repository identity pinned by the host-owned exact-release updater. */
-export const REPOSITORY_URL = 'https://github.com/platberlitz/SillyBunny-BotSearcher.git';
+export const REPOSITORY_URL = 'https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git';
 
 /**
  * Fields a normalized search result may contain. `server/normalize.js` builds
@@ -85,6 +85,9 @@ export const FIELD_LIMITS = Object.freeze({
     tagLength: 48,
     tagCount: 32,
     itemsPerPage: 48,
+    accountUsername: 64,
+    accountPassword: 1024,
+    accountToken: 8192,
 });
 
 /**

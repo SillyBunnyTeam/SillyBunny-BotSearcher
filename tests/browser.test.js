@@ -153,7 +153,7 @@ test('a setting note sits beside its label, not inside it', async () => {
         window: dom.window,
         requestAnimationFrame: (callback) => setTimeout(callback, 0),
     });
-    globalThis.fetch = async () => jsonResponse({ protocol: 4, version: '0.3.0', sources: [] });
+    globalThis.fetch = async () => jsonResponse({ protocol: 5, version: '0.3.0', sources: [] });
     const settingsStore = {};
     globalThis.SillyTavern = {
         getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
@@ -190,6 +190,134 @@ test('a setting note sits beside its label, not inside it', async () => {
     }
 });
 
+test('BotBooru account settings clear passwords and expose account-wide content state', async () => {
+    const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        fetch: globalThis.fetch,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+    });
+
+    const calls = [];
+    let loginAttempts = 0;
+    const signedOut = {
+        source: 'botbooru', loggedIn: false, username: null,
+        nsfwEnabled: false, nsflEnabled: false, nsflActive: null,
+    };
+    globalThis.fetch = async (url, options = {}) => {
+        const path = String(url);
+        if (path.endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: 5,
+                version: '0.3.0',
+                sources: [{
+                    id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'],
+                    capabilities: {
+                        search: true, sorts: ['latest'], sfwToggle: true, detail: true,
+                        accountLogin: true, nsfwRequiresAccount: true,
+                    },
+                }],
+            });
+        }
+        if (path.endsWith('/capabilities')) {
+            return jsonResponse({ error: 'Forbidden' }, 403);
+        }
+        if (path.includes('/account/')) {
+            const body = JSON.parse(options.body);
+            calls.push({ path, body, options });
+            if (path.endsWith('/account/status') || path.endsWith('/account/logout')) {
+                return jsonResponse(signedOut);
+            }
+            if (path.endsWith('/account/login')) {
+                loginAttempts += 1;
+                if (loginAttempts === 1) {
+                    return jsonResponse({ error: 'botbooru_invalid_credentials' }, 401);
+                }
+                return jsonResponse({
+                    source: 'botbooru', loggedIn: true, username: 'alice',
+                    nsfwEnabled: false, nsflEnabled: true, nsflActive: true,
+                });
+            }
+            if (path.endsWith('/account/nsfw')) {
+                return jsonResponse({
+                    source: 'botbooru', loggedIn: true, username: 'alice',
+                    nsfwEnabled: body.enabled, nsflEnabled: true, nsflActive: true,
+                });
+            }
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const extensionSettings = {};
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }),
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { mountSettings } = await import('../client/settings.js?botbooru-account-settings');
+        await mountSettings();
+        await waitFor(
+            () => /Not logged in/.test(dom.window.document.querySelector('.sbbs-account-status')?.textContent ?? ''),
+            'account status did not load',
+        );
+
+        const username = dom.window.document.getElementById('sbbs_botbooru_username');
+        const password = dom.window.document.getElementById('sbbs_botbooru_password');
+        const form = dom.window.document.querySelector('.sbbs-account-login');
+        assert.equal(username.autocomplete, 'username');
+        assert.equal(password.autocomplete, 'current-password');
+        assert.equal(dom.window.document.querySelector(`label[for="${username.id}"]`)?.textContent, 'Username');
+        assert.equal(dom.window.document.querySelector(`label[for="${password.id}"]`)?.textContent, 'Password');
+
+        username.value = 'Alice';
+        password.value = 'wrong secret';
+        form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        await waitFor(() => password.value === '' && /did not accept/.test(dom.window.document.body.textContent), 'failed login did not settle');
+
+        password.value = ' exact p&+ss ';
+        form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        await waitFor(() => password.value === '' && /Logged in as alice/.test(dom.window.document.body.textContent), 'login did not settle');
+        assert.match(dom.window.document.body.textContent, /changes the BotBooru account preference on every device/);
+        assert.match(dom.window.document.body.textContent, /Non-SFW searches may include NSFL content/);
+        assert.match(dom.window.document.body.textContent, /does not revoke the token upstream/);
+
+        const loginCalls = calls.filter((call) => call.path.endsWith('/account/login'));
+        assert.equal(loginCalls[0].body.password, 'wrong secret');
+        assert.equal(loginCalls[1].body.password, ' exact p&+ss ');
+        assert.ok(loginCalls.every((call) => call.options.credentials === 'same-origin'));
+        assert.doesNotMatch(JSON.stringify(extensionSettings), /Alice|wrong secret|exact p&\+ss|token/i);
+
+        const nsfw = dom.window.document.getElementById('sbbs_botbooru_nsfw');
+        nsfw.checked = true;
+        nsfw.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(() => calls.some((call) => call.path.endsWith('/account/nsfw')) && nsfw.checked, 'NSFW setting did not update');
+        assert.deepEqual(calls.find((call) => call.path.endsWith('/account/nsfw')).body, {
+            source: 'botbooru', enabled: true,
+        });
+
+        dom.window.document.querySelector('.sbbs-account-signed-in > .menu_button').click();
+        await waitFor(() => /Not logged in/.test(dom.window.document.body.textContent), 'logout did not settle');
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('settings offer an exact-release update when a compatible server is older', async () => {
     const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div></body>', { url: 'https://local.test/' });
     const previous = {
@@ -206,7 +334,7 @@ test('settings offer an exact-release update when a compatible server is older',
     });
     globalThis.fetch = async (url) => {
         if (String(url).endsWith('/healthz')) {
-            return jsonResponse({ protocol: 4, version: '0.2.0', sources: [] });
+            return jsonResponse({ protocol: 5, version: '0.2.0', sources: [] });
         }
         if (String(url).endsWith('/capabilities')) {
             return jsonResponse({
@@ -380,7 +508,7 @@ test('closing the recovery popup does not abort an in-progress server update', a
             healthCalls++;
             return healthCalls === 1
                 ? jsonResponse({ protocol: 3, version: '0.2.0', sources: [] })
-                : jsonResponse({ protocol: 4, version: '0.3.0', sources: [] });
+                : jsonResponse({ protocol: 5, version: '0.3.0', sources: [] });
         }
         if (String(url).endsWith('/capabilities')) {
             return jsonResponse({
@@ -502,7 +630,7 @@ test('a source that fails stays in the picker and offers a reload', async () => 
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 4,
+                protocol: 5,
                 version: '0.3.0',
                 sources: [
                     // Reported down before the dialog even opens. It must still
@@ -616,6 +744,220 @@ test('a source that fails stays in the picker and offers a reload', async () => 
     }
 });
 
+test('BotBooru account changes clear protected results and rerun safely', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        MutationObserver: globalThis.MutationObserver,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        CSS: globalThis.CSS,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        MutationObserver: dom.window.MutationObserver,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+        CSS: { escape: (value) => String(value) },
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    const searches = [];
+    const details = [];
+    globalThis.fetch = async (url, options = {}) => {
+        const requestPath = String(url);
+        if (requestPath.endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: 5,
+                version: '0.3.0',
+                sources: [
+                    {
+                        id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'],
+                        capabilities: {
+                            search: true, sorts: ['latest'], sfwToggle: true, detail: true,
+                            accountLogin: true, nsfwRequiresAccount: true,
+                        },
+                    },
+                    {
+                        id: 'chub', label: 'Chub', tier: 1, state: 'up', clientHosts: ['chub.ai'],
+                        capabilities: { search: true, sorts: ['default'], sfwToggle: true, detail: true },
+                    },
+                ],
+            });
+        }
+        if (requestPath.endsWith('/account/login')) {
+            return jsonResponse({
+                source: 'botbooru', loggedIn: true, username: 'alice',
+                nsfwEnabled: true, nsflEnabled: false, nsflActive: null,
+            });
+        }
+        if (requestPath.endsWith('/account/logout')) {
+            return jsonResponse({
+                source: 'botbooru', loggedIn: false, username: null,
+                nsfwEnabled: false, nsflEnabled: false, nsflActive: null,
+            });
+        }
+        if (requestPath.endsWith('/detail')) {
+            return new Promise((resolve, reject) => {
+                const call = { body: JSON.parse(options.body), resolve };
+                details.push(call);
+                options.signal?.addEventListener('abort', () => {
+                    reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                }, { once: true });
+            });
+        }
+        if (requestPath.endsWith('/search')) {
+            return new Promise((resolve, reject) => {
+                const call = { body: JSON.parse(options.body), resolve, aborted: false };
+                searches.push(call);
+                options.signal?.addEventListener('abort', () => {
+                    call.aborted = true;
+                    reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                }, { once: true });
+            });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popupInstances = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popupInstances.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    const extensionSettings = {
+        SillyBunnyBotSearcher: {
+            _v: 4,
+            defaultSource: 'botbooru',
+            sfwOnlyDefault: false,
+        },
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+            renderExtensionTemplateAsync: async () => TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const account = await import('../client/account.js');
+        await account.loginBotbooruAccount('Alice', 'first secret');
+
+        const { openBrowser } = await import('../client/browser.js?account-lifecycle');
+        const opened = openBrowser();
+        await waitFor(() => popupInstances.length === 1 && searches.length === 1, 'protected search did not start');
+        const popup = popupInstances[0];
+        assert.equal(searches[0].body.filters.sfwOnly, false);
+
+        searches[0].resolve(jsonResponse({
+            total: 1,
+            nextCursor: 'protected-next',
+            items: [card('botbooru', 'private-1', 'Protected result', {
+                accountRef: 'signed-result-ref',
+                contentRating: 'sensitive',
+            })],
+        }));
+        await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 1, 'protected result did not render');
+
+        popup.content.querySelector('.sbbs-card-open').click();
+        await waitFor(() => details.length === 1, 'protected detail request did not start');
+        assert.deepEqual(details[0].body, {
+            source: 'botbooru',
+            id: 'private-1',
+            accountRef: 'signed-result-ref',
+        });
+        details[0].resolve(jsonResponse(card('botbooru', 'private-1', 'Protected detail', {
+            contentRating: 'sensitive',
+        })));
+        await waitFor(() => /Protected detail/.test(popup.content.textContent), 'protected detail did not render');
+        popup.content.querySelector('.sbbs-back').click();
+
+        const source = popup.content.querySelector('#sbbs_source');
+        source.value = 'chub';
+        source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(() => searches.length === 2, 'Chub search did not start');
+        searches[1].resolve(jsonResponse({
+            total: 1,
+            nextCursor: null,
+            items: [card('chub', 'author/public', 'Public result')],
+        }));
+        await waitFor(() => /Public result/.test(popup.content.textContent), 'Chub result did not render');
+
+        // A replacement login rotates the server session even if the visible
+        // account fields are unchanged. It must clear protected cache entries
+        // even while another source is selected, without refreshing that source.
+        await account.loginBotbooruAccount('Alice', 'replacement secret');
+        await tick();
+        assert.equal(searches.length, 2, 'an unrelated selected source must not refresh');
+
+        source.value = 'botbooru';
+        source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(() => searches.length === 3, 'returning to BotBooru reused protected cache');
+        assert.deepEqual(searches[2].body, searches[0].body, 'the cache test must repeat the same request');
+        searches[2].resolve(jsonResponse({
+            total: 1,
+            nextCursor: 'protected-next',
+            items: [card('botbooru', 'private-2', 'Replacement-session result', { contentRating: 'sensitive' })],
+        }));
+        await waitFor(() => /Replacement-session result/.test(popup.content.textContent), 'replacement session did not render');
+
+        popup.content.querySelector('#sbbs_more').click();
+        await waitFor(() => searches.length === 4, 'protected append did not start');
+        assert.equal(searches[3].body.cursor, 'protected-next');
+
+        await account.logoutBotbooruAccount();
+        await waitFor(() => searches.length === 5, 'logout did not start a safe refresh');
+        assert.equal(searches[3].aborted, true, 'logout must abort the protected request');
+        assert.equal(popup.content.querySelectorAll('.sbbs-card').length, 0, 'logout must remove protected cards immediately');
+        assert.equal(popup.content.querySelector('#sbbs_sfw').checked, true, 'the open dialog must fail back to SFW');
+        assert.equal(
+            extensionSettings.SillyBunnyBotSearcher.sfwOnlyDefault,
+            false,
+            'the dialog fallback must not overwrite the saved preference',
+        );
+        assert.equal(searches[4].body.filters.sfwOnly, true);
+        assert.equal(searches[4].body.cursor, null);
+
+        searches[4].resolve(jsonResponse({ total: 0, nextCursor: null, items: [] }));
+        await waitFor(() => /No cards are currently listed on Botbooru/.test(popup.content.textContent), 'safe refresh did not settle');
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('the browser is single-flight, ignores stale searches, deduplicates, and preserves append results on retry', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {
@@ -642,11 +984,12 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 4,
+                protocol: 5,
                 version: '0.3.0',
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, hideAiToggle: true, detail: true } },
                     { id: 'chub', label: 'Chub', tier: 1, state: 'up', clientHosts: ['chub.ai'], capabilities: { search: true, sorts: ['default'], sfwToggle: true, hideAiToggle: false, detail: true, filters: [{ key: 'tags', type: 'tags', label: 'Tags' }] } },
+                    { id: 'openchar', label: 'Openchar', tier: 1, state: 'up', clientHosts: ['openchar.example'], capabilities: { search: true, sorts: ['default'], detail: true } },
                 ],
             });
         }
@@ -823,11 +1166,16 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         await waitFor(() => searches.length === 7, 'the merged search did not start');
 
         const merged = searches[6].body;
-        assert.deepEqual(merged.sources, ['botbooru', 'chub'], 'a merged search names its sources');
+        assert.deepEqual(merged.sources, ['botbooru', 'chub', 'openchar'], 'a merged search names its sources');
         assert.equal(merged.source, undefined, 'and does not also name a single one');
         // No shared sort vocabulary, so each source keeps its own.
-        assert.deepEqual(Object.keys(merged.sorts).sort(), ['botbooru', 'chub']);
+        assert.deepEqual(Object.keys(merged.sorts).sort(), ['botbooru', 'chub', 'openchar']);
         assert.equal(popup.content.querySelector('#sbbs_sort').hidden, true, 'one sort control cannot drive both');
+        assert.equal(merged.filters.sfwOnly, true, 'BotBooru must stay SFW when another source lacks that filter');
+        assert.match(
+            popup.content.querySelector('#sbbs_sfw_note').textContent,
+            /enforced where a source provides a reliable filter/,
+        );
         // Chub filters tags and Botbooru does not; offering the control would
         // filter half the list silently. The panel itself stays reachable
         // because it also holds SFW only, which applies to every source.
@@ -846,41 +1194,55 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
 
         searches[6].resolve(jsonResponse({
             total: 3,
-            nextCursor: null,
+            nextCursor: 'healthy-source-next',
             items: [
                 card('botbooru', 'b1', 'From Botbooru'),
                 card('chub', 'author/c1', 'From Chub'),
             ],
-            partial: [{ source: 'chub', error: 'timeout' }],
+            partial: [
+                { source: 'chub', error: 'timeout' },
+                { source: 'botbooru', error: 'botbooru_session_expired' },
+            ],
         }));
 
-        await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 2, 'merged results did not render');
-        // Which site each result came from only matters once they are mixed.
+        await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 1, 'merged account failure did not settle');
+        // The expired account removes only BotBooru's cards; valid results from
+        // other sources stay visible and the retained account state is updated.
         assert.deepEqual(
             [...popup.content.querySelectorAll('.sbbs-card-source')].map((node) => node.textContent),
-            ['Botbooru', 'Chub'],
+            ['Chub'],
         );
+        assert.doesNotMatch(popup.content.textContent, /From Botbooru/);
+        assert.match(popup.content.textContent, /From Chub/);
         // A source that did not answer is named, not silently dropped.
         assert.match(popup.content.querySelector('#sbbs_partial').textContent, /Chub did not respond in time/);
+        assert.match(popup.content.querySelector('#sbbs_partial').textContent, /login expired/);
+        const account = await import('../client/account.js');
+        assert.equal(account.getBotbooruAccount().error, 'botbooru_session_expired');
+        assert.equal(
+            popup.content.querySelector('#sbbs_more').hidden,
+            false,
+            'a BotBooru account failure must not discard healthy-source pagination',
+        );
 
-        // ---- asking the same question twice ----
-        // Switching source rebuilds the filter panel, so this is the same
-        // unfiltered Chub search that ran earlier — and must be answered from
-        // the cache rather than the network.
+        // The account revision clears every dialog cache entry, including Chub's,
+        // because a protected page could have been cached before changing source.
         const beforeReturn = searches.length;
         source.value = 'chub';
         source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-        await waitFor(
-            () => popup.content.textContent.includes('Fresh'),
-            'switching back did not restore the earlier Chub results',
-        );
-        assert.equal(searches.length, beforeReturn, 'a repeated search must not hit the network again');
+        await waitFor(() => searches.length === beforeReturn + 1, 'account change did not clear the unrelated cache');
+        searches.at(-1).resolve(jsonResponse({
+            total: 1,
+            nextCursor: null,
+            items: [card('chub', 'author/one', 'Fresh after account change')],
+        }));
+        await waitFor(() => /Fresh after account change/.test(popup.content.textContent), 'fresh Chub result did not render');
 
         // Partial merged results are deliberately not cached: a source can
         // recover before the user returns to the same query.
         source.value = '__all__';
         source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-        await waitFor(() => searches.length === beforeReturn + 1, 'partial merged result must be refreshed');
+        await waitFor(() => searches.length === beforeReturn + 2, 'partial merged result must be refreshed');
         searches.at(-1).resolve(jsonResponse({
             total: 2,
             nextCursor: null,
@@ -890,8 +1252,16 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
             ],
         }));
         await waitFor(() => popup.content.querySelectorAll('.sbbs-card').length === 2, 'the refreshed merged search did not render');
-        assert.equal(searches.length, beforeReturn + 1, 'the recovered source must be retried');
+        assert.equal(searches.length, beforeReturn + 2, 'the recovered source must be retried');
         assert.match(popup.content.textContent, /From Botbooru/);
+
+        // With account state stable again, the newly fetched Chub page is safe
+        // to reuse for the same request.
+        const beforeCachedReturn = searches.length;
+        source.value = 'chub';
+        source.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+        await waitFor(() => /Fresh after account change/.test(popup.content.textContent), 'stable cache was not reused');
+        assert.equal(searches.length, beforeCachedReturn, 'a stable repeated search must not hit the network');
 
         // ---- typing does not fire a request per keystroke ----
         const queryBox = popup.content.querySelector('#sbbs_query');

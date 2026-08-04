@@ -142,7 +142,7 @@ test('server-plugin update waits for a new boot and verifies the active release'
             return jsonResponse({ serverBootId: versionCalls === 1 ? 'old-boot' : 'new-boot' });
         }
         if (String(url).endsWith('/healthz')) {
-            return jsonResponse({ protocol: 4, version: '0.3.0', sources: [] });
+            return jsonResponse({ protocol: 5, version: '0.3.0', sources: [] });
         }
         throw new Error(`unexpected request: ${url}`);
     });

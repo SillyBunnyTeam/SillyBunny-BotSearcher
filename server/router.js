@@ -29,7 +29,7 @@ import { wrap, jsonGuard, jsonGuardWithLimit, fail, UpstreamError, SAFE_UPSTREAM
 import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey, readFilters } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, acquireThumbnail, callerKey } from './limits.js';
-import { mintCursor, verifyCursor, verifyRef, mintToken, verifyToken } from './refs.js';
+import { mintCursor, verifyCursor, verifyRef, mintRef, mintToken, verifyToken } from './refs.js';
 import { interleave, dedupe, identityFingerprint, sharePageBudget } from './merge.js';
 import { BadCursorError } from './paging.js';
 import { detectImageType } from './imagetype.js';
@@ -45,6 +45,7 @@ import {
 } from './health.js';
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
 import { getVocabulary, hasVocabulary } from './vocabulary.js';
+import { AccountError, accountProfileHandle, createBotbooruAccounts } from './accounts.js';
 
 /**
  * Default thumbnail cap. A 320px preview is 20-60 KB, so anything near this is
@@ -65,13 +66,22 @@ const HARD_MAX_THUMB_BYTES = 6 * 1024 * 1024;
  * never be replayed as a merged one, or the reverse.
  */
 const MULTI_CURSOR_SCOPE = 'cursor:multi';
+const BOTBOORU_ACCOUNT_SCOPE = 'account-result:botbooru';
 const MAX_CARRIED_DEDUPE = 64;
+const TERMINAL_ACCOUNT_PARTIALS = new Set([
+    'account_profile_required',
+    'botbooru_login_required',
+    'botbooru_session_expired',
+    'botbooru_nsfw_disabled',
+]);
 
 /**
  * @param {import('express').Router} router
  * @param {{ startedAt: number }} state
  */
 export function createRouter(router, state) {
+    const accounts = state.accounts ?? createBotbooruAccounts();
+
     router.get('/healthz', wrap(async (_request, response) => {
         response.json({
             ok: true,
@@ -90,6 +100,76 @@ export function createRouter(router, state) {
         }
         reset(resolved.adapter.id);
         response.json({ ok: true, state: stateOf(resolved.adapter.id) });
+    }));
+
+    router.post('/account/status', jsonGuard, wrap(async (request, response) => {
+        response.set('Cache-Control', 'no-store');
+        const resolved = resolveAccountSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const handle = accountHandle(request, response);
+        if (!handle) {
+            return;
+        }
+        await respondWithAccount(response, () => accounts.status(handle));
+    }));
+
+    router.post('/account/login', jsonGuard, wrap(async (request, response) => {
+        response.set('Cache-Control', 'no-store');
+        const resolved = resolveAccountSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const handle = accountHandle(request, response);
+        if (!handle) {
+            return;
+        }
+
+        const limited = await consume('accountLogin', handle, { failClosed: true });
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+
+        await respondWithAccount(response, () => accounts.login(
+            handle,
+            own(request.body, 'username'),
+            own(request.body, 'password'),
+        ));
+    }));
+
+    router.post('/account/nsfw', jsonGuard, wrap(async (request, response) => {
+        response.set('Cache-Control', 'no-store');
+        const resolved = resolveAccountSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const handle = accountHandle(request, response);
+        if (!handle) {
+            return;
+        }
+        const limited = await consume('accountMutation', handle, { failClosed: true });
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+        await respondWithAccount(response, () => accounts.setNsfw(handle, own(request.body, 'enabled')));
+    }));
+
+    router.post('/account/logout', jsonGuard, wrap(async (request, response) => {
+        response.set('Cache-Control', 'no-store');
+        const resolved = resolveAccountSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const handle = accountHandle(request, response);
+        if (!handle) {
+            return;
+        }
+        await respondWithAccount(response, () => accounts.logout(handle));
     }));
 
     router.post('/tags', jsonGuard, wrap(async (request, response) => {
@@ -214,12 +294,29 @@ export function createRouter(router, state) {
                 HARD_MAX_THUMB_BYTES,
             );
 
-            const result = await fetchBytes(adapter, url, {
+            const fetchOptions = {
                 accept: 'image/webp,image/png,image/jpeg,image/avif,image/gif;q=0.8,*/*;q=0.5',
                 maxBytes,
                 timeoutMs: 15000,
                 signal: disconnected.signal,
-            });
+            };
+            let result;
+            const sessionNonce = own(payload, 's');
+            if (adapter.id === 'botbooru' && sessionNonce !== undefined) {
+                response.set('Cache-Control', 'private, no-store');
+                let ctx;
+                try {
+                    ctx = await accounts.thumbnailRequest(accountProfileHandle(request), sessionNonce);
+                } catch (error) {
+                    if (sendAccountError(response, error)) {
+                        return;
+                    }
+                    throw error;
+                }
+                result = await ctx.fetchBytes(url, fetchOptions);
+            } else {
+                result = await fetchBytes(adapter, url, fetchOptions);
+            }
 
             // Magic bytes decide, not the upstream header. SVG is not in the
             // whitelist, so an SVG labelled image/png is refused here.
@@ -236,8 +333,11 @@ export function createRouter(router, state) {
                 // Per-response CSP works even though the app sets none globally.
                 'Content-Security-Policy': "default-src 'none'; sandbox",
                 'Cross-Origin-Resource-Policy': 'same-origin',
-                // The browser cache absorbs repeats, which is where the savings are.
-                'Cache-Control': 'private, max-age=86400, immutable',
+                // A protected response must re-check the live session on every
+                // load. Public thumbnails can retain the original long cache.
+                'Cache-Control': sessionNonce === undefined
+                    ? 'private, max-age=86400, immutable'
+                    : 'private, no-store',
             });
             response.once?.('finish', releaseAll);
             response.once?.('close', releaseAll);
@@ -259,7 +359,7 @@ export function createRouter(router, state) {
                 fail(response, 400, 'bad_source');
                 return;
             }
-            await searchMany(request, response, many);
+            await searchMany(request, response, many, accounts);
             return;
         }
 
@@ -289,15 +389,40 @@ export function createRouter(router, state) {
             return;
         }
 
+        if (!isDown(adapter.id)) {
+            try {
+                preflightSearchFor(accounts, request, adapter, args);
+            } catch (error) {
+                if (sendAccountError(response, error)) {
+                    return;
+                }
+                throw error;
+            }
+        }
+
         const gate = await gateRequest(request, response, adapter.id, 'search');
         if (!gate) {
             return;
         }
 
+        let sourceRequest;
         try {
+            try {
+                sourceRequest = await searchRequestFor(accounts, request, adapter, args);
+            } catch (error) {
+                if (sendAccountError(response, error)) {
+                    return;
+                }
+                throw error;
+            }
+
             let result;
             try {
-                result = await callAdapter(adapter, () => adapter.search(contextFor(adapter), args));
+                result = await callAdapter(
+                    adapter,
+                    () => adapter.search(sourceRequest.context, args),
+                    { ignoreAuthenticationFailure: sourceRequest.sessionNonce !== null },
+                );
             } catch (error) {
                 if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
                     fail(response, 400, 'bad_cursor');
@@ -307,10 +432,16 @@ export function createRouter(router, state) {
                     respondWithDirectPlan(response, adapter, 'search', args);
                     return;
                 }
+                const translated = authenticatedFailure(accounts, request, sourceRequest, error);
+                if (translated) {
+                    if (sendAccountError(response, translated)) {
+                        return;
+                    }
+                }
                 throw error;
             }
 
-            response.json(shapeSearchResponse(adapter, result, args.limit));
+            response.json(shapeSearchResponse(adapter, result, args.limit, sourceRequest.sessionNonce));
         } finally {
             gate.release();
         }
@@ -522,13 +653,28 @@ export function createRouter(router, state) {
         }
 
         try {
+            let sourceRequest;
+            try {
+                sourceRequest = await detailRequestFor(accounts, request, adapter, id);
+            } catch (error) {
+                if (sendAccountError(response, error)) {
+                    return;
+                }
+                throw error;
+            }
             let detail;
             try {
-                detail = await callAdapter(adapter, () => adapter.getDetail(contextFor(adapter), id), { trackHealth: false });
+                detail = await callAdapter(adapter, () => adapter.getDetail(sourceRequest.context, id), { trackHealth: false });
             } catch (error) {
                 if (canReroute(adapter, error) && typeof adapter.buildDetailUrl === 'function') {
                     respondWithDirectPlan(response, adapter, 'detail', null, id);
                     return;
+                }
+                const translated = authenticatedFailure(accounts, request, sourceRequest, error);
+                if (translated) {
+                    if (sendAccountError(response, translated)) {
+                        return;
+                    }
                 }
                 throw error;
             }
@@ -536,7 +682,7 @@ export function createRouter(router, state) {
                 fail(response, 502, 'bad_json');
                 return;
             }
-            response.json(detail);
+            response.json(bindProtectedRef(adapter, detail, sourceRequest.sessionNonce));
         } finally {
             gate.release();
         }
@@ -573,14 +719,18 @@ function buildSearchArgs(adapter, body, { parseCursor = true } = {}) {
         sort: pick(own(body, 'sort'), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
         // Only honour a filter the source can actually apply, so the UI is
         // never able to imply filtering that is not happening.
-        sfwOnly: adapter.capabilities.sfwToggle ? own(filters, 'sfwOnly') === true : false,
+        sfwOnly: adapter.capabilities.sfwToggle
+            ? (adapter.capabilities.nsfwRequiresAccount === true
+                ? own(filters, 'sfwOnly') !== false
+                : own(filters, 'sfwOnly') === true)
+            : false,
         hideAi: adapter.capabilities.hideAiToggle ? own(filters, 'hideAi') === true : false,
         filters: readFilters(filters, adapter.capabilities.filters),
     };
 }
 
 /** Shapes an adapter search result into the wire response. */
-function shapeSearchResponse(adapter, result, limit) {
+function shapeSearchResponse(adapter, result, limit, sessionNonce = null) {
     return {
         total: typeof result?.total === 'number' && Number.isFinite(result.total)
             ? Math.max(0, Math.floor(result.total))
@@ -589,9 +739,33 @@ function shapeSearchResponse(adapter, result, limit) {
             ? mintCursor(adapter.id, result.next)
             : null,
         items: Array.isArray(result?.items)
-            ? result.items.filter((item) => item?.source === adapter.id).slice(0, limit)
+            ? result.items
+                .filter((item) => item?.source === adapter.id)
+                .slice(0, limit)
+                .map((item) => bindProtectedRef(adapter, item, sessionNonce))
             : [],
     };
+}
+
+function bindProtectedRef(adapter, record, sessionNonce) {
+    if (adapter.id !== 'botbooru' || typeof sessionNonce !== 'string' || typeof record?.id !== 'string') {
+        return record;
+    }
+
+    const accountRef = mintToken(BOTBOORU_ACCOUNT_SCOPE, { i: record.id, s: sessionNonce });
+    let protectedRecord = accountRef ? { ...record, accountRef } : record;
+    if (typeof record.thumbRef !== 'string') {
+        return protectedRecord;
+    }
+    const payload = verifyRef(adapter.id, record.thumbRef);
+    if (!payload) {
+        return protectedRecord;
+    }
+    const thumbRef = mintRef(adapter.id, { ...payload, s: sessionNonce });
+    if (thumbRef) {
+        protectedRecord = { ...protectedRecord, thumbRef };
+    }
+    return protectedRecord;
 }
 
 /**
@@ -679,7 +853,7 @@ function readSourceIds(body) {
  * search. One site being down should cost the user that site's results, not
  * their query.
  */
-async function searchMany(request, response, ids) {
+async function searchMany(request, response, ids, accounts) {
     const body = request.body;
     const rawCursor = own(body, 'cursor');
     /** @type {Record<string, unknown> | null} */
@@ -737,16 +911,35 @@ async function searchMany(request, response, ids) {
             cursor: carried ? (own(carried, id) ?? null) : null,
         };
 
+        if (!isDown(id)) {
+            try {
+                preflightSearchFor(accounts, request, adapter, args);
+            } catch (error) {
+                return { id, error: partialErrorCode(error) };
+            }
+        }
+
         const gate = await gateSource(caller, id);
         if (!gate.ok) {
             return { id, error: gate.code };
         }
 
+        let sourceRequest;
         try {
-            const result = await callAdapter(adapter, () => adapter.search(contextFor(adapter), args));
-            return { id, result };
+            try {
+                sourceRequest = await searchRequestFor(accounts, request, adapter, args);
+            } catch (error) {
+                return { id, error: partialErrorCode(error) };
+            }
+            const result = await callAdapter(
+                adapter,
+                () => adapter.search(sourceRequest.context, args),
+                { ignoreAuthenticationFailure: sourceRequest.sessionNonce !== null },
+            );
+            return { id, result, sessionNonce: sourceRequest.sessionNonce };
         } catch (error) {
-            return { id, error: partialErrorCode(error) };
+            const translated = authenticatedFailure(accounts, request, sourceRequest, error);
+            return { id, error: partialErrorCode(translated ?? error) };
         } finally {
             gate.release();
         }
@@ -764,15 +957,19 @@ async function searchMany(request, response, ids) {
             partial.push({ source: outcome.id, error: outcome.error });
             // Keep the prior cursor (or a null first-page marker) so a transient
             // failure can rejoin a later page instead of disappearing forever.
-            nextBySource[outcome.id] = carried && own(carried, outcome.id) !== undefined
-                ? own(carried, outcome.id)
-                : null;
+            if (!TERMINAL_ACCOUNT_PARTIALS.has(outcome.error)) {
+                nextBySource[outcome.id] = carried && own(carried, outcome.id) !== undefined
+                    ? own(carried, outcome.id)
+                    : null;
+            }
             totalKnown = false;
             continue;
         }
         succeeded = true;
         const items = Array.isArray(outcome.result?.items)
-            ? outcome.result.items.filter((item) => item?.source === outcome.id)
+            ? outcome.result.items
+                .filter((item) => item?.source === outcome.id)
+                .map((item) => bindProtectedRef(getSource(outcome.id), item, outcome.sessionNonce))
             : [];
         groups.push({ source: outcome.id, items });
 
@@ -826,6 +1023,9 @@ async function gateSource(caller, sourceId) {
 
 /** The classification a partial failure may carry, with details stripped. */
 function partialErrorCode(error) {
+    if (error instanceof AccountError) {
+        return error.code;
+    }
     if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
         return 'bad_cursor';
     }
@@ -833,6 +1033,86 @@ function partialErrorCode(error) {
         return SAFE_UPSTREAM_CODES.has(error.code) ? error.code : 'upstream_failed';
     }
     return 'upstream_failed';
+}
+
+async function respondWithAccount(response, operation) {
+    try {
+        response.json(await operation());
+    } catch (error) {
+        if (!sendAccountError(response, error)) {
+            throw error;
+        }
+    }
+}
+
+function sendAccountError(response, error) {
+    if (!(error instanceof AccountError)) {
+        return false;
+    }
+    fail(response, error.status, error.code);
+    return true;
+}
+
+function resolveAccountSource(request, response) {
+    const resolved = resolveSource(request, response);
+    if (!resolved) {
+        return null;
+    }
+    if (resolved.adapter.id !== 'botbooru' || resolved.adapter.capabilities.accountLogin !== true) {
+        fail(response, 400, 'account_unsupported');
+        return null;
+    }
+    return resolved;
+}
+
+function accountHandle(request, response) {
+    const handle = accountProfileHandle(request);
+    if (handle === null) {
+        fail(response, 401, 'account_profile_required');
+    }
+    return handle;
+}
+
+async function searchRequestFor(accounts, request, adapter, args) {
+    if (adapter.id !== 'botbooru' || adapter.capabilities.nsfwRequiresAccount !== true) {
+        return { context: contextFor(adapter), sessionNonce: null };
+    }
+    return accounts.searchRequest(accountProfileHandle(request), args.sfwOnly);
+}
+
+function preflightSearchFor(accounts, request, adapter, args) {
+    if (adapter.id === 'botbooru' && adapter.capabilities.nsfwRequiresAccount === true
+        && typeof accounts.preflightSearch === 'function') {
+        accounts.preflightSearch(accountProfileHandle(request), args.sfwOnly);
+    }
+}
+
+async function detailRequestFor(accounts, request, adapter, id) {
+    if (adapter.id !== 'botbooru' || adapter.capabilities.accountLogin !== true) {
+        return { context: contextFor(adapter), sessionNonce: null };
+    }
+    const ref = own(request.body, 'accountRef');
+    if (ref === undefined) {
+        return accounts.detailRequest(accountProfileHandle(request), null);
+    }
+    const payload = verifyToken(BOTBOORU_ACCOUNT_SCOPE, ref);
+    const protectedId = own(payload, 'i');
+    const sessionNonce = own(payload, 's');
+    if (protectedId !== id || typeof sessionNonce !== 'string') {
+        throw new AccountError('botbooru_account_changed', 409);
+    }
+    return accounts.detailRequest(accountProfileHandle(request), sessionNonce);
+}
+
+function authenticatedFailure(accounts, request, sourceRequest, error) {
+    if (typeof sourceRequest?.sessionNonce !== 'string'
+        || !(error instanceof UpstreamError)
+        || error.code !== 'http_error'
+        || String(error.detail) !== '401') {
+        return null;
+    }
+    accounts.invalidate(accountProfileHandle(request), sourceRequest.sessionNonce);
+    return new AccountError('botbooru_session_expired', 401);
 }
 
 /**
@@ -886,7 +1166,7 @@ function cardFileName(sourceId, id, kind) {
  * Runs an adapter call and records the outcome with the circuit breaker, so a
  * source that has gone away stops being retried on every keystroke.
  */
-async function callAdapter(adapter, fn, { trackHealth = true } = {}) {
+async function callAdapter(adapter, fn, { trackHealth = true, ignoreAuthenticationFailure = false } = {}) {
     try {
         const result = await fn();
         if (trackHealth) {
@@ -894,10 +1174,14 @@ async function callAdapter(adapter, fn, { trackHealth = true } = {}) {
         }
         return result;
     } catch (error) {
-        if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
+        if (error instanceof AccountError || error instanceof BadCursorError || error?.code === 'bad_cursor') {
             throw error;
         }
-        if (trackHealth) {
+        const authenticationFailure = ignoreAuthenticationFailure
+            && error instanceof UpstreamError
+            && error.code === 'http_error'
+            && ['401', '403'].includes(String(error.detail));
+        if (trackHealth && !authenticationFailure) {
             markFailure(adapter.id, error);
         }
         throw error;

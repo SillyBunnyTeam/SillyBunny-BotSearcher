@@ -9,7 +9,7 @@
                 <p>From your SillyBunny folder, use Git Bash (including on Windows) to install the matching server-plugin release and its production dependencies:</p>
                 <pre class="sbbs-install-code"><code>set -eu
 RELEASE=<span class="sbbs-release-tag">v0.3.0</span>
-git clone --branch "$RELEASE" --depth 1 https://github.com/platberlitz/SillyBunny-BotSearcher.git plugins/SillyBunny-BotSearcher
+git clone --branch "$RELEASE" --depth 1 https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git plugins/SillyBunny-BotSearcher
 npm --prefix plugins/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts --no-audit --no-fund</code></pre>
             </li>
             <li>
@@ -31,7 +31,7 @@ enableServerPluginsAutoUpdate: false</code></pre>
         <p>Manual fallback from your SillyBunny folder. Stop SillyBunny completely, then run the complete block in Git Bash (including on Windows). It stops unless this directory is the checkout root, the official remote matches, tracked status is clean, and the installed stable version is older than <span class="sbbs-release-tag">v0.3.0</span>:</p>
         <pre class="sbbs-install-code"><code>set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
-REPO=https://github.com/platberlitz/SillyBunny-BotSearcher.git
+REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 RELEASE=<span class="sbbs-release-tag">v0.3.0</span>
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" &amp;&amp; pwd -P)"

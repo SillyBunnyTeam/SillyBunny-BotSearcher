@@ -23,7 +23,7 @@
     "license": "AGPL-3.0",
     "repository": {
         "type": "git",
-        "url": "https://github.com/platberlitz/SillyBunny-BotSearcher.git"
+        "url": "https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git"
     },
     "sillybunny": {
         "serverPlugin": {

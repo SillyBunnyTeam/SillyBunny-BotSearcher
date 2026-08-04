@@ -1,12 +1,10 @@
 /**
  * Botbooru — https://botbooru.com
  *
- * Tier 0 and the reference adapter. Two things make it the right first source:
- * its JSON API is clean and unauthenticated, and SillyBunny already imports
- * botbooru.com natively (src/endpoints/content-manager.js:1631 dispatches to
- * downloadBotbooruCharacter, which re-asserts the PNG signature itself). So
- * importing reuses SillyBunny's existing URL importer; this adapter supplies
- * discovery and a server-built URL rather than another download path.
+ * Tier 0 and the reference adapter. Its public catalogue is available without
+ * credentials, while account-visible results use a server-held bearer token.
+ * SillyBunny already imports botbooru.com natively, so this adapter supplies
+ * discovery and a fixed download URL rather than another download path.
  *
  * Endpoints, all verified live:
  *   GET /posts/?q=&qtext=&limit=&offset=&sort=...  -> { total, posts[] }
@@ -14,6 +12,8 @@
  *   GET /post/<id>                                -> full card metadata
  *   GET /images/preview/<320|640>/<filename>      -> thumbnail
  *   GET /api/post-count                           -> { total }
+ *   POST /auth/token                              -> bearer token
+ *   GET/PATCH /auth/me                            -> account preferences
  */
 
 import { buildSummary, buildDetail } from '../normalize.js';
@@ -210,8 +210,7 @@ function toSummary(post) {
         thumbUrl: previewUrl(post, 'grid'),
         thumbRef: previewRef(post),
         pageUrl: id ? `${BASE}/character/${id}` : null,
-        // Accepted by content-manager.js's parseBotbooruUrl -> /download/png/<id>.
-        importUrl: id ? `${BASE}/character/${id}` : null,
+        importUrl: id ? `${BASE}/download/png/${id}` : null,
         nativeImport: true,
     });
 }
@@ -240,7 +239,7 @@ function toDetail(post, id) {
         thumbUrl: previewUrl(post, 'detail'),
         thumbRef: previewRef(post),
         pageUrl: `${BASE}/character/${id}`,
-        importUrl: `${BASE}/character/${id}`,
+        importUrl: `${BASE}/download/png/${id}`,
         nativeImport: true,
         description: own(post, 'description'),
         firstMessage: own(post, 'first_mes'),
@@ -301,6 +300,7 @@ export const botbooru = Object.freeze({
     label: 'Botbooru',
     homepage: BASE,
     allowedHosts: Object.freeze(['botbooru.com']),
+    authHost: 'botbooru.com',
     idPattern: /^\d{1,12}$/,
     tier: 0,
     nativeImport: true,
@@ -313,6 +313,8 @@ export const botbooru = Object.freeze({
         hideAiToggle: true,
         detail: true,
         tagVocabulary: true,
+        accountLogin: true,
+        nsfwRequiresAccount: true,
         filters: FILTERS,
     }),
 
@@ -440,8 +442,46 @@ export const botbooru = Object.freeze({
         return toDetail(post, id);
     },
 
+    async login(ctx, username, password) {
+        const body = new URLSearchParams({ username, password }).toString();
+        const data = await ctx.fetchJson(new URL('/auth/token', BASE), {
+            method: 'POST',
+            body,
+            contentType: 'application/x-www-form-urlencoded',
+            maxBytes: 64 * 1024,
+            timeoutMs: 10000,
+        });
+        return own(data, 'access_token');
+    },
+
+    async getAccount(ctx, fallbackUsername = '') {
+        const data = await ctx.fetchJson(new URL('/auth/me', BASE), {
+            maxBytes: 256 * 1024,
+            timeoutMs: 8000,
+        });
+        const upstreamUsername = own(data, 'username');
+        return {
+            username: typeof upstreamUsername === 'string' ? upstreamUsername : fallbackUsername,
+            showNsfw: own(data, 'show_nsfw') === true,
+            showNsfl: own(data, 'show_nsfl') === true,
+            showNsflActive: typeof own(data, 'show_nsfl_active') === 'boolean'
+                ? own(data, 'show_nsfl_active')
+                : null,
+        };
+    },
+
+    async updateNsfw(ctx, enabled) {
+        await ctx.fetchJson(new URL('/auth/me', BASE), {
+            method: 'PATCH',
+            body: JSON.stringify({ show_nsfw: enabled === true }),
+            contentType: 'application/json',
+            maxBytes: 256 * 1024,
+            timeoutMs: 8000,
+        });
+    },
+
     getImportTarget(_ctx, id) {
-        return { kind: 'url', url: `${BASE}/character/${id}` };
+        return { kind: 'url', url: `${BASE}/download/png/${id}` };
     },
 
     /**

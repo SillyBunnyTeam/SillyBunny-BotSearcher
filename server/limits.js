@@ -27,6 +27,10 @@ const limiters = {
     sourceGlobal: new RateLimiterMemory({ points: 20, duration: 60 }),
     /** Per user: fetching card bytes is the expensive path. */
     card: new RateLimiterMemory({ points: 10, duration: 60 }),
+    /** Per profile: password attempts must stay low even when searches are busy. */
+    accountLogin: new RateLimiterMemory({ points: 5, duration: 10 * 60 }),
+    /** Per profile: each preference change performs both a PATCH and a verification GET. */
+    accountMutation: new RateLimiterMemory({ points: 12, duration: 60 }),
     /** Per user: one 24-tile grid fires 24 of these at once. */
     thumbUser: new RateLimiterMemory({ points: 300, duration: 60 }),
     /** Bounds total thumbnail egress even when many users are active. */

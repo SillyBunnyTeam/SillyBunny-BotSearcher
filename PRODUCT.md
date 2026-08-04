@@ -6,7 +6,7 @@ product
 
 ## Users
 
-BotSearcher is primarily for SillyBunny users who want to find and import character cards from supported public catalogs without leaving SillyBunny. They need clear search controls, useful source and content information, and direct guidance when a source or required component is unavailable.
+BotSearcher is primarily for SillyBunny users who want to find and import character cards from supported public and account-visible catalogs without leaving SillyBunny. They need clear search controls, useful source and content information, and direct guidance when a source or required component is unavailable.
 
 Operators and maintainers are the secondary audience. They install the server plugin, manage its configuration, diagnose source failures, and verify releases.
 

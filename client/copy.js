@@ -232,6 +232,18 @@ export function directRoutingNotice(sourceLabel, reason) {
 
 export function searchErrorMessage(error, sourceLabel) {
     switch (error?.code) {
+        case 'botbooru_login_required':
+            return 'Log in to BotBooru under Extensions > BotSearcher to search non-SFW results.';
+        case 'botbooru_session_expired':
+            return 'Your BotBooru login expired. Log in again under Extensions > BotSearcher.';
+        case 'botbooru_nsfw_disabled':
+            return 'Enable NSFW for the BotBooru account under Extensions > BotSearcher, or search SFW only.';
+        case 'botbooru_auth_unavailable':
+            return 'BotBooru account access is unavailable. Try again shortly.';
+        case 'account_profile_required':
+            return 'Select a SillyBunny profile before using a BotBooru account.';
+        case 'botbooru_account_changed':
+            return 'The BotBooru account changed during this request. Try again.';
         case 'timeout':
             return `${sourceLabel} did not respond in time. Try again.`;
         case 'rate_limited':
@@ -262,6 +274,16 @@ export function searchErrorMessage(error, sourceLabel) {
 
 export function detailErrorMessage(error, sourceLabel) {
     switch (error?.code) {
+        case 'botbooru_login_required':
+            return 'Log in to BotBooru under Extensions > BotSearcher to load this card.';
+        case 'botbooru_session_expired':
+            return 'Your BotBooru login expired. Log in again under Extensions > BotSearcher.';
+        case 'botbooru_auth_unavailable':
+            return 'BotBooru account access is unavailable. Try again shortly.';
+        case 'botbooru_nsfw_disabled':
+            return 'NSFW is disabled for this BotBooru account. Search again in SFW mode.';
+        case 'botbooru_account_changed':
+            return 'The BotBooru account changed after this result loaded. Search again.';
         case 'timeout':
             return `${sourceLabel} did not respond in time.`;
         case 'rate_limited':
@@ -270,6 +292,31 @@ export function detailErrorMessage(error, sourceLabel) {
             return `${sourceLabel} is busy. Try again shortly.`;
         default:
             return `Could not load this card from ${sourceLabel}.`;
+    }
+}
+
+export function accountErrorMessage(error) {
+    switch (error?.code) {
+        case 'botbooru_invalid_credentials':
+            return 'BotBooru did not accept that username and password.';
+        case 'botbooru_login_required':
+            return 'Log in to BotBooru first.';
+        case 'botbooru_session_expired':
+            return 'Your BotBooru login expired. Log in again.';
+        case 'botbooru_nsfw_disabled':
+            return 'NSFW is disabled for this BotBooru account.';
+        case 'botbooru_auth_unavailable':
+            return 'BotBooru account access is unavailable. Try again shortly.';
+        case 'account_profile_required':
+            return 'Select a SillyBunny profile before logging in to BotBooru.';
+        case 'botbooru_account_changed':
+            return 'The BotBooru account changed during this request. Try again.';
+        case 'bad_account_request':
+            return 'Enter a valid BotBooru username and password.';
+        case 'rate_limited':
+            return 'Too many login attempts. Wait before trying again.';
+        default:
+            return 'Could not update the BotBooru account. Try again.';
     }
 }
 

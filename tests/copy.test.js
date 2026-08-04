@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
     SORT_LABELS,
     additionalImportContents,
+    accountErrorMessage,
     availabilityCopy,
     compareReleaseVersions,
     detailErrorMessage,
@@ -273,6 +274,17 @@ test('search and detail errors use direct recovery copy', () => {
     assert.equal(detailErrorMessage({ code: 'rate_limited' }, 'Chub'), 'Too many requests. Wait a moment and try again.');
     assert.equal(detailErrorMessage({ code: 'source_busy' }, 'Chub'), 'Chub is busy. Try again shortly.');
     assert.equal(detailErrorMessage({}, 'Chub'), 'Could not load this card from Chub.');
+});
+
+test('BotBooru account errors point to the setting that resolves them', () => {
+    assert.match(searchErrorMessage({ code: 'botbooru_login_required' }, 'Botbooru'), /Extensions > BotSearcher/);
+    assert.match(searchErrorMessage({ code: 'botbooru_session_expired' }, 'Botbooru'), /expired/);
+    assert.match(searchErrorMessage({ code: 'botbooru_nsfw_disabled' }, 'Botbooru'), /Enable NSFW/);
+    assert.match(detailErrorMessage({ code: 'botbooru_login_required' }, 'Botbooru'), /Extensions > BotSearcher/);
+    assert.match(detailErrorMessage({ code: 'botbooru_account_changed' }, 'Botbooru'), /Search again/);
+    assert.match(accountErrorMessage({ code: 'botbooru_invalid_credentials' }), /username and password/);
+    assert.match(accountErrorMessage({ code: 'rate_limited' }), /Too many login attempts/);
+    assert.doesNotMatch(accountErrorMessage({ message: 'upstream secret detail' }), /secret detail/);
 });
 
 test('import errors explain the failure without claiming certainty', () => {

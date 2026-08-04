@@ -11,6 +11,7 @@
 import { el, setText, setImgSafe, setLinkSafe } from './render.js';
 import { postRouted, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
+import { noteBotbooruAccountError } from './account.js';
 import { commitPreparedCardImport, importCard, openCharacter, prepareCardImport } from './importer.js';
 import {
     additionalImportContents,
@@ -52,13 +53,20 @@ export async function showDetail(container, summary, source, onBack, options = {
 
     let card;
     try {
-        card = await postRouted('/detail', { source: source.id, id: summary.id }, source, {
+        const body = { source: source.id, id: summary.id };
+        if (typeof summary.accountRef === 'string' && summary.accountRef !== '') {
+            body.accountRef = summary.accountRef;
+        }
+        card = await postRouted('/detail', body, source, {
             signal,
             allowDirect: settings.allowDirectRequests,
             onDirect,
         });
     } catch (error) {
         if (error?.name === 'AbortError' || signal?.aborted) {
+            return;
+        }
+        if (source.id === 'botbooru' && noteBotbooruAccountError(error)) {
             return;
         }
         setText(loading, detailErrorMessage(error, source.label));

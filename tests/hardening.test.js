@@ -261,6 +261,106 @@ test('outbound requests carry no cookie, authorization or referer', async () => 
     }
 });
 
+test('BotBooru login uses a fixed form POST without forwarding browser headers', async () => {
+    let receivedBody = '';
+    const server = await upstream((req, res) => {
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => { receivedBody += chunk; });
+        req.on('end', () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end('{"access_token":"opaque"}');
+        });
+    });
+
+    try {
+        const adapter = {
+            id: 'botbooru',
+            allowedHosts: ['127.0.0.1'],
+            authHost: '127.0.0.1',
+            allowInsecureForTests: true,
+        };
+        const body = new URLSearchParams({ username: 'Alice Example', password: ' p&+ss ' }).toString();
+        const result = await fetchJson(adapter, `http://127.0.0.1:${server.port}/auth/token`, {
+            method: 'POST',
+            body,
+            contentType: 'application/x-www-form-urlencoded',
+            timeoutMs: 5000,
+        });
+
+        assert.deepEqual(result, { access_token: 'opaque' });
+        assert.equal(server.requests[0].url, '/auth/token');
+        assert.equal(server.requests[0].headers['content-type'], 'application/x-www-form-urlencoded');
+        assert.equal(server.requests[0].headers.authorization, undefined);
+        assert.equal(receivedBody, body);
+        assert.equal(new URLSearchParams(receivedBody).get('password'), ' p&+ss ');
+    } finally {
+        await server.close();
+    }
+});
+
+test('only an explicit BotBooru context can send a bearer to its exact host', async () => {
+    const server = await upstream((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+    });
+
+    try {
+        const url = `http://127.0.0.1:${server.port}/auth/me`;
+        const botbooru = {
+            id: 'botbooru',
+            allowedHosts: ['127.0.0.1'],
+            authHost: '127.0.0.1',
+            allowInsecureForTests: true,
+        };
+        await fetchJson(botbooru, url, { bearerToken: 'opaque-token', timeoutMs: 5000 });
+        assert.equal(server.requests[0].headers.authorization, 'Bearer opaque-token');
+        for (const header of ['cookie', 'referer', 'origin', 'x-csrf-token', 'x-forwarded-for']) {
+            assert.equal(server.requests[0].headers[header], undefined);
+        }
+
+        await assert.rejects(
+            () => fetchJson(testAdapter(['127.0.0.1']), url, { bearerToken: 'opaque-token' }),
+            (error) => error.code === 'authorization_not_allowed',
+        );
+        assert.equal(server.requests.length, 1, 'a non-BotBooru adapter must be rejected before egress');
+    } finally {
+        await server.close();
+    }
+});
+
+test('credential-bearing requests refuse redirects without replaying the secret', async () => {
+    const server = await upstream((req, res) => {
+        if (req.url === '/start') {
+            res.writeHead(302, { Location: '/redirected' });
+            res.end();
+            return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"leaked":true}');
+    });
+
+    try {
+        const adapter = {
+            id: 'botbooru',
+            allowedHosts: ['127.0.0.1'],
+            authHost: '127.0.0.1',
+            allowInsecureForTests: true,
+        };
+        await assert.rejects(
+            () => fetchJson(adapter, `http://127.0.0.1:${server.port}/start`, {
+                bearerToken: 'opaque-token',
+                timeoutMs: 5000,
+            }),
+            (error) => error.code === 'credential_redirect',
+        );
+        assert.equal(server.requests.length, 1);
+        assert.equal(server.requests[0].headers.authorization, 'Bearer opaque-token');
+        assert.equal(server.requests.some((request) => request.url === '/redirected'), false);
+    } finally {
+        await server.close();
+    }
+});
+
 test('a plain http URL is refused for every shipped adapter', async () => {
     for (const [id, adapter] of Object.entries(SOURCES)) {
         assert.notEqual(adapter.allowInsecureForTests, true, `${id} must not carry the test-only insecure flag`);

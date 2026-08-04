@@ -41,6 +41,11 @@ import {
 } from './copy.js';
 import { buildFilters } from './filters.js';
 import { createVocabularyLoader } from './vocabulary.js';
+import {
+    getBotbooruAccount,
+    noteBotbooruAccountError,
+    subscribeBotbooruAccount,
+} from './account.js';
 import { PROTOCOL_VERSION, VERSION, MAX_FANOUT } from '../shared/schema.js';
 
 /**
@@ -60,10 +65,11 @@ const MIN_TYPEAHEAD_LENGTH = 3;
 /**
  * Builds the pseudo-source that stands for a merged search.
  *
- * Its capabilities are the INTERSECTION of the sources behind it, not the union.
- * A sort or a filter that only some of them honour would quietly apply to part
- * of the list, which is exactly the kind of silent half-filtering the per-source
- * controls exist to avoid.
+ * Most capabilities are the intersection of the sources behind it. SFW is the
+ * exception: when any member can enforce it, send the value and state plainly
+ * that sources without a reliable filter remain outside that guarantee. Omitting
+ * it would turn BotBooru into an authenticated non-SFW search while the checkbox
+ * still looked enabled.
  */
 function mergedSourceEntry(usable) {
     const members = usable.slice(0, MAX_FANOUT);
@@ -76,7 +82,8 @@ function mergedSourceEntry(usable) {
             search: true,
             paging: 'cursor',
             sorts: [],
-            sfwToggle: members.every((entry) => entry.capabilities?.sfwToggle === true),
+            sfwToggle: members.some((entry) => entry.capabilities?.sfwToggle === true),
+            sfwComplete: members.every((entry) => entry.capabilities?.sfwToggle === true),
             hideAiToggle: false,
             detail: true,
             filters: [],
@@ -234,6 +241,8 @@ function wireBrowser(popup, health, options) {
         typingTimer: null,
         /** Tag names are fetched once per source for this dialog only. */
         vocabulary: createVocabularyLoader(),
+        /** Public status only. The bearer remains in the server process. */
+        account: getBotbooruAccount(),
     };
 
     // "All sources" is a synthetic entry, not a source. It is only worth
@@ -287,6 +296,7 @@ function wireBrowser(popup, health, options) {
     });
     dom.sfw.addEventListener('change', () => {
         updateSettings({ sfwOnlyDefault: dom.sfw.checked });
+        updateContentControlNote();
         void runSearch({ append: false });
     });
     dom.hideAi.addEventListener('change', () => {
@@ -352,6 +362,27 @@ function wireBrowser(popup, health, options) {
     });
     dom.more.addEventListener('click', () => void runSearch({ append: true }));
 
+    const unsubscribeAccount = subscribeBotbooruAccount((account) => {
+        const previousRevision = state.account.revision;
+        state.account = account;
+        updateContentControlNote();
+        if (account.revision === previousRevision) {
+            return;
+        }
+        // A protected response can have been cached while another source is now
+        // selected. Clear on every account revision, not only while BotBooru is
+        // visible, so it cannot cross a logout or replacement login.
+        state.cache.clear();
+        if (!selectionUsesBotbooru()) {
+            return;
+        }
+        if (account.error && mergedSources().length > 0) {
+            removeMergedBotbooruResults(account);
+            return;
+        }
+        resetForAccountChange(account);
+    });
+
     refreshQueryHistory();
 
     // Browsing is useful without a query. Start immediately, then leave the
@@ -381,14 +412,7 @@ function wireBrowser(popup, health, options) {
         // Never imply filtering that the source cannot actually do.
         const canFilter = state.source.capabilities?.sfwToggle === true;
         dom.sfw.disabled = !canFilter;
-        setText(dom.sfwNote, canFilter ? '' : mergedSources().length > 0
-            ? 'Some of these sources do not provide a reliable SFW filter.'
-            : `${state.source.label} does not provide a reliable SFW filter.`);
-        if (canFilter) {
-            dom.sfw.removeAttribute('aria-describedby');
-        } else {
-            dom.sfw.setAttribute('aria-describedby', 'sbbs_sfw_note');
-        }
+        updateContentControlNote();
 
         dom.hideAiControl.hidden = state.source.capabilities?.hideAiToggle !== true;
 
@@ -425,6 +449,112 @@ function wireBrowser(popup, health, options) {
     /** The real sources behind the current selection, or [] when it is one source. */
     function mergedSources() {
         return Array.isArray(state.source.merged) ? state.source.merged : [];
+    }
+
+    function selectionUsesBotbooru() {
+        return state.source.id === 'botbooru'
+            || mergedSources().some((source) => source.id === 'botbooru');
+    }
+
+    function updateContentControlNote() {
+        const canFilter = state.source.capabilities?.sfwToggle === true;
+        const notes = [];
+        if (!canFilter) {
+            notes.push(mergedSources().length > 0
+                ? 'Some of these sources do not provide a reliable SFW filter.'
+                : `${state.source.label} does not provide a reliable SFW filter.`);
+        } else if (dom.sfw.checked && mergedSources().length > 0
+            && state.source.capabilities?.sfwComplete !== true) {
+            notes.push('SFW only is enforced where a source provides a reliable filter; other sources may still include sensitive content.');
+        }
+        if (selectionUsesBotbooru() && !dom.sfw.checked) {
+            if (!state.account.loggedIn) {
+                notes.push('BotBooru requires a login under Extensions > BotSearcher for non-SFW results.');
+            } else if (!state.account.nsfwEnabled) {
+                notes.push('Enable NSFW for the BotBooru account under Extensions > BotSearcher.');
+            } else if (state.account.nsflEnabled && state.account.nsflActive === true) {
+                notes.push('NSFL is active for the BotBooru account, so non-SFW searches may include NSFL content.');
+            } else if (state.account.nsflEnabled && state.account.nsflActive === null) {
+                notes.push('BotBooru did not report whether NSFL is currently active, so non-SFW searches may include it.');
+            }
+        }
+        const note = notes.join(' ');
+        setText(dom.sfwNote, note);
+        if (note === '') {
+            dom.sfw.removeAttribute('aria-describedby');
+        } else {
+            dom.sfw.setAttribute('aria-describedby', 'sbbs_sfw_note');
+        }
+    }
+
+    function resetForAccountChange(account) {
+        const wasDetail = dom.root.dataset.view === 'detail';
+        clearTimeout(state.typingTimer);
+        state.searchController?.abort();
+        state.detailController?.abort();
+        state.searchController = null;
+        state.detailController = null;
+        state.requestGeneration++;
+        state.loading = false;
+        state.nextCursor = null;
+        state.items = [];
+        state.itemKeys.clear();
+        state.cache.clear();
+        records.clear();
+        dom.body?.setAttribute('aria-busy', 'false');
+        dom.grid.replaceChildren();
+        dom.detail.replaceChildren();
+        dom.root.dataset.view = 'grid';
+        dom.more.hidden = true;
+        dom.more.disabled = false;
+        dom.partial.hidden = true;
+        dom.partial.replaceChildren();
+        setText(dom.count, '');
+
+        if (!account.error && (!account.loggedIn || !account.nsfwEnabled) && !dom.sfw.checked) {
+            // This is deliberately dialog-local. The saved default still reflects
+            // what the user chose and can resume after a future login.
+            dom.sfw.checked = true;
+            updateContentControlNote();
+        }
+
+        if (account.error) {
+            setText(dom.state, searchErrorMessage({ code: account.error }, 'BotBooru'));
+            if (wasDetail && dom.query.isConnected) {
+                dom.query.focus();
+            }
+            return;
+        }
+        void runSearch({ append: false });
+    }
+
+    /** Keeps valid merged results while removing cards tied to an expired account. */
+    function removeMergedBotbooruResults(account) {
+        const wasDetail = dom.root.dataset.view === 'detail';
+        state.detailController?.abort();
+        state.detailController = null;
+        dom.detail.replaceChildren();
+        dom.root.dataset.view = 'grid';
+
+        for (const [open, record] of records) {
+            if (record.source.id === 'botbooru') {
+                open.closest('li')?.remove();
+                records.delete(open);
+            }
+        }
+        state.items = state.items.filter((item) => item?.source !== 'botbooru');
+        state.itemKeys = new Set(state.items.map((item) => `${item.source}:${item.id}`));
+        dom.more.hidden = state.nextCursor === null;
+        dom.more.disabled = false;
+
+        if (!account.error && (!account.loggedIn || !account.nsfwEnabled) && !dom.sfw.checked) {
+            dom.sfw.checked = true;
+            updateContentControlNote();
+        }
+        setText(dom.count, formatResultCount(state.items.length, null));
+        if (wasDetail && dom.query.isConnected) {
+            dom.query.focus();
+        }
     }
 
     /** Resolves a result's own source, which in a merged search is not the selection. */
@@ -580,6 +710,10 @@ function wireBrowser(popup, health, options) {
                 return;
             }
 
+            if (source.id === 'botbooru' && noteBotbooruAccountError(error)) {
+                return;
+            }
+
             setText(dom.state, searchErrorMessage(error, source.label));
             if (append && state.items.length > 0) {
                 setText(dom.more, 'Retry loading more');
@@ -619,6 +753,9 @@ function wireBrowser(popup, health, options) {
         dom.partial.hidden = false;
         for (const entry of partial) {
             const label = usable.find((item) => item.id === entry?.source)?.label ?? entry?.source;
+            if (entry?.source === 'botbooru') {
+                noteBotbooruAccountError({ code: entry?.error });
+            }
             setText(
                 dom.partial.appendChild(el('div', 'sbbs-partial-line')),
                 searchErrorMessage({ code: entry?.error }, label),
@@ -817,6 +954,7 @@ function wireBrowser(popup, health, options) {
         // as the dialog and no longer.
         state.cache.clear();
         state.vocabulary.clear();
+        unsubscribeAccount();
     };
 }
 
