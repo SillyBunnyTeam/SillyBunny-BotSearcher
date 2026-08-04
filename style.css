@@ -21,6 +21,20 @@
     width: min(1400px, 90vw);
 }
 
+/*
+ * Core positions a popup close button just beyond the rounded corner. That is
+ * useful for text dialogs, but crowds this dialog's first control row. Keep it
+ * in a small, deliberate top rail instead.
+ */
+.popup:has(.sbbs-root) .popup-content {
+    margin-top: calc(24px + var(--spacing-sm, 8px));
+}
+
+.popup:has(.sbbs-root) .popup-button-close {
+    inset-block-start: var(--spacing-sm, 8px);
+    inset-inline-end: var(--spacing-sm, 8px);
+}
+
 .sbbs-root {
     display: flex;
     flex-direction: column;
@@ -945,9 +959,14 @@
     margin-block: 0;
 }
 
+/* Standalone setting actions are rows, rather than compact toolbar buttons. */
 .sbbs-account-login > .menu_button,
-.sbbs-account-signed-in > .menu_button {
-    align-self: flex-start;
+.sbbs-account-signed-in > .menu_button,
+.sbbs-setting-select > .menu_button,
+.sbbs-plugin-update-actions > .menu_button {
+    align-self: stretch;
+    width: 100%;
+    white-space: normal;
 }
 
 .sbbs-account-nsfw {
@@ -1055,6 +1074,8 @@
     .popup:has(.sbbs-root) .popup-content {
         margin-top: 0;
         padding: 0;
+        /* The 44px close target gets its own row above the search controls. */
+        padding-block-start: calc(var(--sb-mobile-touch-target, 44px) + var(--spacing-sm, 8px));
     }
 
     .popup:has(.sbbs-root) .popup-body {
