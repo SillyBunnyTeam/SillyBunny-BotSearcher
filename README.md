@@ -312,6 +312,28 @@ Confirm that the server plugin is installed, `enableServerPlugins` is `true`, an
 
 Restart SillyBunny and check the server-plugin logs. If the plugin route exists but returns an error, the frontend cannot search until that error is fixed.
 
+### The server-plugin Git remote does not match its declared repository
+
+The updater compares the plugin checkout's `origin` against the repository declared in its `package.json`, and refuses to replace a checkout that came from somewhere else.
+
+This repository moved to the `SillyBunnyTeam` organisation. A checkout cloned from the earlier `platberlitz/SillyBunny-BotSearcher` address still works for ordinary Git operations, because GitHub redirects the old location silently, so the mismatch stays invisible until the updater checks it. The guided fallback below refuses the same checkout, with a bare `test` failure rather than a message.
+
+Confirm what the checkout points at:
+
+```bash
+git -C plugins/SillyBunny-BotSearcher remote get-url origin
+```
+
+If that is anything other than the address below, point it at the current one and try the update again:
+
+```bash
+git -C plugins/SillyBunny-BotSearcher remote set-url origin https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
+```
+
+Do the same for the frontend extension's checkout, which is a separate clone with its own remote.
+
+Change only the remote. If the checkout also has tracked local changes, or is a symlink to a development checkout, resolve those separately; the updater reports each refusal distinctly.
+
 ### Frontend and server are incompatible
 
 The frontend extension and server plugin are one protocol release and must be updated together. If the server is older, use **Update server plugin and restart** or the displayed matching-tag commands. If the server is newer, update the frontend instead; BotSearcher does not offer server downgrades.
