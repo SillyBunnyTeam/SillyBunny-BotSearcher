@@ -49,6 +49,18 @@
             <div class="sbbs-filter-actions">
                 <button id="sbbs_filters_clear" class="menu_button sbbs-filters-clear" type="button">Clear filters</button>
             </div>
+            <!--
+                Intake works on any card file, not only ones found here, so the
+                picker lives with the controls rather than with the results.
+            -->
+            <div class="sbbs-filter-group sbbs-intake-entry">
+                <button id="sbbs_inspect_file" class="menu_button sbbs-inspect-file" type="button">
+                    <i class="fa-solid fa-file-shield" aria-hidden="true"></i>
+                    <span>Inspect a card file</span>
+                </button>
+                <input id="sbbs_card_file" class="sbbs-visually-hidden" type="file" accept=".png,.json,image/png,application/json" tabindex="-1" aria-hidden="true">
+                <span class="sbbs-setting-note">Reports what is inside a PNG or JSON card before importing it. You can also drop one onto this dialog.</span>
+            </div>
         </div>
       </form>
     </header>
@@ -76,4 +88,5 @@
         the data-view selector, so the pane would stay invisible after switching.
     -->
     <section id="sbbs_detail" class="sbbs-detail" aria-label="Card details"></section>
+    <section id="sbbs_intake" class="sbbs-intake" aria-label="Card intake"></section>
 </div>

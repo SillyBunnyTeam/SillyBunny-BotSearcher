@@ -111,6 +111,82 @@ export function jsonGuardWithLimit(maxBytes) {
 export const jsonGuard = jsonGuardWithLimit(MAX_REQUEST_BYTES);
 
 /**
+ * Reads a raw `application/octet-stream` body into `request.rawBody`.
+ *
+ * The host's parsers cannot help here: express.json and express.urlencoded only
+ * claim their own content types and multer only claims multipart, so an
+ * octet-stream body reaches plugin routes unread (src/server-main.js:119-120,
+ * :454). Reading it here rather than importing express keeps the plugin's
+ * production dependencies unchanged, and lets the cap be enforced while the
+ * bytes arrive instead of after.
+ *
+ * @param {number} maxBytes
+ */
+export function rawGuard(maxBytes) {
+    return function guard(request, response, next) {
+        const contentType = String(request.headers['content-type'] ?? '').toLowerCase();
+        if (!contentType.startsWith('application/octet-stream')) {
+            response.status(415).json({ error: 'unsupported_media_type' });
+            return;
+        }
+
+        const declaredLength = Number(request.headers['content-length']);
+        if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+            response.status(413).json({ error: 'payload_too_large' });
+            return;
+        }
+
+        const chunks = [];
+        let total = 0;
+        let settled = false;
+
+        const stop = (status, code) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            request.removeListener('data', onData);
+            request.removeListener('end', onEnd);
+            request.removeListener('error', onError);
+            request.pause?.();
+            response.status(status).json({ error: code });
+        };
+
+        function onData(chunk) {
+            total += chunk.length;
+            // Enforced as bytes arrive: a lying Content-Length must not be able
+            // to buy an unbounded allocation.
+            if (total > maxBytes) {
+                stop(413, 'payload_too_large');
+                return;
+            }
+            chunks.push(chunk);
+        }
+
+        function onEnd() {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            request.rawBody = Buffer.concat(chunks, total);
+            if (request.rawBody.length === 0) {
+                response.status(400).json({ error: 'bad_request' });
+                return;
+            }
+            next();
+        }
+
+        function onError() {
+            stop(400, 'bad_request');
+        }
+
+        request.on('data', onData);
+        request.on('end', onEnd);
+        request.on('error', onError);
+    };
+}
+
+/**
  * Sends a machine-readable error. Never includes upstream text.
  * @param {any} response
  * @param {number} status

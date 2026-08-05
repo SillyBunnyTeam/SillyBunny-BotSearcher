@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 const CARD = Object.freeze({ id: 'card-1' });
 const SOURCE = Object.freeze({ id: 'quillgen' });
-const INSIDE = Object.freeze({ specVersion: 'chara_card_v3', hasSystemPrompt: true });
+
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]);
 
 function response(body, { status = 200, headers = {} } = {}) {
     return new Response(body, { status, headers });
@@ -12,7 +13,11 @@ function response(body, { status = 200, headers = {} } = {}) {
 function installHost(fetchImpl, characters = []) {
     const previousFetch = globalThis.fetch;
     const previousSillyTavern = globalThis.SillyTavern;
+    const previousWindow = globalThis.window;
     globalThis.fetch = fetchImpl;
+    // render.js resolves every candidate URL against the page origin, so the
+    // host-check paths need one even outside a browser.
+    globalThis.window = { location: { origin: 'https://sillybunny.test' } };
     globalThis.SillyTavern = {
         getContext: () => ({
             characters,
@@ -23,20 +28,16 @@ function installHost(fetchImpl, characters = []) {
     return () => {
         globalThis.fetch = previousFetch;
         globalThis.SillyTavern = previousSillyTavern;
+        globalThis.window = previousWindow;
     };
 }
 
-test('preparing a byte card inspects retained bytes without importing them', async () => {
+test('preparing a byte card retains the bytes without importing them', async () => {
     const calls = [];
     const payload = JSON.stringify({ spec: 'chara_card_v3', data: { name: 'Prepared' } });
     const restore = installHost(async (url, options) => {
         calls.push({ url: String(url), options });
-        return response(payload, {
-            headers: {
-                'X-SBBS-Card-Kind': 'json',
-                'X-SBBS-Card-Inside': encodeURIComponent(JSON.stringify(INSIDE)),
-            },
-        });
+        return response(payload, { headers: { 'X-SBBS-Card-Kind': 'json' } });
     });
 
     try {
@@ -46,14 +47,117 @@ test('preparing a byte card inspects retained bytes without importing them', asy
         assert.equal(calls.length, 1);
         assert.equal(calls[0].url.endsWith('/card'), true);
         assert.equal(prepared.kind, 'json');
-        assert.deepEqual(prepared.inside, INSIDE);
         assert.equal(await prepared.file.text(), payload);
     } finally {
         restore();
     }
 });
 
-test('committing inspected cards serializes host imports and retains the inspected report', async () => {
+// ---- native sources ----
+
+const NATIVE_CARD = Object.freeze({ id: 'abc', importUrl: 'https://chub.ai/characters/a/b' });
+const NATIVE_SOURCE = Object.freeze({ id: 'chub', nativeImport: true, clientHosts: ['chub.ai'] });
+
+test('a native card is downloaded by the host route, and nothing is imported', async () => {
+    const calls = [];
+    const restore = installHost(async (url, options) => {
+        calls.push({ url: String(url), options });
+        return response(PNG_BYTES, { headers: { 'X-Custom-Content-Type': 'character' } });
+    });
+
+    try {
+        const { fetchNativeCardBytes } = await import('../client/importer.js?native-bytes');
+        const prepared = await fetchNativeCardBytes(NATIVE_CARD, NATIVE_SOURCE);
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].url, '/api/content/importURL', 'the host downloads it, not this plugin');
+        assert.deepEqual(JSON.parse(calls[0].options.body), { url: NATIVE_CARD.importUrl });
+        // The magic bytes decide, not the response headers.
+        assert.equal(prepared.kind, 'png');
+        assert.equal(prepared.file.name, 'chub-abc.png');
+        // Nothing reached the character importer.
+        assert.ok(!calls.some((call) => call.url.includes('/api/characters/import')));
+    } finally {
+        restore();
+    }
+});
+
+test('a lorebook returned by the host route is refused', async () => {
+    // /api/content/importURL serves lorebooks from the same path. Only a
+    // character may ever reach the importer.
+    const restore = installHost(async () => response(PNG_BYTES, {
+        headers: { 'X-Custom-Content-Type': 'lorebook' },
+    }));
+
+    try {
+        const { fetchNativeCardBytes } = await import('../client/importer.js?native-lorebook');
+        await assert.rejects(
+            () => fetchNativeCardBytes(NATIVE_CARD, NATIVE_SOURCE),
+            (error) => error.message === 'not_a_character',
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('an import URL off the source\'s own hosts is refused before any request', async () => {
+    const calls = [];
+    const restore = installHost(async (url) => {
+        calls.push(String(url));
+        return response('{}');
+    });
+
+    try {
+        const { fetchNativeCardBytes } = await import('../client/importer.js?native-host-check');
+        await assert.rejects(
+            () => fetchNativeCardBytes({ id: 'x', importUrl: 'https://evil.example/card' }, NATIVE_SOURCE),
+            (error) => error.message === 'import_url_rejected',
+        );
+        assert.deepEqual(calls, [], 'nothing may be requested for a rejected URL');
+    } finally {
+        restore();
+    }
+});
+
+test('a failed host download reports itself rather than importing anyway', async () => {
+    const restore = installHost(async () => response('nope', { status: 500 }));
+
+    try {
+        const { fetchNativeCardBytes } = await import('../client/importer.js?native-failure');
+        await assert.rejects(
+            () => fetchNativeCardBytes(NATIVE_CARD, NATIVE_SOURCE),
+            (error) => error.message === 'native_download_failed',
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('replacing an installed character preserves its avatar instead of adding a copy', async () => {
+    const characters = [{ avatar: 'Seraphina.png', name: 'Seraphina' }];
+    const calls = [];
+    const restore = installHost(async (url, options) => {
+        calls.push({ url: String(url), options });
+        return response('{}');
+    }, characters);
+
+    try {
+        const { commitPreparedCardImport } = await import('../client/importer.js?replace');
+        const result = await commitPreparedCardImport({
+            file: new File(['bytes'], 'card.png', { type: 'image/png' }),
+            kind: 'png',
+        }, { replaceAvatar: 'Seraphina.png' });
+
+        assert.equal(calls[0].options.body.get('preserved_name'), 'Seraphina.png');
+        assert.equal(result.avatar, 'Seraphina.png');
+        assert.equal(result.name, 'Seraphina');
+        assert.equal(characters.length, 1, 'replacing must not add a second copy');
+    } finally {
+        restore();
+    }
+});
+
+test('committing inspected cards serializes host imports', async () => {
     const characters = [];
     const calls = [];
     let releaseFirst;
@@ -78,12 +182,10 @@ test('committing inspected cards serializes host imports and retains the inspect
         const first = {
             file: new File(['first bytes'], 'first.json', { type: 'application/json' }),
             kind: 'json',
-            inside: { hasSystemPrompt: true },
         };
         const second = {
             file: new File(['second bytes'], 'second.json', { type: 'application/json' }),
             kind: 'json',
-            inside: { hasDepthPrompt: true },
         };
 
         const firstCommit = commitPreparedCardImport(first);
@@ -96,9 +198,7 @@ test('committing inspected cards serializes host imports and retains the inspect
         const [firstResult, secondResult] = await Promise.all([firstCommit, secondCommit]);
         assert.equal(calls.length, 2);
         assert.equal(firstResult.avatar, 'avatar-1.png');
-        assert.deepEqual(firstResult.inside, first.inside);
         assert.equal(secondResult.avatar, 'avatar-2.png');
-        assert.deepEqual(secondResult.inside, second.inside);
     } finally {
         restore();
     }

@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 
 import { JSDOM } from 'jsdom';
 
+import { PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
+
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const TEMPLATE = fs.readFileSync(path.join(ROOT, 'templates/browser.html'), 'utf8');
 const INSTALL_TEMPLATE = fs.readFileSync(path.join(ROOT, 'templates/plugin-missing.html'), 'utf8');
@@ -204,7 +206,7 @@ test('a setting note sits beside its label, not inside it', async () => {
         window: dom.window,
         requestAnimationFrame: (callback) => setTimeout(callback, 0),
     });
-    globalThis.fetch = async () => jsonResponse({ protocol: 5, version: '0.3.0', sources: [] });
+    globalThis.fetch = async () => jsonResponse({ protocol: PROTOCOL_VERSION, version: VERSION, sources: [] });
     const settingsStore = {};
     globalThis.SillyTavern = {
         getContext: () => ({ extensionSettings: settingsStore, saveSettingsDebounced() {} }),
@@ -266,8 +268,8 @@ test('BotBooru account settings clear passwords and expose account-wide content 
         const path = String(url);
         if (path.endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 5,
-                version: '0.3.0',
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
                 sources: [{
                     id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'],
                     capabilities: {
@@ -385,7 +387,7 @@ test('settings offer an exact-release update when a compatible server is older',
     });
     globalThis.fetch = async (url) => {
         if (String(url).endsWith('/healthz')) {
-            return jsonResponse({ protocol: 5, version: '0.2.0', sources: [] });
+            return jsonResponse({ protocol: PROTOCOL_VERSION, version: '0.2.0', sources: [] });
         }
         if (String(url).endsWith('/capabilities')) {
             return jsonResponse({
@@ -416,7 +418,7 @@ test('settings offer an exact-release update when a compatible server is older',
         const update = root.querySelector('.sbbs-setting-plugin .menu_button');
         await waitFor(() => update.hidden === false, 'settings update action did not appear');
         assert.equal(update.type, 'button');
-        assert.match(root.querySelector('.sbbs-setting-plugin').textContent, /Server v0\.2\.0 is older than frontend v0\.3\.0/);
+        assert.match(root.querySelector('.sbbs-setting-plugin').textContent, new RegExp(`Server v0\\.2\\.0 is older than frontend v${VERSION.replace(/\./g, '\\.')}`));
         assert.equal(root.contains(update), true);
     } finally {
         const { invalidateAvailability } = await import('../client/api.js');
@@ -521,7 +523,7 @@ test('an older incompatible server offers the host updater without bypassing a s
 
         assert.deepEqual(applyBody, {
             directoryName: 'SillyBunny-BotSearcher',
-            targetVersion: '0.3.0',
+            targetVersion: VERSION,
         });
         assert.equal(update.disabled, false, 'the action should be retryable after failure');
         assert.equal(popup.content.querySelector('.sbbs-update-instructions').hidden, true);
@@ -559,7 +561,7 @@ test('closing the recovery popup does not abort an in-progress server update', a
             healthCalls++;
             return healthCalls === 1
                 ? jsonResponse({ protocol: 3, version: '0.2.0', sources: [] })
-                : jsonResponse({ protocol: 5, version: '0.3.0', sources: [] });
+                : jsonResponse({ protocol: PROTOCOL_VERSION, version: VERSION, sources: [] });
         }
         if (String(url).endsWith('/capabilities')) {
             return jsonResponse({
@@ -683,8 +685,8 @@ test('a direct-routing notice can be dismissed without disabling the route', asy
         const requestPath = String(url);
         if (requestPath.endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 5,
-                version: '0.3.0',
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
                 sources: [{
                     id: 'chub',
                     label: 'Chub',
@@ -824,8 +826,8 @@ test('a source that fails stays in the picker and offers a reload', async () => 
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 5,
-                version: '0.3.0',
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
                 sources: [
                     // Reported down before the dialog even opens. It must still
                     // be offered, not quietly missing from the list.
@@ -966,8 +968,8 @@ test('BotBooru account changes clear protected results and rerun safely', async 
         const requestPath = String(url);
         if (requestPath.endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 5,
-                version: '0.3.0',
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
                 sources: [
                     {
                         id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'],
@@ -1178,8 +1180,8 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
     globalThis.fetch = async (url, options = {}) => {
         if (String(url).endsWith('/healthz')) {
             return jsonResponse({
-                protocol: 5,
-                version: '0.3.0',
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, hideAiToggle: true, detail: true } },
                     { id: 'chub', label: 'Chub', tier: 1, state: 'up', clientHosts: ['chub.ai'], capabilities: { search: true, sorts: ['default'], sfwToggle: true, hideAiToggle: false, detail: true, filters: [{ key: 'tags', type: 'tags', label: 'Tags' }] } },

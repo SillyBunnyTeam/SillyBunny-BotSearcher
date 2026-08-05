@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { MAX_INGEST_BYTES } from '../shared/schema.js';
+import { MAX_INGEST_BYTES, PROTOCOL_VERSION, VERSION } from '../shared/schema.js';
 
 function jsonResponse(body, status = 200) {
     return new Response(JSON.stringify(body), {
@@ -118,7 +118,7 @@ test('server-plugin release request sends only the fixed directory and frontend 
         assert.equal(call.options.headers['Content-Type'], 'application/json');
         assert.deepEqual(JSON.parse(call.options.body), {
             directoryName: 'SillyBunny-BotSearcher',
-            targetVersion: '0.3.0',
+            targetVersion: VERSION,
         });
     } finally {
         restore();
@@ -142,7 +142,7 @@ test('server-plugin update waits for a new boot and verifies the active release'
             return jsonResponse({ serverBootId: versionCalls === 1 ? 'old-boot' : 'new-boot' });
         }
         if (String(url).endsWith('/healthz')) {
-            return jsonResponse({ protocol: 5, version: '0.3.0', sources: [] });
+            return jsonResponse({ protocol: PROTOCOL_VERSION, version: VERSION, sources: [] });
         }
         throw new Error(`unexpected request: ${url}`);
     });
@@ -157,7 +157,7 @@ test('server-plugin update waits for a new boot and verifies the active release'
             intervalMs: 1,
         });
 
-        assert.equal(result.availability.health.version, '0.3.0');
+        assert.equal(result.availability.health.version, VERSION);
         assert.deepEqual(phases, ['staging', 'restarting', 'verifying', 'complete']);
         const versionRequests = calls.filter((entry) => entry.url.endsWith('/version'));
         assert.equal(versionRequests.length, 2);

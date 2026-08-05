@@ -25,7 +25,7 @@ import {
     MAX_FANOUT,
 } from '../shared/schema.js';
 import { describeSources, getSource } from './registry.js';
-import { wrap, jsonGuard, jsonGuardWithLimit, fail, UpstreamError, SAFE_UPSTREAM_CODES } from './guards.js';
+import { wrap, jsonGuard, jsonGuardWithLimit, rawGuard, fail, UpstreamError, SAFE_UPSTREAM_CODES } from './guards.js';
 import { clampInt, pick, own, readSourceId, isPlainObject, hasForbiddenKey, readFilters } from './validate.js';
 import { contextFor, fetchBytes } from './http.js';
 import { consume, acquire, acquireThumbnail, callerKey } from './limits.js';
@@ -44,6 +44,7 @@ import {
     REROUTABLE_FAILURES,
 } from './health.js';
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
+import { cleanCard } from './cardclean.js';
 import { getVocabulary, hasVocabulary } from './vocabulary.js';
 import { AccountError, accountProfileHandle, createBotbooruAccounts } from './accounts.js';
 
@@ -612,16 +613,87 @@ export function createRouter(router, state) {
                 'X-Content-Type-Options': 'nosniff',
                 'Content-Security-Policy': "default-src 'none'; sandbox",
                 'Content-Disposition': `attachment; filename="${cardFileName(adapter.id, id, verdict.kind)}"`,
-                // Tells the client which extension to declare on import, and
-                // what the card actually contains — from the bytes, not from
-                // whatever the listing claimed.
+                // Tells the client which extension to declare on import. The
+                // contents report is NOT sent here: it now carries the card's
+                // own prompt text for measuring, which no header could hold.
+                // The client posts these bytes to /inspect for that.
                 'X-SBBS-Card-Kind': verdict.kind,
-                'X-SBBS-Card-Inside': encodeURIComponent(JSON.stringify(verdict.inside)),
             });
             response.send(buffer);
         } finally {
             gate.release();
         }
+    }));
+
+    /**
+     * Reports what is inside card bytes the browser already holds.
+     *
+     * Unlike every other route here, this one names no source and makes no
+     * outbound request of any kind — it is a parser, nothing more. That is what
+     * lets it serve all three ways a card reaches the browser: a native source
+     * downloaded by SillyBunny's own importer route, a byte-card from /card, and
+     * a file the user obtained somewhere else entirely.
+     *
+     * It sends back no bytes, so it cannot become a second path into the
+     * character importer.
+     */
+    router.post('/inspect', rawGuard(MAX_CARD_BYTES), wrap(async (request, response) => {
+        const limited = await consume('search', callerKey(request));
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+
+        let verdict;
+        try {
+            verdict = validateCardBytes(request.rawBody);
+        } catch (error) {
+            if (error instanceof CardBytesError) {
+                fail(response, 422, error.code);
+                return;
+            }
+            throw error;
+        }
+
+        response.set('Cache-Control', 'no-store');
+        response.json({ kind: verdict.kind, spec: verdict.spec, inside: verdict.inside });
+    }));
+
+    /**
+     * Returns the same card with the fixed clean profile applied.
+     *
+     * Separate from /inspect so the common path never pays for a rewrite the
+     * user did not ask for. The client already knows what will go, from the
+     * report, so the response is bytes alone.
+     */
+    router.post('/clean', rawGuard(MAX_CARD_BYTES), wrap(async (request, response) => {
+        const limited = await consume('card', callerKey(request), { failClosed: true });
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+
+        let cleaned;
+        try {
+            cleaned = cleanCard(request.rawBody);
+        } catch (error) {
+            if (error instanceof CardBytesError) {
+                fail(response, 422, error.code);
+                return;
+            }
+            throw error;
+        }
+
+        response.set({
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': String(cleaned.buffer.length),
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'Cache-Control': 'no-store',
+        });
+        response.send(cleaned.buffer);
     }));
 
     router.post('/detail', jsonGuard, wrap(async (request, response) => {

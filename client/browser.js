@@ -26,6 +26,7 @@ import { el, setText, setImgSafe } from './render.js';
 import { getSettings, updateSettings, isSourceEnabled, rememberQuery } from './settings.js';
 import { createResultCache } from './cache.js';
 import { showDetail } from './detail.js';
+import { showIntake } from './intake.js';
 import {
     availabilityCopy,
     compareReleaseVersions,
@@ -195,6 +196,9 @@ function wireBrowser(popup, health, options) {
         grid: root.querySelector('#sbbs_grid'),
         more: root.querySelector('#sbbs_more'),
         detail: root.querySelector('#sbbs_detail'),
+        intake: root.querySelector('#sbbs_intake'),
+        inspectFile: root.querySelector('#sbbs_inspect_file'),
+        cardFile: root.querySelector('#sbbs_card_file'),
     };
 
     const settings = getSettings();
@@ -226,6 +230,7 @@ function wireBrowser(popup, health, options) {
         requestGeneration: 0,
         searchController: null,
         detailController: null,
+        intakeController: null,
         disposed: false,
         items: [],
         itemKeys: new Set(),
@@ -316,6 +321,48 @@ function wireBrowser(popup, health, options) {
         state.filters?.clear();
         updateFilterBadge();
         void runSearch({ append: false });
+    });
+
+    dom.inspectFile?.addEventListener('click', () => dom.cardFile?.click());
+    dom.cardFile?.addEventListener('change', () => {
+        const file = dom.cardFile.files?.[0];
+        // Cleared immediately so choosing the same file twice fires again.
+        dom.cardFile.value = '';
+        if (file) {
+            openIntake({ file }, 'grid');
+        }
+    });
+
+    /**
+     * Dropping a card onto this dialog inspects it instead of importing it.
+     *
+     * SillyBunny's own handler is delegated from document.body in the bubble
+     * phase (public/scripts/dragdrop.js:60), so stopping propagation here means
+     * the host never sees the drop — which is the whole point: a card dropped
+     * onto the intake dialog must not simultaneously be imported by the app
+     * behind it.
+     */
+    dom.root.addEventListener('dragover', (event) => {
+        if (!event.dataTransfer?.types?.includes('Files')) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = 'copy';
+        dom.root.classList.add('sbbs-dragging');
+    });
+    for (const name of ['dragleave', 'dragend']) {
+        dom.root.addEventListener(name, () => dom.root.classList.remove('sbbs-dragging'));
+    }
+    dom.root.addEventListener('drop', (event) => {
+        const file = event.dataTransfer?.files?.[0];
+        if (!file) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        dom.root.classList.remove('sbbs-dragging');
+        openIntake({ file }, dom.root.dataset.view === 'detail' ? 'detail' : 'grid');
     });
 
     dom.form.addEventListener('submit', (event) => {
@@ -487,6 +534,35 @@ function wireBrowser(popup, health, options) {
         }
     }
 
+    /**
+     * Opens the intake screen for a card from the grid or a file from disk.
+     *
+     * `returnTo` is the view the Back button goes to, so a card opened from its
+     * detail pane returns there and a dropped file returns to the results.
+     */
+    function openIntake(request, returnTo) {
+        state.intakeController?.abort();
+        const controller = new AbortController();
+        state.intakeController = controller;
+        dom.root.dataset.view = 'intake';
+
+        void showIntake(dom.intake, request, () => {
+            controller.abort();
+            state.intakeController = null;
+            dom.intake.replaceChildren();
+            dom.root.dataset.view = returnTo;
+            if (returnTo === 'grid') {
+                dom.query?.focus();
+            }
+        }, { signal: controller.signal });
+    }
+
+    function closeIntake() {
+        state.intakeController?.abort();
+        state.intakeController = null;
+        dom.intake.replaceChildren();
+    }
+
     function resetForAccountChange(account) {
         const wasDetail = dom.root.dataset.view === 'detail';
         clearTimeout(state.typingTimer);
@@ -494,6 +570,7 @@ function wireBrowser(popup, health, options) {
         state.detailController?.abort();
         state.searchController = null;
         state.detailController = null;
+        closeIntake();
         state.requestGeneration++;
         state.loading = false;
         state.nextCursor = null;
@@ -534,6 +611,7 @@ function wireBrowser(popup, health, options) {
         state.detailController?.abort();
         state.detailController = null;
         dom.detail.replaceChildren();
+        closeIntake();
         dom.root.dataset.view = 'grid';
 
         for (const [open, record] of records) {
@@ -937,6 +1015,9 @@ function wireBrowser(popup, health, options) {
                     },
                     onDirect: (reason) => useDirectRouting(record.source, reason),
                     isSourceDirect: (sourceId) => state.directSources.has(sourceId),
+                    // The detail pane stays mounted behind the intake screen, so
+                    // Back returns to the card the user was already reading.
+                    onIntake: (request) => openIntake(request, 'detail'),
                 });
             });
             const li = document.createElement('li');
@@ -969,6 +1050,7 @@ function wireBrowser(popup, health, options) {
         clearTimeout(state.typingTimer);
         state.searchController?.abort();
         state.detailController?.abort();
+        state.intakeController?.abort();
         // Cached pages hold listing text from adult catalogues. They live as long
         // as the dialog and no longer.
         state.cache.clear();

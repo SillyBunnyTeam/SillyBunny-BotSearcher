@@ -12,11 +12,8 @@ import { el, setText, setImgSafe, setLinkSafe } from './render.js';
 import { postRouted, thumbSrc } from './api.js';
 import { getSettings } from './settings.js';
 import { noteBotbooruAccountError } from './account.js';
-import { commitPreparedCardImport, importCard, openCharacter, prepareCardImport } from './importer.js';
 import {
-    additionalImportContents,
     detailErrorMessage,
-    importErrorMessage,
     insideRows,
     sourceStatLine,
 } from './copy.js';
@@ -26,10 +23,10 @@ import {
  * @param {any} summary the card as it appeared in the grid
  * @param {{ id: string, label: string, clientHosts: string[], nativeImport?: boolean, capabilities?: any }} source
  * @param {() => void} onBack
- * @param {{ signal?: AbortSignal, onTag?: (tag: string) => void, onDirect?: (reason: string) => void, isSourceDirect?: (sourceId: string) => boolean }} [options]
+ * @param {{ signal?: AbortSignal, onTag?: (tag: string) => void, onDirect?: (reason: string) => void, isSourceDirect?: (sourceId: string) => boolean, onIntake?: (request: object) => void }} [options]
  */
 export async function showDetail(container, summary, source, onBack, options = {}) {
-    const { signal, onTag, onDirect, isSourceDirect } = options;
+    const { signal, onTag, onDirect, isSourceDirect, onIntake } = options;
     container.replaceChildren();
 
     const settings = getSettings();
@@ -199,7 +196,7 @@ export async function showDetail(container, summary, source, onBack, options = {
     container.append(body);
 
     // ---- actions ----
-    container.append(actionBar(card, source));
+    container.append(actionBar(card, source, onIntake));
 }
 
 function isExpectedDetail(card, summary, source) {
@@ -255,67 +252,20 @@ function insidePanel(inside) {
     return panel;
 }
 
-function actionBar(card, source) {
+/**
+ * Import now goes through the intake screen rather than straight into the
+ * collection, so the panel above is what the SOURCE says and the next screen is
+ * what the card's own bytes say.
+ */
+function actionBar(card, source, onIntake) {
     const bar = el('div', 'sbbs-detail-actions');
 
     const button = el('button', 'menu_button sbbs-import');
     button.type = 'button';
-    setText(button, 'Import card');
+    setText(button, 'Review and import');
+    button.addEventListener('click', () => onIntake?.({ card, source }));
 
-    const status = el('span', 'sbbs-import-status');
-    status.setAttribute('role', 'status');
-    const inspection = el('div', 'sbbs-import-inspection');
-    let prepared = null;
-
-    button.addEventListener('click', async () => {
-        const native = source.nativeImport === true;
-        button.disabled = true;
-        setText(status, '');
-
-        try {
-            if (!native && !prepared) {
-                setText(button, 'Inspecting...');
-                prepared = await prepareCardImport(card, source);
-                inspection.replaceChildren();
-                const verified = insidePanel(prepared.inside);
-                if (verified) {
-                    verified.open = true;
-                    inspection.append(verified);
-                }
-                const surprise = additionalImportContents(prepared.inside, card.inside);
-                setText(
-                    status,
-                    surprise
-                        ? `${surprise} Review the verified contents, then click again to import.`
-                        : 'Card bytes were validated. Review the verified contents, then click again to import.',
-                );
-                button.disabled = false;
-                setText(button, 'Import inspected card');
-                return;
-            }
-
-            setText(button, 'Importing...');
-            const added = native
-                ? await importCard(card, source)
-                : await commitPreparedCardImport(prepared);
-
-            setText(button, 'Imported');
-
-            const open = el('button', 'menu_button sbbs-open-character', 'Open character');
-            open.type = 'button';
-            open.addEventListener('click', () => openCharacter(added.avatar));
-            bar.append(open);
-
-            toastr.success('Character imported.', 'Imported');
-        } catch (error) {
-            button.disabled = false;
-            setText(button, prepared ? 'Import inspected card' : 'Try import again');
-            setText(status, importErrorMessage(error));
-            toastr.error(importErrorMessage(error), 'Import failed');
-        }
-    });
-
-    bar.append(button, status, inspection);
-    bar.append(el('p', 'sbbs-trust-note', 'Cards come from third-party sites. Review the description and card contents before starting a chat.'));
+    bar.append(button);
+    bar.append(el('p', 'sbbs-trust-note', 'Cards come from third-party sites. The next screen reports what is inside this one before anything is added to your collection.'));
     return bar;
 }

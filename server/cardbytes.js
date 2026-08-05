@@ -20,8 +20,9 @@
 
 import { hasForbiddenKey, isPlainObject, own } from './validate.js';
 import { inflateSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+export const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
 /** A real card has a few dozen chunks; this only bounds a hostile file. */
 const MAX_CHUNKS = 4096;
@@ -59,7 +60,7 @@ const ADAM7_PASSES = Object.freeze([
 ]);
 
 /** Keywords SillyTavern and the card specs use for embedded card data. */
-const CARD_KEYWORDS = new Set(['chara', 'ccv3']);
+export const CARD_KEYWORDS = new Set(['chara', 'ccv3']);
 
 const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
@@ -73,7 +74,11 @@ const CRC_TABLE = (() => {
     return table;
 })();
 
-function crc32Range(buffer, start, end) {
+/**
+ * CRC32 over a byte range, as PNG defines it (type field through data).
+ * Exported for cardclean.js, which has to re-checksum the one chunk it rewrites.
+ */
+export function crc32Range(buffer, start, end) {
     let crc = 0xFFFFFFFF;
     for (let index = start; index < end; index++) {
         crc = CRC_TABLE[(crc ^ buffer[index]) & 0xFF] ^ (crc >>> 8);
@@ -375,12 +380,89 @@ export function parseCardJson(buffer) {
 }
 
 /**
+ * Fields the v3 card specification defines under `data`. Anything else is
+ * reported as unrecognised — not refused, because the specs gain fields and a
+ * card written against a newer one is not malformed, only unaccounted for.
+ */
+export const KNOWN_DATA_FIELDS = new Set([
+    'name', 'description', 'personality', 'scenario', 'first_mes', 'mes_example',
+    'creator_notes', 'system_prompt', 'post_history_instructions', 'alternate_greetings',
+    'character_book', 'tags', 'creator', 'character_version', 'extensions',
+    'group_only_greetings', 'nickname', 'creator_notes_multilingual', 'source', 'assets',
+]);
+
+/** Extension blocks SillyBunny itself reads. The rest are ones nobody here can vouch for. */
+export const KNOWN_EXTENSIONS = new Set(['depth_prompt', 'talkativeness', 'fav', 'world', 'regex_scripts']);
+
+/** Fields that go into the model's permanent prompt, in the order they are shown. */
+const PROMPT_FIELDS = Object.freeze([
+    ['description', 'description'],
+    ['personality', 'personality'],
+    ['scenario', 'scenario'],
+    ['firstMessage', 'first_mes'],
+    ['messageExample', 'mes_example'],
+    ['systemPrompt', 'system_prompt'],
+    ['postHistoryInstructions', 'post_history_instructions'],
+]);
+
+/** Above this the client is told the footprint could not be measured, not a guess. */
+const MAX_PROMPT_TEXT_BYTES = 1024 * 1024;
+
+/** Walk budget. Deliberately the same shape as the URL scan this grew out of. */
+const SCAN_LIMITS = Object.freeze({
+    nodes: 10_000,
+    textBytes: 512 * 1024,
+    urls: 256,
+    macroNames: 64,
+    privateInfo: 32,
+    htmlFields: 16,
+    children: 256,
+    // Per-string cap for pattern matching. Several of these patterns scan from
+    // every start position, so cost grows with the square of the string they are
+    // pointed at. A card field is a paragraph; a megabyte of one is either a
+    // pathological card or an attempt to make this loop expensive. Bounding the
+    // slice bounds all of them at once, whatever a future pattern looks like.
+    scanString: 128 * 1024,
+});
+
+/**
+ * Things a card can carry that act on their own once imported.
+ *
+ * `hasScriptOrIframe` uses the fork's own test verbatim
+ * (public/scripts/card-script-detection.js), so the flag means exactly what
+ * SillyBunny's card-script sandbox means by it rather than a second opinion.
+ */
+const SCRIPT_OR_IFRAME = /<\s*(?:script|iframe)(?:\s|>)/i;
+const ANY_HTML_TAG = /<\s*\/?\s*[a-z][a-z0-9-]*(?:\s[^<>]*)?\/?>/i;
+const URL_PATTERN = /https?:\/\/[^\s)"'<>]+/gi;
+const MACRO_PATTERN = /\{\{\s*([A-Za-z0-9_:.\-/#]{1,64})/g;
+
+/**
+ * Details an author probably did not mean to publish.
+ *
+ * Deliberately excludes bare IPv4: version strings look identical to it, and a
+ * report that cries wolf on `v1.2.3.4` teaches users to skip this section.
+ */
+export const PRIVATE_PATTERNS = Object.freeze([
+    // The leading \b is load-bearing, not tidiness. Without it, a long run of
+    // characters the first class accepts makes this quadratic: every position
+    // consumes to the end looking for an @ that is not there. \b fails
+    // immediately mid-run, so the scan stays linear on prose and on junk alike.
+    ['email', /\b[A-Za-z0-9._%+-]{1,128}@[A-Za-z0-9.-]{1,128}\.[A-Za-z]{2,24}/g],
+    ['apiKey', /\b(?:sk-[A-Za-z0-9_-]{16,512}|AIza[A-Za-z0-9_-]{35}|ghp_[A-Za-z0-9]{20,512}|xox[baprs]-[A-Za-z0-9-]{10,512})/g],
+    ['bearer', /\bBearer\s{1,8}[A-Za-z0-9._~+/-]{20,512}={0,2}/g],
+    ['homePath', /(?:[A-Za-z]:\\Users\\[^\\/:*?"<>|\r\n]{1,64}|\/home\/[A-Za-z0-9._-]{1,64}|\/Users\/[A-Za-z0-9._-]{1,64})/g],
+    ['discordInvite', /\bdiscord(?:\.gg|app\.com\/invite)\/[A-Za-z0-9-]{2,32}/gi],
+]);
+
+/**
  * Summarises what an imported card will bring with it, from the validated
  * bytes rather than from whatever the listing claimed.
  *
  * @param {{ spec: string, card: Record<string, unknown> }} parsed
+ * @param {Buffer} [buffer] the bytes this card was read from, for the hash
  */
-export function describeCard(parsed) {
+export function describeCard(parsed, buffer) {
     const root = parsed.card;
     const data = parsed.spec === 'chara_card_v1' ? root : own(root, 'data');
 
@@ -394,7 +476,10 @@ export function describeCard(parsed) {
     // thing to executable content a card can carry, so they get counted.
     const regex = own(extensions, 'regex_scripts');
 
+    const scan = scanCard(data);
+
     return {
+        // --- unchanged, and shared with the source-reported shape in normalize.js ---
         lorebookEntries: Array.isArray(entries) ? entries.length : (book ? null : 0),
         alternateGreetings: Array.isArray(greetings) ? greetings.length : 0,
         hasSystemPrompt: nonEmptyString(own(data, 'system_prompt')),
@@ -403,9 +488,26 @@ export function describeCard(parsed) {
         regexScripts: Array.isArray(regex) ? regex.length : 0,
         embeddedAssets: Array.isArray(assets) ? assets.length : 0,
         specVersion: parsed.spec,
-        // Strings anywhere in a card can be rendered or injected after import.
-        externalImages: countExternalUrls(data),
         originSite: null,
+
+        // --- byte-derived identity ---
+        sha256: Buffer.isBuffer(buffer) ? createHash('sha256').update(buffer).digest('hex') : null,
+        byteSize: Buffer.isBuffer(buffer) ? buffer.length : null,
+        name: shortString(own(data, 'name')),
+        creator: shortString(own(data, 'creator')),
+        characterVersion: shortString(own(data, 'character_version')),
+        hasCreatorNotes: nonEmptyString(own(data, 'creator_notes')),
+        tagCount: Array.isArray(own(data, 'tags')) ? own(data, 'tags').length : 0,
+
+        // --- what the walk found ---
+        macros: scan.macros,
+        html: scan.html,
+        externalUrls: scan.externalUrls,
+        privateInfo: scan.privateInfo,
+
+        extensions: describeExtensions(extensions),
+        malformed: findMalformed(parsed, data),
+        promptText: promptTextOf(data),
     };
 }
 
@@ -413,47 +515,237 @@ function nonEmptyString(value) {
     return typeof value === 'string' && value.trim() !== '';
 }
 
-function countExternalUrls(value) {
+function shortString(value) {
+    return typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, 200) : null;
+}
+
+/**
+ * Splits `data.extensions` into blocks SillyBunny reads and blocks it does not.
+ *
+ * An unknown block is not an accusation. It is usually another client's own
+ * metadata, and saying so is more useful than either hiding it or implying it
+ * is hostile.
+ */
+function describeExtensions(extensions) {
+    const known = [];
+    const unknown = [];
+    if (isPlainObject(extensions)) {
+        for (const key of Object.getOwnPropertyNames(extensions).slice(0, SCAN_LIMITS.children)) {
+            (KNOWN_EXTENSIONS.has(key) ? known : unknown).push(key.slice(0, 64));
+        }
+    }
+    return { known, unknown };
+}
+
+/**
+ * Fields that are present but not the shape the spec calls for, plus fields
+ * outside the spec entirely. Reported, never repaired: guessing what an author
+ * meant is how a reader becomes a rewriter.
+ */
+function findMalformed(parsed, data) {
+    const problems = [];
+    const add = (field, problem) => {
+        if (problems.length < 32) {
+            problems.push({ field, problem });
+        }
+    };
+
+    if (!isPlainObject(data)) {
+        return problems;
+    }
+
+    const specVersion = own(parsed.card, 'spec_version');
+    if (parsed.spec === 'chara_card_v3' && specVersion !== undefined && !String(specVersion).startsWith('3')) {
+        add('spec_version', 'does not match the declared spec');
+    }
+    if (parsed.spec === 'chara_card_v2' && specVersion !== undefined && !String(specVersion).startsWith('2')) {
+        add('spec_version', 'does not match the declared spec');
+    }
+
+    for (const [field, expected] of [['tags', 'array'], ['alternate_greetings', 'array'], ['group_only_greetings', 'array'], ['assets', 'array']]) {
+        const value = own(data, field);
+        if (value !== undefined && value !== null && !Array.isArray(value)) {
+            add(field, `should be an ${expected}`);
+        }
+    }
+    for (const field of ['description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions', 'creator', 'creator_notes', 'character_version']) {
+        const value = own(data, field);
+        if (value !== undefined && value !== null && typeof value !== 'string') {
+            add(field, 'should be text');
+        }
+    }
+    const extensions = own(data, 'extensions');
+    if (extensions !== undefined && extensions !== null && !isPlainObject(extensions)) {
+        add('extensions', 'should be an object');
+    }
+
+    // v1 has no field list to check against; only the v2/v3 wrapper does.
+    if (parsed.spec !== 'chara_card_v1') {
+        for (const key of Object.getOwnPropertyNames(data).slice(0, SCAN_LIMITS.children)) {
+            if (!KNOWN_DATA_FIELDS.has(key)) {
+                add(key.slice(0, 64), 'is not a field in this card format');
+            }
+        }
+    }
+
+    return problems;
+}
+
+/**
+ * The text that will end up in the model's permanent prompt, returned verbatim
+ * so the browser can measure it with SillyBunny's own tokenizer.
+ *
+ * Sending it back is not a disclosure: the caller already holds the whole card.
+ * Truncating instead of refusing would produce a confident wrong number, so an
+ * oversized card reports that it could not be measured.
+ */
+function promptTextOf(data) {
+    const fields = {};
+    let total = 0;
+    for (const [name, key] of PROMPT_FIELDS) {
+        const value = own(data, key);
+        const text = typeof value === 'string' ? value : '';
+        total += Buffer.byteLength(text);
+        fields[name] = text;
+    }
+    return total > MAX_PROMPT_TEXT_BYTES ? { truncated: true, fields: {} } : { truncated: false, fields };
+}
+
+/**
+ * One bounded pass over every string in the card.
+ *
+ * This grew out of countExternalUrls() and keeps its budget. Everything the
+ * report needs from the card's text is gathered here rather than in a walker
+ * per finding: the input is a stranger's file, and one traversal with one set
+ * of caps is far easier to reason about than five.
+ */
+function scanCard(root) {
     const urls = new Set();
+    const urlHosts = new Set();
+    const macroNames = new Set();
+    const htmlFields = new Set();
+    const privateInfo = [];
+    const privateSeen = new Set();
     const seen = new Set();
-    const stack = [value];
+
+    let macroCount = 0;
+    let htmlCount = 0;
+    let hasScriptOrIframe = false;
     let nodes = 0;
     let textBytes = 0;
 
-    while (stack.length > 0 && nodes < 10_000 && urls.size < 256 && textBytes < 512 * 1024) {
-        const current = stack.pop();
+    // Each entry carries the top-level field it came from, so a finding can say
+    // where it is rather than only that it exists somewhere.
+    const stack = [{ value: root, field: null }];
+
+    while (stack.length > 0 && nodes < SCAN_LIMITS.nodes && textBytes < SCAN_LIMITS.textBytes) {
+        const { value: current, field } = stack.pop();
         nodes++;
+
         if (typeof current === 'string') {
             textBytes += Buffer.byteLength(current);
-            const matches = current.match(/https?:\/\/[^\s)"'<>]+/gi);
-            if (matches) {
-                for (const url of matches) {
-                    urls.add(url);
-                    if (urls.size >= 256) {
-                        break;
-                    }
-                }
-            }
+            scanText(current.slice(0, SCAN_LIMITS.scanString), field ?? 'card');
             continue;
         }
         if (!current || typeof current !== 'object' || seen.has(current)) {
             continue;
         }
         seen.add(current);
+
         if (Array.isArray(current)) {
-            for (let index = 0; index < current.length && index < 256; index++) {
-                stack.push(current[index]);
+            for (let index = 0; index < current.length && index < SCAN_LIMITS.children; index++) {
+                stack.push({ value: current[index], field });
             }
             continue;
         }
+
         let keys = 0;
-        for (const key in current) {
-            if (Object.prototype.hasOwnProperty.call(current, key) && keys++ < 256) {
-                stack.push(current[key]);
+        for (const key of Object.getOwnPropertyNames(current)) {
+            if (keys++ >= SCAN_LIMITS.children) {
+                break;
+            }
+            // Top level names the field; deeper nodes inherit it, so a URL in a
+            // lorebook entry is still reported as being in the lorebook.
+            stack.push({ value: current[key], field: field ?? key });
+        }
+    }
+
+    function scanText(text, field) {
+        if (urls.size < SCAN_LIMITS.urls) {
+            for (const match of text.match(URL_PATTERN) ?? []) {
+                urls.add(match);
+                const host = hostOf(match);
+                if (host) {
+                    urlHosts.add(host);
+                }
+                if (urls.size >= SCAN_LIMITS.urls) {
+                    break;
+                }
+            }
+        }
+
+        MACRO_PATTERN.lastIndex = 0;
+        let macro;
+        while ((macro = MACRO_PATTERN.exec(text)) !== null) {
+            macroCount++;
+            if (macroNames.size < SCAN_LIMITS.macroNames) {
+                macroNames.add(macro[1].toLowerCase());
+            }
+        }
+
+        if (ANY_HTML_TAG.test(text)) {
+            htmlCount++;
+            if (htmlFields.size < SCAN_LIMITS.htmlFields) {
+                htmlFields.add(field);
+            }
+        }
+        if (!hasScriptOrIframe && SCRIPT_OR_IFRAME.test(text)) {
+            hasScriptOrIframe = true;
+        }
+
+        for (const [kind, pattern] of PRIVATE_PATTERNS) {
+            if (privateInfo.length >= SCAN_LIMITS.privateInfo) {
+                break;
+            }
+            pattern.lastIndex = 0;
+            let hit;
+            while ((hit = pattern.exec(text)) !== null && privateInfo.length < SCAN_LIMITS.privateInfo) {
+                const key = `${kind}:${field}:${hit[0]}`;
+                if (privateSeen.has(key)) {
+                    continue;
+                }
+                privateSeen.add(key);
+                privateInfo.push({ kind, field, redacted: redact(hit[0]) });
             }
         }
     }
-    return urls.size;
+
+    return {
+        externalUrls: { count: urls.size, hosts: [...urlHosts].slice(0, 32) },
+        macros: { count: macroCount, names: [...macroNames].sort() },
+        html: { count: htmlCount, fields: [...htmlFields], hasScriptOrIframe },
+        privateInfo,
+    };
+}
+
+function hostOf(raw) {
+    try {
+        return new URL(raw).hostname.toLowerCase().slice(0, 253);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Enough of the value to recognise it, not enough to republish it. The report
+ * exists to say "this is in here", not to hand the secret to the next reader.
+ */
+function redact(value) {
+    const text = String(value);
+    if (text.length <= 6) {
+        return '*'.repeat(text.length);
+    }
+    return `${text.slice(0, 2)}${'*'.repeat(Math.min(8, text.length - 4))}${text.slice(-2)}`;
 }
 
 /**
@@ -490,9 +782,9 @@ export function validateCardBytes(buffer, expect) {
         }
 
         const parsed = decodeCardPayload(raw);
-        return { kind: 'png', spec: parsed.spec, inside: describeCard(parsed) };
+        return { kind: 'png', spec: parsed.spec, inside: describeCard(parsed, buffer) };
     }
 
     const parsed = parseCardJson(buffer);
-    return { kind: 'json', spec: parsed.spec, inside: describeCard(parsed) };
+    return { kind: 'json', spec: parsed.spec, inside: describeCard(parsed, buffer) };
 }

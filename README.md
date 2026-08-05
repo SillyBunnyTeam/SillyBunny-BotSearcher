@@ -56,7 +56,7 @@ Stop SillyBunny completely, then run the complete block in Git Bash (including o
 ```bash
 set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
-RELEASE=v0.3.0
+RELEASE=v0.4.0
 REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
@@ -86,6 +86,8 @@ Restart SillyBunny after a manual update. Never substitute a branch name or `lat
 ### Deployment limits
 
 The plugin validates its own request shapes and byte limits, but SillyBunny's global body parsers run before plugin routes. Configure the reverse proxy or host to authenticate and reject oversized, chunked, and decompressed bodies before parsing the BotSearcher route prefix. Plugin-level limits are a secondary control, not protection against parser memory or disk exhaustion.
+
+The card inspection routes accept a raw body up to the card size limit. Include them when sizing that boundary.
 
 ## Usage
 
@@ -189,7 +191,7 @@ Thumbnail routing depends on the **Thumbnails** setting:
 | Direct from card site | The browser requests thumbnails from an allowed image host. That host sees the browser connection and its IP address. |
 | No thumbnails | BotSearcher shows letter tiles and does not request thumbnail images. |
 
-Opening a source-page link leaves SillyBunny and contacts that site in the browser. Importing can also make additional requests through SillyBunny's importer or the BotSearcher server, depending on the import mode.
+Opening a source-page link leaves SillyBunny and contacts that site in the browser. Opening the intake screen fetches the card, through SillyBunny's importer or the BotSearcher server depending on the import mode, so reviewing a card contacts its source even if you then decide not to import it.
 
 Direct browser thumbnails can follow image-host redirects and use browser image-fetch behavior. Use **Through SillyBunny server** or **No thumbnails** when final-hop image routing or third-party cookie behavior must not leave the server.
 
@@ -206,10 +208,10 @@ Direct browser thumbnails can follow image-host redirects and use browser image-
 | Character Tavern | Yes | Assembled | Thumbnails are unavailable through the server |
 | Quillgen | No | Downloaded | Limited public catalog |
 
-Import modes:
+Import modes describe where the card file comes from. All three are reported on by the intake screen before anything is imported.
 
-- **Native:** BotSearcher gives a source URL to SillyBunny's existing importer.
-- **Downloaded:** The BotSearcher server downloads and validates a card file before passing it to SillyBunny's importer.
+- **Native:** SillyBunny's existing downloader fetches the card from a source URL and returns it to the browser. BotSearcher makes no request to the source.
+- **Downloaded:** The BotSearcher server downloads and validates a card file.
 - **Assembled:** The source provides card data but no downloadable card file. The BotSearcher server builds and validates a card from that data.
 
 Sources with tiers 0, 1, and 2 are enabled by default. Tier 3 sources are opt-in under **Extensions > BotSearcher > Sources**. Source APIs can change without notice; use `node scripts/probe-sources.mjs` to check their current status.
@@ -218,15 +220,56 @@ Botbooru native imports use its documented bare `/download/png/<id>` URL. BotSea
 
 JannyAI native imports are delegated to SillyBunny's existing Janny downloader through a JanitorAI-hosted URL containing the card UUID. The downloader may still be blocked by Cloudflare, especially when SillyBunny runs on a hosted or datacenter IP address.
 
-## Card contents and import risks
+## Card intake
 
-Character cards are third-party documents. In addition to visible fields, a card can contain lorebook entries, alternate greetings, system prompts, post-history instructions, depth prompts, regex scripts, embedded assets, and external URLs. These fields can change model input or message processing after import.
+Character cards are third-party documents. In addition to visible fields, a card can contain lorebook entries, alternate greetings, system prompts, post-history instructions, depth prompts, regex scripts, macros, HTML, embedded assets, and external URLs. These fields can change model input or message processing after import.
 
-The **Card contents** panel reports what the source says about a listing. "Not reported" means BotSearcher does not have enough information to claim that a field is present or absent.
+Every import goes through the intake screen first. **Review and import** on a card's details opens it, and nothing is added to your collection until you choose an import there.
 
-For downloaded and assembled imports, BotSearcher first validates the actual card bytes and shows any additional contents before the separate import confirmation. Native imports use SillyBunny's importer and do not receive the same byte-derived report from BotSearcher.
+The screen reports what is in the card's own bytes, not what the listing claimed:
 
-Review the card description and contents before starting a chat. Structural validation confirms that downloaded data is a supported card format; it does not determine whether the card's instructions are safe or appropriate.
+- The name, creator and card version recorded in the card. Where the card's creator differs from the one the listing advertised, both are shown.
+- Card format, file size and SHA-256 hash.
+- Whether a character of that name is already in your collection, and which fields differ from the installed copy.
+- Token footprint, measured with SillyBunny's own tokenizer.
+- **Behaviour:** regex scripts, system prompt, post-history instructions, depth prompt, macros, HTML, embedded scripts or iframes, and extension data SillyBunny does not recognise.
+- **Contents:** lorebook entries, alternate greetings, embedded assets, tags, and the hosts of any external URLs.
+- **Worth checking:** details that look personal rather than intended for publication — email addresses, API keys, access tokens, file paths containing a user name, and Discord invites — reported by category and location with the value redacted. Also fields that are the wrong type or outside the card format.
+
+Counts and flags are reported. Lorebook text, script bodies and macro arguments are the card's own content and are not reproduced on the screen.
+
+### Where the bytes come from
+
+BotSearcher does not download native-source cards itself. It asks SillyBunny to download the card and hand the bytes back, then inspects those. The card you are shown is therefore the card that would be imported, the fork's own per-site downloaders still do the downloading, and no additional request is made to the source.
+
+If SillyBunny cannot download the card — a source that refuses your server, or a Cloudflare challenge — the screen says the card was not inspected and offers the ordinary unscanned import as an explicit choice, rather than presenting an empty report as an all-clear.
+
+### Inspecting a card file
+
+**Inspect a card file** in the browse dialog opens a PNG or JSON card from your own machine, and dropping a card file onto the dialog does the same. Cards obtained anywhere else can be reported on and imported through the same screen. Dropping a card onto the BotSearcher dialog inspects it instead of importing it; SillyBunny's usual drag-and-drop import is unaffected everywhere else.
+
+### Exact and clean import
+
+**Import exactly** imports the card as downloaded.
+
+**Clean import** removes the parts that act on their own and states what it will remove from that particular card before you choose it:
+
+| | |
+|---|---|
+| Removed | Regex scripts, extension blocks SillyBunny does not read, fields outside the card format, and personal details (replaced in place) |
+| Kept | Lorebook, alternate greetings, system prompt, post-history instructions, depth prompt, HTML formatting, external URLs |
+
+HTML and external URLs are reported but not removed, because they are frequently the author's own formatting and artwork.
+
+A cleaned PNG is spliced, not re-encoded: only the text chunks carrying card data are rebuilt, and the image itself is copied through unchanged. Where a card carries both a `chara` and a `ccv3` chunk, both are rewritten, so no uncleaned copy is left behind in the one your reader does not use.
+
+When a card is already in your collection, **Replace the installed copy** overwrites it instead of adding a second one.
+
+Review the card description and contents before starting a chat. Structural validation confirms that data is a supported card format; it does not determine whether the card's instructions are safe or appropriate.
+
+### Source-reported contents
+
+The **Card contents** panel on the details pane is separate, and reports what the *source* says about a listing before anything is downloaded. "Not reported" means BotSearcher does not have enough information to claim that a field is present or absent.
 
 ## Security scope
 
@@ -238,6 +281,7 @@ BotSearcher applies the following controls:
 - Source links and native import URLs are checked against source-specific hosts before use. Browser-direct API requests use a narrower direct-fetch host list.
 - BotBooru account credentials are accepted only by fixed same-origin account routes. Bearer authorization is restricted to the exact BotBooru host and is rejected across redirects.
 - Card files downloaded by the BotSearcher server are size-limited and structurally validated before import.
+- Card bytes sent for inspection are size-limited as they arrive, structurally validated, and answered with a description only. The inspection route returns nothing that can be imported and makes no outbound request.
 - Card descriptions are shown as plain text, not rendered as Markdown or HTML.
 
 These controls do not make third-party card instructions safe. They also do not hide a query from the selected source, or hide from that source the outgoing IP address of whichever component made the request — the server, or your browser when a source is being requested from it.
@@ -251,7 +295,7 @@ These controls do not make third-party card instructions safe. They also do not 
 | SFW only by default | On | Requests an SFW filter where the selected source supports one. |
 | Hide AI-generated cards | Off | Requests this filter only from Botbooru, the source that supports it. |
 | Blur sensitive and unrated thumbnails | On | Blurs thumbnails marked sensitive or lacking a reported rating until revealed. Rating labels remain visible when blur is off. |
-| Show the Card contents panel | On | Shows content details reported by the source. The short import notice remains visible. |
+| Show the Card contents panel | On | Shows the source-reported content details on the details pane. The intake screen is not affected by this setting; it reports on every import. |
 | Request a source from this browser when the server cannot reach it | Off | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source stays listed but cannot return results. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
 | Save search history in SillyBunny profile settings | Off | Stores search terms for suggestions. Disable it to clear saved terms. |

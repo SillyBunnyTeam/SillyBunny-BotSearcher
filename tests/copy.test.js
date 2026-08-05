@@ -23,6 +23,8 @@ import {
     sourceStatLine,
     serverPluginUpdateErrorMessage,
 } from '../client/copy.js';
+
+import { VERSION } from '../shared/schema.js';
 import { SOURCES } from '../server/registry.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -139,7 +141,7 @@ test('downloaded card notices report contents not disclosed by the source', () =
         hasDepthPrompt: true,
         regexScripts: 1,
         embeddedAssets: 1,
-        externalImages: 2,
+        externalUrls: { count: 2, hosts: ['a.example', 'b.example'] },
     };
     const reported = {
         lorebookEntries: 0,
@@ -317,12 +319,13 @@ test('browser template gives the search field a durable name and matching limit'
     assert.match(browser, /id="sbbs_query"[^>]*maxlength="128"/);
     assert.match(browser, /id="sbbs_sfw_note"[^>]*aria-live="polite"/);
     assert.match(browser, /aria-label="Card details"/);
+    assert.match(browser, /aria-label="Card intake"/);
     assert.match(browserScript, /popup\.dlg\.setAttribute\('aria-label', 'Find cards online'\)/);
     assert.match(install, />Check again<\/button>/);
     assert.match(install, /class="sbbs-install-guidance" hidden/);
     assert.match(install, /id="sbbs_update_plugin"[^>]*hidden>Update server plugin and restart<\/button>/);
     assert.match(install, /class="sbbs-install-update-status" role="status" aria-live="polite" hidden/);
-    assert.match(install, /RELEASE=<span class="sbbs-release-tag">v0\.3\.0<\/span>/);
+    assert.match(install, new RegExp(`RELEASE=<span class="sbbs-release-tag">v${VERSION}</span>`));
     assert.match(install, /git clone --branch "\$RELEASE" --depth 1/);
     assert.match(install, /npm --prefix plugins\/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts --no-audit --no-fund/);
     assert.match(install, /set -eu/);

@@ -323,7 +323,8 @@ test('remote images referenced in a description are counted', () => {
         } },
     });
 
-    assert.equal(inside.externalImages, 2, 'duplicates count once');
+    assert.equal(inside.externalUrls.count, 2, 'duplicates count once');
+    assert.deepEqual(inside.externalUrls.hosts.sort(), ['a.example', 'b.example']);
 });
 
 test('a minimal card reports zero optional contents', () => {
@@ -335,5 +336,169 @@ test('a minimal card reports zero optional contents', () => {
     assert.equal(inside.lorebookEntries, 0);
     assert.equal(inside.alternateGreetings, 0);
     assert.equal(inside.hasSystemPrompt, false);
-    assert.equal(inside.externalImages, 0);
+    assert.equal(inside.externalUrls.count, 0);
+    assert.equal(inside.macros.count, 0);
+    assert.equal(inside.html.count, 0);
+    assert.deepEqual(inside.privateInfo, []);
+});
+
+// ---- the intake report ----
+
+function describeData(data, spec = 'chara_card_v2') {
+    return describeCard({ spec, card: { spec, spec_version: '2.0', data } });
+}
+
+test('the hash and size come from the bytes, not the card', () => {
+    const png = pngWith('chara', V2_CARD);
+    const verdict = validateCardBytes(png);
+
+    assert.match(verdict.inside.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(verdict.inside.byteSize, png.length);
+    // Same card, different bytes: the hash identifies the file, not the character.
+    assert.notEqual(verdict.inside.sha256, validateCardBytes(pngWith('ccv3', V2_CARD)).inside.sha256);
+});
+
+test('macros are counted and named', () => {
+    const inside = describeData({
+        name: 'Macro',
+        description: 'Hello {{user}}, I am {{char}}. {{user}} again.',
+        first_mes: '{{random::a::b}}',
+    });
+
+    assert.equal(inside.macros.count, 4);
+    assert.deepEqual(inside.macros.names, ['char', 'random::a::b', 'user']);
+});
+
+test('HTML is reported with the field it appears in, and script tags flagged separately', () => {
+    const plain = describeData({ name: 'A', description: '<b>bold</b> and <i>italic</i>' });
+    assert.equal(plain.html.count, 1);
+    assert.deepEqual(plain.html.fields, ['description']);
+    assert.equal(plain.html.hasScriptOrIframe, false, 'formatting is not a script');
+
+    const scripted = describeData({ name: 'B', description: 'hi <script>alert(1)</script>' });
+    assert.equal(scripted.html.hasScriptOrIframe, true);
+});
+
+test('a comparison operator is not mistaken for HTML', () => {
+    const inside = describeData({ name: 'C', description: 'if x < 3 and y > 4 then...' });
+
+    assert.equal(inside.html.count, 0);
+});
+
+test('private details are reported by kind and field, never in full', () => {
+    const inside = describeData({
+        name: 'Leaky',
+        description: 'mail me at jane.doe@example.com',
+        creator_notes: 'saved in C:\\Users\\jdoe\\cards and my key is sk-abcdefghijklmnopqrstuvwx',
+    });
+
+    const kinds = inside.privateInfo.map((hit) => hit.kind).sort();
+    assert.deepEqual(kinds, ['apiKey', 'email', 'homePath']);
+
+    const email = inside.privateInfo.find((hit) => hit.kind === 'email');
+    assert.equal(email.field, 'description');
+    assert.ok(!email.redacted.includes('jane.doe'), 'the report must not republish the value');
+    assert.match(email.redacted, /^ja\*+om$/);
+});
+
+test('a version string is not reported as an IP address', () => {
+    // Bare IPv4 is deliberately not a pattern: it would fire on every changelog.
+    const inside = describeData({ name: 'D', description: 'Card revision 1.2.3.4, tested on 10.0.0.1' });
+
+    assert.deepEqual(inside.privateInfo, []);
+});
+
+test('extension blocks are split into ones SillyBunny reads and ones it does not', () => {
+    const inside = describeData({
+        name: 'E',
+        extensions: { depth_prompt: { prompt: 'x' }, regex_scripts: [{}], risu_ext: { a: 1 }, some_client: {} },
+    });
+
+    assert.deepEqual(inside.extensions.known.sort(), ['depth_prompt', 'regex_scripts']);
+    assert.deepEqual(inside.extensions.unknown.sort(), ['risu_ext', 'some_client']);
+    assert.equal(inside.regexScripts, 1);
+});
+
+test('fields of the wrong type and outside the format are reported, not repaired', () => {
+    const inside = describeData({
+        name: 'F',
+        tags: 'not-an-array',
+        description: 42,
+        mystery_field: 'hello',
+    });
+
+    const byField = Object.fromEntries(inside.malformed.map((problem) => [problem.field, problem.problem]));
+    assert.equal(byField.tags, 'should be an array');
+    assert.equal(byField.description, 'should be text');
+    assert.equal(byField.mystery_field, 'is not a field in this card format');
+    // Reporting only: the value is untouched.
+    assert.equal(inside.malformed.length, 3);
+});
+
+test('a spec_version disagreeing with the declared spec is reported', () => {
+    const inside = describeCard({
+        spec: 'chara_card_v3',
+        card: { spec: 'chara_card_v3', spec_version: '2.0', data: { name: 'G' } },
+    });
+
+    assert.ok(inside.malformed.some((problem) => problem.field === 'spec_version'));
+});
+
+test('prompt text comes back verbatim so the browser can measure it', () => {
+    const inside = describeData({
+        name: 'H',
+        description: 'A description.',
+        first_mes: 'Hello.',
+        system_prompt: 'You are a test.',
+    });
+
+    assert.equal(inside.promptText.truncated, false);
+    assert.equal(inside.promptText.fields.description, 'A description.');
+    assert.equal(inside.promptText.fields.firstMessage, 'Hello.');
+    assert.equal(inside.promptText.fields.systemPrompt, 'You are a test.');
+    assert.equal(inside.promptText.fields.scenario, '', 'absent fields are empty, not missing');
+});
+
+test('an oversized card says it could not be measured rather than guessing', () => {
+    const inside = describeData({ name: 'I', description: 'x'.repeat(2 * 1024 * 1024) });
+
+    assert.equal(inside.promptText.truncated, true);
+    assert.deepEqual(inside.promptText.fields, {});
+});
+
+test('the scan stays bounded on a deliberately hostile card', () => {
+    // Wide and deep, with a URL at every level: the walk must return, and must
+    // not be talked into unbounded work by the shape of the input.
+    let node = { description: 'https://deep.example/x' };
+    for (let depth = 0; depth < 500; depth++) {
+        node = { nested: node, description: `https://level${depth}.example/x` };
+    }
+    const wide = {};
+    for (let index = 0; index < 5000; index++) {
+        wide[`k${index}`] = `https://wide${index}.example/x`;
+    }
+
+    const started = Date.now();
+    const inside = describeData({ name: 'J', extensions: { node, wide } });
+
+    assert.ok(Date.now() - started < 2000, 'the walk must not run away');
+    assert.ok(inside.externalUrls.count <= 256, 'URL collection is capped');
+    assert.ok(inside.externalUrls.hosts.length <= 32, 'host list is capped');
+});
+
+test('a cycle in the card does not hang the scan', () => {
+    const data = { name: 'K', description: 'https://a.example/1' };
+    data.extensions = { self: data };
+
+    assert.equal(describeData(data).externalUrls.count, 1);
+});
+
+test('a long unbroken string does not make the scan quadratic', () => {
+    // Regression: the email pattern once had no leading \b, so a megabyte of
+    // characters its first class accepts sent it scanning to the end from every
+    // position. This card hung the inspector for minutes.
+    const started = Date.now();
+    describeData({ name: 'L', description: 'a.b-c_d'.repeat(200_000) });
+
+    assert.ok(Date.now() - started < 1000, 'scanning must be linear in the text length');
 });

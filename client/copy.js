@@ -127,6 +127,18 @@ export function sourceStatLine(sourceId, stats) {
         .join(', ');
 }
 
+/**
+ * External URL count, from either contents shape.
+ *
+ * A source-reported summary never carries one; a byte-derived report carries
+ * `{ count, hosts }`. Reading both here keeps every caller from caring which
+ * kind of summary it was handed.
+ */
+export function externalUrlCount(inside) {
+    const value = inside?.externalUrls;
+    return typeof value?.count === 'number' ? value.count : 0;
+}
+
 export function insideRows(inside) {
     if (!inside || typeof inside !== 'object') {
         return [];
@@ -170,8 +182,8 @@ export function insideRows(inside) {
     } else if (inside.embeddedAssets > 0) {
         add('Embedded assets', formatCount(inside.embeddedAssets, 'asset'));
     }
-    if (inside.externalImages > 0) {
-        add('External URL references', formatCount(inside.externalImages, 'reference'));
+    if (externalUrlCount(inside) > 0) {
+        add('External URL references', formatCount(externalUrlCount(inside), 'reference'));
     }
     if (inside.originSite) {
         add('Reported origin', inside.originSite);
@@ -391,8 +403,8 @@ export function additionalImportContents(actual, reported) {
     if (actual.embeddedAssets > reportedCount('embeddedAssets')) {
         notes.push(formatCount(actual.embeddedAssets, 'embedded asset'));
     }
-    if (actual.externalImages > 0) {
-        notes.push(formatCount(actual.externalImages, 'external URL reference'));
+    if (externalUrlCount(actual) > 0) {
+        notes.push(formatCount(externalUrlCount(actual), 'external URL reference'));
     }
 
     return notes.length === 0 ? '' : `The imported card also contains ${list(notes)}.`;
@@ -486,4 +498,273 @@ export function serverPluginUpdateErrorMessage(error) {
         return 'Only a SillyBunny administrator can update server plugins.';
     }
     return 'The server plugin could not be updated. Check the server logs before retrying.';
+}
+
+// ---- card intake ----
+
+/**
+ * The intake report, grouped so the parts that act on their own are not buried
+ * among the parts that are simply the character.
+ *
+ * Counts and flags only. Lorebook text, script bodies and macro arguments are
+ * the card's own content and are not reproduced here.
+ */
+export function intakeSections(inside) {
+    if (!inside || typeof inside !== 'object') {
+        return [];
+    }
+
+    const sections = [];
+    const section = (title, rows) => {
+        if (rows.length > 0) {
+            sections.push({ title, rows });
+        }
+    };
+    const row = (label, value, tone) => ({ label, value, tone });
+
+    // Things that change model input or message processing on their own.
+    const automation = [];
+    if (inside.regexScripts > 0) {
+        automation.push(row('Regex scripts', formatCount(inside.regexScripts, 'script'), 'warn'));
+    }
+    if (inside.hasSystemPrompt) {
+        automation.push(row('System prompt', 'Included'));
+    }
+    if (inside.hasPostHistoryInstructions) {
+        automation.push(row('Post-history instructions', 'Included'));
+    }
+    if (inside.hasDepthPrompt) {
+        automation.push(row('Depth prompt', 'Included'));
+    }
+    if (inside.macros?.count > 0) {
+        automation.push(row('Macros', macroSummary(inside.macros)));
+    }
+    if (inside.html?.hasScriptOrIframe) {
+        automation.push(row('Embedded script or iframe', 'Present', 'warn'));
+    } else if (inside.html?.count > 0) {
+        automation.push(row('HTML markup', htmlSummary(inside.html)));
+    }
+    if (inside.extensions?.unknown?.length > 0) {
+        automation.push(row(
+            'Unrecognised extension data',
+            inside.extensions.unknown.join(', '),
+            'warn',
+        ));
+    }
+    section('Behaviour', automation);
+
+    // Things that are simply the character.
+    const content = [];
+    if (inside.lorebookEntries === null) {
+        content.push(row('Lorebook', 'Not reported'));
+    } else if (inside.lorebookEntries > 0) {
+        content.push(row('Lorebook', formatCount(inside.lorebookEntries, 'entry', 'entries')));
+    }
+    if (inside.alternateGreetings > 0) {
+        content.push(row('Alternate greetings', formatCount(inside.alternateGreetings, 'greeting')));
+    }
+    if (inside.embeddedAssets > 0) {
+        content.push(row('Embedded assets', formatCount(inside.embeddedAssets, 'asset')));
+    }
+    if (inside.tagCount > 0) {
+        content.push(row('Tags', formatCount(inside.tagCount, 'tag')));
+    }
+    if (externalUrlCount(inside) > 0) {
+        content.push(row('External URLs', externalUrlSummary(inside.externalUrls)));
+    }
+    section('Contents', content);
+
+    // Things worth a second look before starting a chat.
+    const findings = [];
+    for (const hit of inside.privateInfo ?? []) {
+        findings.push(row(privateInfoLabel(hit.kind), `${hit.redacted} in ${fieldLabel(hit.field)}`, 'warn'));
+    }
+    for (const problem of inside.malformed ?? []) {
+        findings.push(row(fieldLabel(problem.field), problem.problem, 'note'));
+    }
+    section('Worth checking', findings);
+
+    return sections;
+}
+
+function macroSummary(macros) {
+    const names = (macros.names ?? []).slice(0, 6).map((name) => `{{${name}}}`);
+    const count = formatCount(macros.count, 'use');
+    return names.length === 0 ? count : `${count} — ${names.join(', ')}${macros.names.length > names.length ? '...' : ''}`;
+}
+
+function htmlSummary(html) {
+    const fields = (html.fields ?? []).slice(0, 4).map(fieldLabel);
+    return fields.length === 0 ? 'Present' : `In ${list(fields)}`;
+}
+
+function externalUrlSummary(externalUrls) {
+    const hosts = (externalUrls.hosts ?? []).slice(0, 4);
+    const count = formatCount(externalUrls.count, 'reference');
+    return hosts.length === 0 ? count : `${count} — ${hosts.join(', ')}${externalUrls.hosts.length > hosts.length ? '...' : ''}`;
+}
+
+const PRIVATE_INFO_LABELS = Object.freeze({
+    email: 'Email address',
+    apiKey: 'API key',
+    bearer: 'Access token',
+    homePath: 'File path with a user name',
+    discordInvite: 'Discord invite',
+});
+
+function privateInfoLabel(kind) {
+    return Object.prototype.hasOwnProperty.call(PRIVATE_INFO_LABELS, kind)
+        ? PRIVATE_INFO_LABELS[kind]
+        : 'Personal detail';
+}
+
+const FIELD_LABELS = Object.freeze({
+    description: 'the description',
+    personality: 'the personality',
+    scenario: 'the scenario',
+    first_mes: 'the first message',
+    mes_example: 'the example messages',
+    system_prompt: 'the system prompt',
+    post_history_instructions: 'the post-history instructions',
+    creator_notes: "the creator's notes",
+    alternate_greetings: 'the alternate greetings',
+    character_book: 'the lorebook',
+    extensions: 'the extension data',
+    spec_version: 'the card format version',
+    card: 'the card',
+});
+
+function fieldLabel(field) {
+    return Object.prototype.hasOwnProperty.call(FIELD_LABELS, field)
+        ? FIELD_LABELS[field]
+        : String(field ?? '').replace(/_/g, ' ');
+}
+
+/** The line under the card name: format, size and hash. */
+export function intakeIdentity(inside) {
+    const parts = [];
+    if (inside?.specVersion) {
+        parts.push(SPEC_LABELS[inside.specVersion] ?? inside.specVersion);
+    }
+    if (finiteNumber(inside?.byteSize) !== null) {
+        parts.push(formatBytes(inside.byteSize));
+    }
+    if (typeof inside?.sha256 === 'string') {
+        parts.push(`SHA-256 ${inside.sha256.slice(0, 12)}`);
+    }
+    return parts.join(' · ');
+}
+
+const SPEC_LABELS = Object.freeze({
+    chara_card_v1: 'Card format v1',
+    chara_card_v2: 'Card format v2',
+    chara_card_v3: 'Card format v3',
+});
+
+export function formatBytes(value) {
+    const bytes = finiteNumber(value);
+    if (bytes === null) {
+        return '';
+    }
+    if (bytes < 1024) {
+        return `${bytes} bytes`;
+    }
+    if (bytes < 1024 * 1024) {
+        return `${Math.round(bytes / 1024)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** How the installed copy compares, or that there is not one. */
+export function duplicateMessage(match) {
+    if (!match) {
+        return 'This card is not in your collection.';
+    }
+    // Not knowing is its own answer. Reporting it as "not installed" would be a
+    // false all-clear, and duplicates are one of the things this screen is for.
+    if (match.unknown === true) {
+        return 'BotSearcher could not read your collection, so it cannot say whether this card is already in it.';
+    }
+    if (match.differences.length === 0) {
+        return `Already in your collection as "${match.name}". The contents compared here are identical.`;
+    }
+    return `Already in your collection as "${match.name}", with a different ${list(match.differences)}.`;
+}
+
+/** What clean import will do to THIS card, itemised. */
+export function cleanPlan(inside) {
+    if (!inside || typeof inside !== 'object') {
+        return [];
+    }
+
+    const items = [];
+    if (inside.regexScripts > 0) {
+        items.push(formatCount(inside.regexScripts, 'regex script'));
+    }
+    const unknown = inside.extensions?.unknown ?? [];
+    if (unknown.length > 0) {
+        items.push(`${formatCount(unknown.length, 'unrecognised extension block')} (${unknown.slice(0, 3).join(', ')})`);
+    }
+    const unrecognised = (inside.malformed ?? []).filter((problem) => problem.problem === 'is not a field in this card format');
+    if (unrecognised.length > 0) {
+        items.push(formatCount(unrecognised.length, 'field outside the card format'));
+    }
+    if ((inside.privateInfo ?? []).length > 0) {
+        items.push(formatCount(inside.privateInfo.length, 'personal detail'));
+    }
+    return items;
+}
+
+/** What clean import deliberately leaves alone, so the button cannot overpromise. */
+export function cleanKeeps(inside) {
+    const keeps = [];
+    if (inside?.lorebookEntries > 0) {
+        keeps.push(formatCount(inside.lorebookEntries, 'lorebook entry', 'lorebook entries'));
+    }
+    if (inside?.alternateGreetings > 0) {
+        keeps.push(formatCount(inside.alternateGreetings, 'greeting'));
+    }
+    if (inside?.hasSystemPrompt) {
+        keeps.push('the system prompt');
+    }
+    if (inside?.hasDepthPrompt) {
+        keeps.push('the depth prompt');
+    }
+    if (inside?.html?.count > 0 && !inside.html.hasScriptOrIframe) {
+        keeps.push('HTML formatting');
+    }
+    return keeps;
+}
+
+export function tokenFootprint(counts) {
+    if (!counts || counts.total === null) {
+        return 'Token footprint could not be measured for this card.';
+    }
+    return `About ${formatNumber(counts.total)} tokens before any chat begins.`;
+}
+
+export function intakeErrorMessage(error) {
+    switch (error?.message ?? error?.code) {
+        case 'native_download_failed':
+            return 'SillyBunny could not download this card from the source.';
+        case 'not_a_character':
+            return 'That link is not a character card.';
+        case 'import_url_rejected':
+            return 'BotSearcher rejected the import address for this card.';
+        case 'too_large':
+            return 'That file is larger than BotSearcher will inspect.';
+        case 'card_invalid':
+            return 'That file is not a character card BotSearcher recognises.';
+        case 'not_a_png':
+            return 'That file is not a PNG card or a JSON card.';
+        case 'png_malformed':
+            return 'That card file is damaged and was not inspected.';
+        case 'rate_limited':
+            return 'Too many inspections. Wait a moment and try again.';
+        case 'unsupported_media_type':
+        case 'payload_too_large':
+            return 'BotSearcher refused those bytes before reading them.';
+        default:
+            return 'The card could not be inspected.';
+    }
 }
