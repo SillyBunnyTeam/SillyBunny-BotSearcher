@@ -736,11 +736,62 @@ export function cleanKeeps(inside) {
     return keeps;
 }
 
+/**
+ * What the card costs, split by when each part is actually in context.
+ *
+ * A single number would be wrong in both directions. The example messages are
+ * dropped once the chat fills the context, and a lorebook's keyword entries only
+ * arrive when something triggers them — so the headline counts what is there
+ * before the user has typed anything, and the rows say what the rest can add.
+ *
+ * @param {object|null} counts from countTokens(): per-bucket totals, each a
+ *   number or null when it could not be measured.
+ * @returns {{headline: string, rows: {label: string, value: string}[]}}
+ */
 export function tokenFootprint(counts) {
-    if (!counts || counts.total === null) {
-        return 'Token footprint could not be measured for this card.';
+    if (!counts || counts.measured !== true) {
+        return { headline: 'Token cost could not be measured for this card.', rows: [] };
     }
-    return `About ${formatNumber(counts.total)} tokens before any chat begins.`;
+
+    const rows = [];
+    const row = (label, value, suffix = '') => {
+        if (typeof value === 'number') {
+            rows.push({ label, value: `${formatNumber(value)} tokens${suffix}` });
+        }
+    };
+
+    row('Always in context', counts.always);
+    row('Opening message', counts.greeting);
+    row('Example messages', counts.examples);
+
+    if (counts.lorebook === null) {
+        rows.push({ label: 'Lorebook', value: 'None in this card' });
+    } else if (counts.lorebook?.measured !== true) {
+        rows.push({ label: 'Lorebook', value: 'Too large to measure' });
+    } else {
+        if (counts.lorebook.alwaysEntries > 0) {
+            row(
+                'Lorebook, always on',
+                counts.lorebook.always,
+                ` across ${formatCount(counts.lorebook.alwaysEntries, 'entry', 'entries')}`,
+            );
+        }
+        if (counts.lorebook.conditionalEntries > 0) {
+            rows.push({
+                label: 'Lorebook, only when triggered',
+                value: `up to ${formatNumber(counts.lorebook.conditional)} tokens across ${formatCount(counts.lorebook.conditionalEntries, 'entry', 'entries')}`,
+            });
+        }
+    }
+
+    const permanent = [counts.always, counts.greeting, counts.examples, counts.lorebook?.always]
+        .filter(value => typeof value === 'number')
+        .reduce((sum, value) => sum + value, 0);
+
+    return {
+        headline: `About ${formatNumber(permanent)} tokens are in context before you send anything.`,
+        rows,
+    };
 }
 
 export function intakeErrorMessage(error) {

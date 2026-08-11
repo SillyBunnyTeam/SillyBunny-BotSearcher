@@ -56,7 +56,7 @@ Stop SillyBunny completely, then run the complete block in Git Bash (including o
 ```bash
 set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
-RELEASE=v0.4.0
+RELEASE=v0.5.0
 REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
@@ -231,12 +231,14 @@ The screen reports what is in the card's own bytes, not what the listing claimed
 - The name, creator and card version recorded in the card. Where the card's creator differs from the one the listing advertised, both are shown.
 - Card format, file size and SHA-256 hash.
 - Whether a character of that name is already in your collection, and which fields differ from the installed copy.
-- Token footprint, measured with SillyBunny's own tokenizer.
+- **Token cost**, measured with SillyBunny's own tokenizer, split by when each part is actually in context: what is there for every request, the opening message, the example messages, and the embedded lorebook. The lorebook is split again, because most of one costs nothing until something triggers it — entries marked always-on are counted separately from the ceiling the keyword entries could reach.
 - **Behaviour:** regex scripts, system prompt, post-history instructions, depth prompt, macros, HTML, embedded scripts or iframes, and extension data SillyBunny does not recognise.
 - **Contents:** lorebook entries, alternate greetings, embedded assets, tags, and the hosts of any external URLs.
 - **Worth checking:** details that look personal rather than intended for publication — email addresses, API keys, access tokens, file paths containing a user name, and Discord invites — reported by category and location with the value redacted. Also fields that are the wrong type or outside the card format.
 
 Counts and flags are reported. Lorebook text, script bodies and macro arguments are the card's own content and are not reproduced on the screen.
+
+Measuring the token cost is the one thing that needs the text itself, since only SillyBunny's tokenizer can produce a number that matches the rest of the app. The card's text — including its lorebook's — is therefore sent from the plugin to your browser, counted there, and discarded. It never reaches the page.
 
 ### Where the bytes come from
 

@@ -55,8 +55,13 @@ function stats(value) {
 }
 
 /**
- * The Card contents summary. Counts only; never the lorebook
- * contents themselves, which would be untrusted text we have no reason to ship.
+ * The Card contents summary as a SOURCE reported it. Counts only — a listing's
+ * claims about a card are not a reason to ship its lorebook text around.
+ *
+ * The byte-derived report in cardbytes.js does carry card text, including the
+ * lorebook's, because the intake screen measures its token cost with the host
+ * tokenizer. That text is counted and never rendered; this shape is a different
+ * thing and stays counts-only.
  * @param {unknown} value
  */
 function inside(value) {

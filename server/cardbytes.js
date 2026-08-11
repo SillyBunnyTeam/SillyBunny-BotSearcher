@@ -408,6 +408,16 @@ const PROMPT_FIELDS = Object.freeze([
 /** Above this the client is told the footprint could not be measured, not a guess. */
 const MAX_PROMPT_TEXT_BYTES = 1024 * 1024;
 
+/**
+ * The lorebook gets its own budget rather than sharing the one above.
+ *
+ * A card with a large embedded lorebook is common and its card fields are
+ * usually ordinary. One shared cap would let the lorebook push the whole
+ * measurement over the edge, so a number that works today would start reporting
+ * "could not be measured" for reasons the user cannot see.
+ */
+const MAX_LOREBOOK_TEXT_BYTES = 1024 * 1024;
+
 /** Walk budget. Deliberately the same shape as the URL scan this grew out of. */
 const SCAN_LIMITS = Object.freeze({
     nodes: 10_000,
@@ -592,12 +602,14 @@ function findMalformed(parsed, data) {
 }
 
 /**
- * The text that will end up in the model's permanent prompt, returned verbatim
- * so the browser can measure it with SillyBunny's own tokenizer.
+ * The text that will end up in the model's prompt, returned verbatim so the
+ * browser can measure it with SillyBunny's own tokenizer.
  *
  * Sending it back is not a disclosure: the caller already holds the whole card.
- * Truncating instead of refusing would produce a confident wrong number, so an
- * oversized card reports that it could not be measured.
+ * It is returned to be counted and is never rendered — the intake screen reports
+ * what a card contains, it does not reproduce it. Truncating instead of refusing
+ * would produce a confident wrong number, so an oversized card reports that it
+ * could not be measured.
  */
 function promptTextOf(data) {
     const fields = {};
@@ -608,7 +620,61 @@ function promptTextOf(data) {
         total += Buffer.byteLength(text);
         fields[name] = text;
     }
-    return total > MAX_PROMPT_TEXT_BYTES ? { truncated: true, fields: {} } : { truncated: false, fields };
+    const measured = total > MAX_PROMPT_TEXT_BYTES
+        ? { truncated: true, fields: {} }
+        : { truncated: false, fields };
+    return { ...measured, lorebook: lorebookTextOf(data) };
+}
+
+/**
+ * The embedded lorebook's text, split by whether it is always in context.
+ *
+ * A lorebook does not cost what the sum of its entries costs. Only entries
+ * marked `constant` are injected on every request; the rest wait for one of
+ * their keywords, and an entry that is switched off never arrives at all. One
+ * lump number would overstate the permanent cost of every keyword-driven book,
+ * which is most of them, so the two are measured separately and shown
+ * separately.
+ *
+ * Keys are not included: they decide whether an entry fires, they are not sent
+ * to the model.
+ *
+ * Returns null when the card carries no readable lorebook, which the client
+ * shows as "no lorebook" rather than as zero tokens.
+ */
+function lorebookTextOf(data) {
+    const entries = own(own(data, 'character_book'), 'entries');
+    if (!Array.isArray(entries)) {
+        return null;
+    }
+
+    const always = [];
+    const conditional = [];
+    let total = 0;
+
+    for (const entry of entries) {
+        // `enabled` is optional and defaults to on; only an explicit false is a
+        // switched-off entry.
+        if (own(entry, 'enabled') === false) {
+            continue;
+        }
+        const content = own(entry, 'content');
+        const text = typeof content === 'string' ? content : '';
+        total += Buffer.byteLength(text);
+        (own(entry, 'constant') === true ? always : conditional).push(text);
+    }
+
+    if (total > MAX_LOREBOOK_TEXT_BYTES) {
+        return { truncated: true, always: '', conditional: '', alwaysEntries: always.length, conditionalEntries: conditional.length };
+    }
+
+    return {
+        truncated: false,
+        always: always.join('\n'),
+        conditional: conditional.join('\n'),
+        alwaysEntries: always.length,
+        conditionalEntries: conditional.length,
+    };
 }
 
 /**

@@ -22,6 +22,7 @@ import {
     sortLabel,
     sourceStatLine,
     serverPluginUpdateErrorMessage,
+    tokenFootprint,
 } from '../client/copy.js';
 
 import { VERSION } from '../shared/schema.js';
@@ -336,4 +337,62 @@ test('browser template gives the search field a durable name and matching limit'
     assert.match(install, /STATUS="\$\(git -C "\$PLUGIN_ROOT" status --porcelain --untracked-files=no\)"/);
     assert.match(install, /trap rollback ERR/);
     assert.match(install, /including on Windows/);
+});
+
+test('the token cost separates what is always in context from what is not', () => {
+    const { headline, rows } = tokenFootprint({
+        measured: true,
+        always: 1200,
+        greeting: 300,
+        examples: 900,
+        lorebook: { measured: true, always: 400, conditional: 2100, alwaysEntries: 3, conditionalEntries: 17 },
+    });
+
+    assert.equal(headline, 'About 2,800 tokens are in context before you send anything.');
+    assert.deepEqual(rows, [
+        { label: 'Always in context', value: '1,200 tokens' },
+        { label: 'Opening message', value: '300 tokens' },
+        { label: 'Example messages', value: '900 tokens' },
+        { label: 'Lorebook, always on', value: '400 tokens across 3 entries' },
+        { label: 'Lorebook, only when triggered', value: 'up to 2,100 tokens across 17 entries' },
+    ]);
+});
+
+test('keyword-only lorebook entries never inflate the headline', () => {
+    const { headline } = tokenFootprint({
+        measured: true,
+        always: 100,
+        greeting: 0,
+        examples: 0,
+        lorebook: { measured: true, always: 0, conditional: 50000, alwaysEntries: 0, conditionalEntries: 200 },
+    });
+
+    // 50,000 tokens of lorebook that nothing has triggered cost nothing yet, and
+    // a headline that claimed otherwise would be the whole point of the screen
+    // getting the answer wrong.
+    assert.equal(headline, 'About 100 tokens are in context before you send anything.');
+});
+
+test('a card with no lorebook says so instead of reporting zero', () => {
+    const { rows } = tokenFootprint({ measured: true, always: 10, greeting: 0, examples: 0, lorebook: null });
+    assert.deepEqual(rows.at(-1), { label: 'Lorebook', value: 'None in this card' });
+});
+
+test('an unmeasurable lorebook is named as such, not silently dropped', () => {
+    const { rows } = tokenFootprint({
+        measured: true,
+        always: 10,
+        greeting: 0,
+        examples: 0,
+        lorebook: { measured: false },
+    });
+    assert.deepEqual(rows.at(-1), { label: 'Lorebook', value: 'Too large to measure' });
+});
+
+test('an unmeasurable card reports that rather than a guess', () => {
+    assert.deepEqual(tokenFootprint({ measured: false }), {
+        headline: 'Token cost could not be measured for this card.',
+        rows: [],
+    });
+    assert.deepEqual(tokenFootprint(null).rows, []);
 });

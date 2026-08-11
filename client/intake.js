@@ -8,7 +8,10 @@
  * The same rule as the rest of the extension applies to every value: it was
  * written by a stranger, so it is written to the DOM through setText() and
  * never as markup. Counts and flags are reported; lorebook text, script bodies
- * and macro arguments are the card's content and are not reproduced.
+ * and macro arguments are the card's content and are not reproduced. The card's
+ * own text does reach this screen — the token cost has to be measured with the
+ * host tokenizer, which needs the text — but it is counted and discarded, never
+ * rendered.
  *
  * Structural validation is not a safety verdict, and the screen says so rather
  * than implying that a card with an empty findings list is safe to run.
@@ -150,12 +153,18 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
         body.append(el('p', 'sbbs-intake-undisclosed', undisclosed));
     }
 
-    // ---- token footprint ----
-    const footprint = el('p', 'sbbs-intake-tokens', 'Measuring token footprint...');
-    body.append(footprint);
+    // ---- what this card costs ----
+    const footprint = el('p', 'sbbs-intake-tokens', 'Measuring token cost...');
+    const footprintRows = el('dl', 'sbbs-intake-list');
+    body.append(el('h4', 'sbbs-intake-section', 'Token cost'), footprint, footprintRows);
     void countTokens(inside).then((counts) => {
-        if (!signal?.aborted) {
-            setText(footprint, tokenFootprint(counts));
+        if (signal?.aborted) {
+            return;
+        }
+        const { headline, rows } = tokenFootprint(counts);
+        setText(footprint, headline);
+        for (const entry of rows) {
+            footprintRows.append(el('dt', undefined, entry.label), el('dd', undefined, entry.value));
         }
     });
 
@@ -352,30 +361,70 @@ function differencesFrom(installed, inside) {
 }
 
 /**
- * Measures the card's permanent prompt with SillyBunny's own tokenizer, so the
- * number matches what the rest of the app would report.
+ * Which card fields land in which bucket.
+ *
+ * Grouped by when the text is in context rather than by field, because that is
+ * the question the screen answers. The first group is there for every request;
+ * the greeting is there once, as the opening message; the examples are dropped
+ * again as soon as the chat grows past them.
+ */
+const TOKEN_BUCKETS = Object.freeze([
+    ['always', ['description', 'personality', 'scenario', 'systemPrompt', 'postHistoryInstructions']],
+    ['greeting', ['firstMessage']],
+    ['examples', ['messageExample']],
+]);
+
+/**
+ * Measures the card with SillyBunny's own tokenizer, so the numbers match what
+ * the rest of the app would report.
+ *
+ * The text measured here is never rendered; only these counts are.
  */
 async function countTokens(inside) {
-    if (inside.promptText?.truncated !== false) {
-        return { total: null };
-    }
-
     const ctx = context();
-    if (typeof ctx.getTokenCountAsync !== 'function') {
-        return { total: null };
+    if (inside.promptText?.truncated !== false || typeof ctx.getTokenCountAsync !== 'function') {
+        return { measured: false };
     }
 
-    const text = Object.values(inside.promptText.fields ?? {}).filter(Boolean).join('\n');
-    if (text === '') {
-        return { total: 0 };
-    }
+    const fields = inside.promptText.fields ?? {};
+    const count = async (text) => (text === '' ? 0 : ctx.getTokenCountAsync(text));
+    const book = inside.promptText.lorebook;
+    const measurableBook = book && book.truncated === false ? book : null;
 
     try {
-        const total = await ctx.getTokenCountAsync(text);
-        return { total: Number.isFinite(total) ? total : null };
+        // The buckets are independent, so they are counted together rather than
+        // one after another — five round trips to the tokenizer in sequence is a
+        // visible pause on a slow one.
+        const totals = await Promise.all([
+            ...TOKEN_BUCKETS.map(([, keys]) => count(keys.map(key => fields[key] ?? '').filter(Boolean).join('\n'))),
+            count(measurableBook?.always ?? ''),
+            count(measurableBook?.conditional ?? ''),
+        ]);
+        if (!totals.every(Number.isFinite)) {
+            return { measured: false };
+        }
+
+        const counts = { measured: true, lorebook: null };
+        TOKEN_BUCKETS.forEach(([bucket], index) => {
+            counts[bucket] = totals[index];
+        });
+
+        if (book) {
+            counts.lorebook = measurableBook
+                ? {
+                    measured: true,
+                    always: totals[TOKEN_BUCKETS.length],
+                    conditional: totals[TOKEN_BUCKETS.length + 1],
+                    alwaysEntries: book.alwaysEntries ?? 0,
+                    conditionalEntries: book.conditionalEntries ?? 0,
+                }
+                : { measured: false };
+        }
+
+        return counts;
     } catch {
         // A tokenizer that is still loading is not worth failing the screen for.
-        return { total: null };
+        return { measured: false };
     }
 }
 

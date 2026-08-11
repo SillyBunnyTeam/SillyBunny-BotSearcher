@@ -466,6 +466,63 @@ test('an oversized card says it could not be measured rather than guessing', () 
     assert.deepEqual(inside.promptText.fields, {});
 });
 
+test('the lorebook is split by whether an entry is always in context', () => {
+    const inside = describeData({
+        name: 'I',
+        character_book: {
+            entries: [
+                { keys: ['a'], content: 'Always here.', constant: true },
+                { keys: ['b'], content: 'Only on a keyword.' },
+                { keys: ['c'], content: 'Also only on a keyword.' },
+            ],
+        },
+    });
+
+    assert.equal(inside.promptText.lorebook.truncated, false);
+    assert.equal(inside.promptText.lorebook.always, 'Always here.');
+    assert.equal(inside.promptText.lorebook.alwaysEntries, 1);
+    assert.equal(inside.promptText.lorebook.conditional, 'Only on a keyword.\nAlso only on a keyword.');
+    assert.equal(inside.promptText.lorebook.conditionalEntries, 2);
+    // Keys decide whether an entry fires; they are not sent to the model, so
+    // they are not counted and not shipped.
+    assert.ok(!inside.promptText.lorebook.conditional.includes('b'));
+});
+
+test('a switched-off lorebook entry costs nothing and is not counted', () => {
+    const inside = describeData({
+        name: 'I',
+        character_book: {
+            entries: [
+                { content: 'Live entry.' },
+                { content: 'Retired entry.', enabled: false },
+                { content: 'Explicitly on.', enabled: true },
+            ],
+        },
+    });
+
+    assert.equal(inside.promptText.lorebook.conditionalEntries, 2);
+    assert.ok(!inside.promptText.lorebook.conditional.includes('Retired'));
+});
+
+test('a card with no lorebook reports none rather than zero', () => {
+    assert.equal(describeData({ name: 'I' }).promptText.lorebook, null);
+    assert.equal(describeData({ name: 'I', character_book: {} }).promptText.lorebook, null);
+});
+
+test('an oversized lorebook is unmeasurable on its own, without spoiling the card fields', () => {
+    const inside = describeData({
+        name: 'I',
+        description: 'A description.',
+        character_book: { entries: [{ content: 'x'.repeat(2 * 1024 * 1024) }] },
+    });
+
+    assert.equal(inside.promptText.truncated, false, 'the card fields are still measurable');
+    assert.equal(inside.promptText.fields.description, 'A description.');
+    assert.equal(inside.promptText.lorebook.truncated, true);
+    assert.equal(inside.promptText.lorebook.conditional, '');
+    assert.equal(inside.promptText.lorebook.conditionalEntries, 1, 'the count survives the cap');
+});
+
 test('the scan stays bounded on a deliberately hostile card', () => {
     // Wide and deep, with a URL at every level: the walk must return, and must
     // not be talked into unbounded work by the shape of the input.

@@ -17,6 +17,20 @@ function tick() {
     return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * The token cost is measured after the report renders, on its own promise
+ * chain. Tests must let it land before restoring the globals, or it writes into
+ * a DOM whose `document` has already been taken away. Bounded and silent: a
+ * count that never arrives is the business of the test that asserts it.
+ */
+async function settle(container) {
+    const measuring = () => /Measuring token cost/
+        .test(container.querySelector('.sbbs-intake-tokens')?.textContent ?? '');
+    for (let attempt = 0; attempt < 100 && measuring(); attempt++) {
+        await tick();
+    }
+}
+
 async function waitFor(predicate, message) {
     for (let attempt = 0; attempt < 100; attempt++) {
         if (predicate()) {
@@ -61,6 +75,15 @@ const REPORT = {
                 messageExample: '',
                 systemPrompt: 'Be a knight.',
                 postHistoryInstructions: '',
+            },
+            lorebook: {
+                truncated: false,
+                // The stub tokenizer counts characters, so these lengths are the
+                // token numbers the screen should report.
+                always: 'ABCDE',
+                conditional: 'ABCDEFGHIJ',
+                alwaysEntries: 1,
+                conditionalEntries: 33,
             },
         },
     },
@@ -166,6 +189,71 @@ test('the report is shown and nothing is imported until a button is pressed', as
             'inspecting must not import',
         );
     } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('the token cost is split by when each part is actually in context', async () => {
+    const host = installHost({
+        routes: {
+            '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?tokens');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+        await settle(host.container);
+
+        const text = host.container.textContent;
+        // Stub tokenizer = one token per character. Always-in-context is
+        // 'A knight.' + '\n' + 'Be a knight.' = 22; the greeting is 'Hello.' = 6;
+        // there are no example messages; the always-on lorebook entry is 5.
+        assert.match(text, /Always in context/);
+        assert.match(text, /22 tokens/, 'the always-in-context bucket is counted');
+        assert.match(text, /6 tokens/, 'the opening message is counted separately');
+        assert.match(text, /5 tokens across 1 entry/, 'always-on lorebook entries are counted');
+        assert.match(text, /up to 10 tokens across 33 entries/, 'keyword entries are a ceiling, not a cost');
+        // 22 + 6 + 0 + 5
+        assert.match(text, /About 33 tokens are in context before you send anything/);
+        // The measured text itself must never reach the page.
+        assert.ok(!/A knight\./.test(text), 'card text is counted, never rendered');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('a card whose lorebook is too large reports that, rather than a wrong number', async () => {
+    const report = structuredClone(REPORT);
+    report.inside.promptText.lorebook = {
+        truncated: true,
+        always: '',
+        conditional: '',
+        alwaysEntries: 12,
+        conditionalEntries: 400,
+    };
+    const host = installHost({
+        routes: {
+            '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': jsonRoute(report),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?bigbook');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+        await settle(host.container);
+
+        const text = host.container.textContent;
+        assert.match(text, /Too large to measure/);
+        // The card's own fields are unaffected by the lorebook's budget.
+        assert.match(text, /22 tokens/);
+        assert.match(text, /About 28 tokens are in context/, 'an unmeasured lorebook adds nothing');
+    } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -202,6 +290,7 @@ test('an installed card of the same name is reported with what differs', async (
         // Replacing is offered only when there is something to replace.
         assert.ok(host.container.querySelector('.sbbs-intake-replace'));
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -222,6 +311,7 @@ test('a card that is not installed says so and offers no replace option', async 
         assert.match(host.container.querySelector('.sbbs-intake-duplicate').textContent, /not in your collection/);
         assert.equal(host.container.querySelector('.sbbs-intake-replace'), null);
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -259,6 +349,7 @@ test('clean import states what it removes and what it keeps, and routes through 
             'the cleaned bytes must be what is imported',
         );
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -284,6 +375,7 @@ test('exact import sends the untouched bytes', async () => {
 
         assert.ok(!host.calls.some((call) => call.path.includes('/clean')), 'exact import must not clean');
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -308,6 +400,7 @@ test('a native card that cannot be downloaded is reported as not inspected', asy
         assert.match(text, /Import without inspecting/);
         assert.ok(!host.calls.some((call) => call.path.includes('/api/characters/import')));
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -328,6 +421,7 @@ test('a local file is inspected without contacting any source', async () => {
             'a local card must not cause a source request',
         );
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -358,6 +452,7 @@ test('an unreadable collection is reported as unknown, never as "not installed"'
         // Nothing to replace when nothing is known.
         assert.equal(host.container.querySelector('.sbbs-intake-replace'), null);
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -390,6 +485,7 @@ test('the collection is refreshed before comparing, not read stale', async () =>
             /Already in your collection as "Seraphina"/,
         );
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
@@ -415,6 +511,7 @@ test('contents the listing never mentioned are called out', async () => {
         assert.match(text, /2 regex scripts/);
         assert.match(text, /a system prompt/);
     } finally {
+        await settle(host.container);
         host.restore();
     }
 });
