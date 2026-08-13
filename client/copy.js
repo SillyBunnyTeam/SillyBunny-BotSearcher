@@ -794,9 +794,12 @@ export function tokenFootprint(counts) {
     };
 }
 
-export function intakeErrorMessage(error) {
+export function intakeErrorMessage(error, sourceId) {
     switch (error?.message ?? error?.code) {
         case 'native_download_failed':
+            if (sourceId === 'jannyai') {
+                return 'SillyBunny could not download this JannyAI card. Cloudflare may be blocking the native import.';
+            }
             return 'SillyBunny could not download this card from the source.';
         case 'not_a_character':
             return 'That link is not a character card.';

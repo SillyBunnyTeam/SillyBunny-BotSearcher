@@ -405,6 +405,76 @@ test('a native card that cannot be downloaded is reported as not inspected', asy
     }
 });
 
+test('a blocked JannyAI card offers its source page and local-card recovery', async () => {
+    const host = installHost({
+        routes: { '/api/content/importURL': () => new Response('blocked', { status: 403 }) },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-recovery');
+        await showIntake(host.container, {
+            card: {
+                id: '311a6844-61d6-4468-aa98-91ecc7fbae86',
+                name: 'Blocked Janny card',
+                pageUrl: 'https://jannyai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-blocked',
+                importUrl: 'https://janitorai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-blocked',
+            },
+            source: {
+                id: 'jannyai',
+                label: 'JannyAI',
+                nativeImport: true,
+                clientHosts: ['jannyai.com', 'janitorai.com'],
+            },
+        }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-intake-recovery'), 'Janny recovery did not render');
+
+        assert.match(host.container.textContent, /Cloudflare may be blocking/);
+        assert.match(host.container.textContent, /Inspect a card file/);
+        const link = host.container.querySelector('.sbbs-intake-recovery a');
+        assert.equal(link?.textContent, 'Open JannyAI page');
+        assert.equal(link?.href, 'https://jannyai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-blocked');
+        assert.equal(link?.target, '_blank');
+        assert.ok(host.container.querySelector('button.sbbs-import'), 'native import fallback must remain available');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('a JannyAI inspection error after download does not offer download recovery', async () => {
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response(PNG_BYTES, {
+                headers: { 'X-Custom-Content-Type': 'character' },
+            }),
+            '/inspect': jsonRoute({ error: 'card_invalid' }, 422),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-invalid-card');
+        await showIntake(host.container, {
+            card: {
+                id: '311a6844-61d6-4468-aa98-91ecc7fbae86',
+                pageUrl: 'https://jannyai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-invalid',
+                importUrl: 'https://janitorai.com/characters/311a6844-61d6-4468-aa98-91ecc7fbae86_character-invalid',
+            },
+            source: {
+                id: 'jannyai',
+                label: 'JannyAI',
+                nativeImport: true,
+                clientHosts: ['jannyai.com', 'janitorai.com'],
+            },
+        }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-detail-actions'), 'error state did not render');
+
+        assert.equal(host.container.querySelector('.sbbs-intake-recovery'), null);
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
 test('a local file is inspected without contacting any source', async () => {
     const host = installHost({ routes: { '/inspect': jsonRoute(REPORT) } });
 

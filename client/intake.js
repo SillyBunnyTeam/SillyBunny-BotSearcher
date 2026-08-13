@@ -17,7 +17,7 @@
  * than implying that a card with an empty findings list is safe to run.
  */
 
-import { el, setText } from './render.js';
+import { el, setLinkSafe, setText } from './render.js';
 import {
     cleanBytes,
     commitPreparedCardImport,
@@ -216,9 +216,13 @@ async function loadBytes(request, signal) {
  * — clearly labelled as skipping the inspection rather than passing it.
  */
 function showNotInspected(container, status, request, error, onBack) {
-    setText(status, intakeErrorMessage(error));
+    setText(status, intakeErrorMessage(error, request.source?.id));
 
     const actions = el('div', 'sbbs-detail-actions');
+    const recovery = nativeRecovery(request, error);
+    if (recovery) {
+        actions.append(recovery);
+    }
     if (request.source?.nativeImport === true && request.card) {
         actions.append(el(
             'p',
@@ -253,6 +257,30 @@ function showNotInspected(container, status, request, error, onBack) {
     retry.addEventListener('click', onBack);
     actions.append(retry);
     container.append(actions);
+}
+
+function nativeRecovery(request, error) {
+    if ((error?.message ?? error?.code) !== 'native_download_failed'
+        || request.source?.id !== 'jannyai') {
+        return null;
+    }
+
+    const recovery = el('div', 'sbbs-intake-recovery');
+    const instructions = el(
+        'p',
+        undefined,
+        'Download the card from JannyAI, then return to the browse dialog and choose “Inspect a card file” in Filters.',
+    );
+    const pageUrl = request.card?.pageUrl;
+    if (typeof pageUrl === 'string' && pageUrl !== '') {
+        const link = document.createElement('a');
+        setText(link, 'Open JannyAI page');
+        if (setLinkSafe(link, pageUrl, request.source.clientHosts)) {
+            instructions.append(document.createTextNode(' '), link);
+        }
+    }
+    recovery.append(instructions);
+    return recovery;
 }
 
 /** Where the card came from, and who the bytes say made it. */

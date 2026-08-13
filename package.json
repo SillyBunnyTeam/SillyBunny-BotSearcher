@@ -1,6 +1,6 @@
 {
     "name": "sillybunny-botsearcher",
-    "version": "0.5.0",
+    "version": "0.5.1",
     "description": "Server plugin required by the SillyBunny BotSearcher frontend extension.",
     "type": "module",
     "main": "server/index.js",

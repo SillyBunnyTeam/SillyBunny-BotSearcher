@@ -56,7 +56,7 @@ Stop SillyBunny completely, then run the complete block in Git Bash (including o
 ```bash
 set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
-RELEASE=v0.5.0
+RELEASE=v0.5.1
 REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
