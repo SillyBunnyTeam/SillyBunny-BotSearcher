@@ -988,6 +988,7 @@
 }
 
 /* Standalone setting actions are rows, rather than compact toolbar buttons. */
+.sbbs-setting-account > .menu_button,
 .sbbs-account-login > .menu_button,
 .sbbs-account-signed-in > .menu_button,
 .sbbs-setting-select > .menu_button,

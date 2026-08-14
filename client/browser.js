@@ -208,13 +208,17 @@ function wireBrowser(popup, health, options) {
 
     const settings = getSettings();
     const sources = Array.isArray(health?.sources) ? health.sources : [];
-    const searchable = sources.filter((source) => source?.capabilities?.search);
-    const urlSources = sources.filter((source) => source?.capabilities?.urlImport
+    const enabledSources = sources.filter((source) => isSourceEnabled(source, settings.enabledSources));
+    const searchable = enabledSources.filter((source) => source?.capabilities?.search);
+    const urlSources = enabledSources.filter((source) => source?.capabilities?.urlImport
         || source?.capabilities?.browserImport);
-    // Every enabled source stays in the picker, including one the server
+    const serverHasSearchOrUrlSource = sources.some((source) => source?.capabilities?.search
+        || source?.capabilities?.urlImport
+        || source?.capabilities?.browserImport);
+    // Every enabled searchable source stays in the catalogue picker, including one the server
     // currently has in cooldown. Selecting it explains why and offers a reload,
     // which is more useful than the source not being there to select.
-    const usable = searchable.filter((source) => isSourceEnabled(source, settings.enabledSources));
+    const usable = searchable;
 
     /** Card element -> record and immutable source snapshot. */
     const records = new Map();
@@ -310,11 +314,11 @@ function wireBrowser(popup, health, options) {
         }
         dom.filtersToggle.hidden = true;
         dom.filters.hidden = false;
-        setText(dom.state, searchable.length === 0
-            ? (urlSources.length === 0
+        setText(dom.state, urlSources.length > 0
+            ? 'Paste a supported card URL below to inspect it.'
+            : (!serverHasSearchOrUrlSource
                 ? 'The server did not report any searchable or URL-import sources.'
-                : 'Paste a Saucepan or JannyAI card URL below to inspect it.')
-            : 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.');
+                : 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.'));
         return () => {};
     }
 

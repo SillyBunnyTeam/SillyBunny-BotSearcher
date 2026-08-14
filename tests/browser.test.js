@@ -656,6 +656,99 @@ test('closing the recovery popup does not abort an in-progress server update', a
     }
 });
 
+test('an enabled URL-only source stays available without a catalogue source', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        fetch: globalThis.fetch,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+
+    globalThis.fetch = async (url) => {
+        if (String(url).endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
+                sources: [
+                    { id: 'botbooru', label: 'Botbooru', tier: 0, capabilities: { search: true } },
+                    { id: 'jannyai', label: 'JannyAI', tier: 2, capabilities: { search: true, browserImport: true } },
+                    { id: 'saucepan', label: 'Saucepan.ai', tier: 2, capabilities: { search: false, accountLogin: true, urlImport: true } },
+                ],
+            });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popups = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popups.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    const extensionSettings = {
+        SillyBunnyBotSearcher: { enabledSources: ['saucepan'] },
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            saveSettingsDebounced() {},
+            renderExtensionTemplateAsync: async () => TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { openBrowser } = await import('../client/browser.js?saucepan-url-only');
+        const opened = openBrowser();
+        await waitFor(() => popups.length === 1, 'URL-only browser popup did not open');
+
+        const popup = popups[0];
+        const source = popup.content.querySelector('#sbbs_source');
+        const urlSource = popup.content.querySelector('#sbbs_url_source');
+        assert.equal(
+            [...popup.content.querySelectorAll('.sbbs-bar-row')].every((row) => row.hidden),
+            true,
+            'catalogue controls stay hidden without an enabled searchable source',
+        );
+        assert.equal(popup.content.querySelector('#sbbs_url_import').hidden, false, 'URL import stays visible');
+        assert.deepEqual([...urlSource.options].map((option) => option.value), ['saucepan']);
+        assert.deepEqual([...source.options].map((option) => option.value), [], 'Saucepan must not enter the catalogue picker');
+        assert.match(popup.content.querySelector('#sbbs_state').textContent, /Paste a supported card URL/);
+        assert.doesNotMatch(popup.content.querySelector('#sbbs_state').textContent, /No sources are enabled/);
+
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
 test('a direct-routing notice can be dismissed without disabling the route', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {
