@@ -2,8 +2,13 @@
     <header>
       <form id="sbbs_search_form" class="sbbs-bar" role="search">
         <div class="sbbs-bar-row">
+            <!--
+                maxlength fits a pasted card URL (512, matching the server's URL
+                cap), not just a query; search terms are still capped at 128 by
+                the server and by rememberQuery().
+            -->
             <label class="sbbs-visually-hidden" for="sbbs_query">Search character cards</label>
-            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="128" enterkeyhint="search" autocomplete="off" spellcheck="false" list="sbbs_query_history">
+            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="512" enterkeyhint="search" autocomplete="off" spellcheck="false" list="sbbs_query_history">
             <!-- Previous searches, offered by the browser's own dropdown. -->
             <datalist id="sbbs_query_history"></datalist>
             <button id="sbbs_go" class="menu_button sbbs-go" type="submit" title="Search" aria-label="Search">
@@ -25,7 +30,6 @@
                 <span>Filters</span>
                 <span id="sbbs_filters_badge" class="sbbs-filters-badge" hidden></span>
             </button>
-            <button id="sbbs_saucepan_url_shortcut" class="menu_button" type="button" hidden>Paste Saucepan.ai URL</button>
         </div>
         <div id="sbbs_filters" class="sbbs-filters" hidden>
             <!--
@@ -54,6 +58,10 @@
                 Intake works on any card file, not only ones found here, so the
                 picker lives with the controls rather than with the results.
             -->
+            <!--
+                Card URLs are pasted into the search box itself and recognized
+                there; there is no separate URL form.
+            -->
             <div class="sbbs-filter-group sbbs-intake-entry">
                 <button id="sbbs_inspect_file" class="menu_button sbbs-inspect-file" type="button">
                     <i class="fa-solid fa-file-shield" aria-hidden="true"></i>
@@ -61,16 +69,6 @@
                 </button>
                 <input id="sbbs_card_file" class="sbbs-visually-hidden" type="file" accept=".png,.json,image/png,application/json" tabindex="-1" aria-hidden="true">
                 <span class="sbbs-setting-note">Reports what is inside a PNG or JSON card before importing it. You can also drop one onto this dialog.</span>
-            </div>
-            <div id="sbbs_url_import" class="sbbs-url-import" hidden>
-                <div id="sbbs_url_import_form" class="sbbs-url-import-form">
-                    <label for="sbbs_url_source">Import from source</label>
-                    <select id="sbbs_url_source" class="text_pole"></select>
-                    <label for="sbbs_card_url">Card URL</label>
-                    <input id="sbbs_card_url" class="text_pole" type="url" maxlength="512" autocomplete="url" placeholder="Paste a card URL">
-                    <button id="sbbs_url_import_button" class="menu_button" type="button">Inspect URL</button>
-                </div>
-                <span id="sbbs_url_import_note" class="sbbs-setting-note" role="status" aria-live="polite">The server fetches the card through the selected source's authenticated bridge, then opens the same intake review.</span>
             </div>
         </div>
       </form>
@@ -99,5 +97,5 @@
         the data-view selector, so the pane would stay invisible after switching.
     -->
     <section id="sbbs_detail" class="sbbs-detail" aria-label="Card details"></section>
-    <section id="sbbs_intake" class="sbbs-intake" aria-label="Card intake"></section>
+    <section id="sbbs_intake" class="sbbs-intake" aria-label="Review and import"></section>
 </div>

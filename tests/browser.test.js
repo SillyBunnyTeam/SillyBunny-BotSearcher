@@ -656,27 +656,41 @@ test('closing the recovery popup does not abort an in-progress server update', a
     }
 });
 
-test('an enabled URL-only source stays available without a catalogue source', async () => {
+test('an enabled URL-only source keeps the search box as its URL entry', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {
         document: globalThis.document,
         window: globalThis.window,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
         fetch: globalThis.fetch,
         SillyTavern: globalThis.SillyTavern,
     };
-    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+    });
 
-    globalThis.fetch = async (url) => {
-        if (String(url).endsWith('/healthz')) {
+    const urlCards = [];
+    globalThis.fetch = async (url, options = {}) => {
+        const path = String(url);
+        if (path.endsWith('/healthz')) {
             return jsonResponse({
                 protocol: PROTOCOL_VERSION,
                 version: VERSION,
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, capabilities: { search: true } },
-                    { id: 'jannyai', label: 'JannyAI', tier: 2, capabilities: { search: true, browserImport: true } },
-                    { id: 'saucepan', label: 'Saucepan.ai', tier: 2, capabilities: { search: false, accountLogin: true, urlImport: true } },
+                    { id: 'jannyai', label: 'JannyAI', tier: 2, clientHosts: ['jannyai.com', 'janitorai.com'], capabilities: { search: true, browserImport: true } },
+                    { id: 'saucepan', label: 'Saucepan.ai', tier: 2, clientHosts: ['saucepan.ai'], capabilities: { search: false, accountLogin: true, urlImport: true } },
                 ],
             });
+        }
+        if (path.endsWith('/url-card')) {
+            urlCards.push(JSON.parse(options.body));
+            return jsonResponse({ error: 'saucepan_login_required' }, 401);
+        }
+        if (path.endsWith('/account/status')) {
+            return jsonResponse({ loggedIn: false });
         }
         throw new Error(`unexpected request: ${url}`);
     };
@@ -711,6 +725,7 @@ test('an enabled URL-only source stays available without a catalogue source', as
         getContext: () => ({
             extensionSettings,
             saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
             renderExtensionTemplateAsync: async () => TEMPLATE,
             Popup,
             POPUP_TYPE: { DISPLAY: 'display' },
@@ -727,23 +742,33 @@ test('an enabled URL-only source stays available without a catalogue source', as
 
         const popup = popups[0];
         const source = popup.content.querySelector('#sbbs_source');
-        const urlSource = popup.content.querySelector('#sbbs_url_source');
-        assert.equal(
-            [...popup.content.querySelectorAll('.sbbs-bar-row')].every((row) => row.hidden),
-            true,
-            'catalogue controls stay hidden without an enabled searchable source',
-        );
-        assert.equal(popup.content.querySelector('#sbbs_url_import').hidden, false, 'URL import stays visible');
-        assert.deepEqual([...urlSource.options].map((option) => option.value), ['saucepan']);
-        assert.deepEqual([...urlSource.options].map((option) => option.textContent), ['Saucepan.ai (URL import only)']);
+        const query = popup.content.querySelector('#sbbs_query');
+        const state = popup.content.querySelector('#sbbs_state');
+        const form = popup.content.querySelector('#sbbs_search_form');
+        const rows = [...popup.content.querySelectorAll('.sbbs-bar-row')];
+        assert.equal(rows.find((row) => row.contains(query)).hidden, false, 'the query row stays for URL entry');
+        assert.equal(rows.find((row) => !row.contains(query)).hidden, true, 'catalogue controls stay hidden');
+        assert.equal(query.getAttribute('placeholder'), 'Paste a card URL (Saucepan.ai)');
         assert.deepEqual([...source.options].map((option) => option.value), [], 'Saucepan must not enter the catalogue picker');
-        assert.equal(
-            popup.content.querySelector('#sbbs_saucepan_url_shortcut').closest('.sbbs-bar-row').hidden,
-            true,
-            'catalogue-free mode keeps the secondary shortcut out of the hidden catalogue controls',
-        );
-        assert.match(popup.content.querySelector('#sbbs_state').textContent, /Paste a supported card URL/);
-        assert.doesNotMatch(popup.content.querySelector('#sbbs_state').textContent, /No sources are enabled/);
+        assert.match(state.textContent, /No searchable source is enabled\. Paste a card URL from Saucepan\.ai/);
+        assert.doesNotMatch(state.textContent, /No sources are enabled/);
+
+        // A URL from a source the user switched off says how to turn it on.
+        query.value = 'https://jannyai.com/characters/0b7a1a71-4c62-4de1-a44c-6f06a4ffe421_character-a';
+        form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        assert.match(state.textContent, /Enable JannyAI under Extensions > BotSearcher > Sources/);
+
+        // A Saucepan URL goes to /url-card and opens the intake review; the
+        // login it needs is offered on that screen rather than in a pointer to
+        // the settings drawer.
+        query.value = 'https://saucepan.ai/companion/abcdef1234';
+        form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        assert.equal(popup.content.querySelector('.sbbs-root').dataset.view, 'intake');
+        await waitFor(() => /This Saucepan\.ai card requires a login/.test(popup.content.textContent), 'login-required intake error did not render');
+        assert.deepEqual(urlCards, [{ source: 'saucepan', url: 'https://saucepan.ai/companion/abcdef1234' }]);
+        assert.ok(popup.content.querySelector('#sbbs_intake_saucepan_account_heading'), 'the login form is embedded on the error screen');
+        assert.match(popup.content.textContent, /Try again/);
+        await waitFor(() => /Not logged in\. Saucepan\.ai card URLs require an account token\./.test(popup.content.textContent), 'embedded account status did not settle');
 
         popup.complete();
         await opened;
@@ -755,7 +780,7 @@ test('an enabled URL-only source stays available without a catalogue source', as
     }
 });
 
-test('the Saucepan shortcut opens URL import with Saucepan selected', async () => {
+test('a pasted Saucepan URL opens the intake review instead of a search', async () => {
     const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
     const previous = {
         document: globalThis.document,
@@ -777,6 +802,7 @@ test('the Saucepan shortcut opens URL import with Saucepan selected', async () =
     });
 
     const searches = [];
+    const urlCards = [];
     globalThis.fetch = async (url, options = {}) => {
         const path = String(url);
         if (path.endsWith('/healthz')) {
@@ -785,13 +811,20 @@ test('the Saucepan shortcut opens URL import with Saucepan selected', async () =
                 version: VERSION,
                 sources: [
                     { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, detail: true } },
-                    { id: 'saucepan', label: 'Saucepan.ai', tier: 2, state: 'up', capabilities: { search: false, accountLogin: true, urlImport: true } },
+                    { id: 'saucepan', label: 'Saucepan.ai', tier: 2, state: 'up', clientHosts: ['saucepan.ai'], capabilities: { search: false, accountLogin: true, urlImport: true } },
                 ],
             });
         }
         if (path.endsWith('/search')) {
             searches.push(JSON.parse(options.body));
             return jsonResponse({ items: [], nextCursor: null, total: 0 });
+        }
+        if (path.endsWith('/url-card')) {
+            urlCards.push(JSON.parse(options.body));
+            return jsonResponse({ error: 'saucepan_login_required' }, 401);
+        }
+        if (path.endsWith('/account/status')) {
+            return jsonResponse({ loggedIn: false });
         }
         throw new Error(`unexpected request: ${url}`);
     };
@@ -837,22 +870,17 @@ test('the Saucepan shortcut opens URL import with Saucepan selected', async () =
     try {
         const { invalidateAvailability } = await import('../client/api.js');
         invalidateAvailability();
-        const { openBrowser } = await import('../client/browser.js?saucepan-shortcut');
+        const { openBrowser } = await import('../client/browser.js?saucepan-omnibox');
         const opened = openBrowser();
         await waitFor(() => popups.length === 1 && searches.length === 1, 'mixed-source browser did not settle');
 
         const popup = popups[0];
-        const shortcut = popup.content.querySelector('#sbbs_saucepan_url_shortcut');
-        const filters = popup.content.querySelector('#sbbs_filters');
-        const filtersToggle = popup.content.querySelector('#sbbs_filters_toggle');
-        const urlSource = popup.content.querySelector('#sbbs_url_source');
-        const cardUrl = popup.content.querySelector('#sbbs_card_url');
+        const query = popup.content.querySelector('#sbbs_query');
+        const form = popup.content.querySelector('#sbbs_search_form');
+        const state = popup.content.querySelector('#sbbs_state');
 
-        assert.equal(shortcut.hidden, false);
-        assert.equal(shortcut.textContent, 'Paste Saucepan.ai URL');
-        assert.equal(filters.hidden, true);
-        assert.equal(filtersToggle.getAttribute('aria-expanded'), 'false');
-        assert.equal(urlSource.options[0].textContent, 'Saucepan.ai (URL import only)');
+        assert.equal(query.getAttribute('placeholder'), 'Search cards, or paste a card URL');
+        assert.equal(query.getAttribute('aria-label'), 'Search character cards or paste a card URL');
         assert.deepEqual(searches[0], {
             query: '',
             limit: 24,
@@ -862,11 +890,17 @@ test('the Saucepan shortcut opens URL import with Saucepan selected', async () =
             sort: 'latest',
         });
 
-        shortcut.click();
-        assert.equal(filters.hidden, false);
-        assert.equal(filtersToggle.getAttribute('aria-expanded'), 'true');
-        assert.equal(urlSource.value, 'saucepan');
-        assert.equal(dom.window.document.activeElement, cardUrl);
+        // Typing the URL announces the import instead of scheduling a search.
+        query.value = 'https://saucepan.ai/companion/abc123def456';
+        query.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        assert.match(state.textContent, /Press Enter to review this Saucepan\.ai card before importing\./);
+
+        form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        assert.equal(popup.content.querySelector('.sbbs-root').dataset.view, 'intake');
+        await waitFor(() => /This Saucepan\.ai card requires a login/.test(popup.content.textContent), 'intake error did not render');
+        assert.deepEqual(urlCards, [{ source: 'saucepan', url: 'https://saucepan.ai/companion/abc123def456' }]);
+        assert.equal(searches.length, 1, 'the URL was imported, not searched');
+        await waitFor(() => /Not logged in\. Saucepan\.ai card URLs require an account token\./.test(popup.content.textContent), 'embedded login status did not settle');
 
         popup.complete();
         await opened;
@@ -934,7 +968,7 @@ test('Saucepan settings explain URL-only use and keep unavailable status separat
         assert.match(row.textContent, /URL import only, no catalog search/);
         assert.doesNotMatch(row.textContent, /limited public catalog/);
         assert.match(row.textContent, /unavailable/);
-        assert.match(dom.window.document.body.textContent, /Saucepan\.ai has no catalog search\. Enable it under Sources, then choose Paste Saucepan\.ai URL in BotSearcher\./);
+        assert.match(dom.window.document.body.textContent, /Saucepan\.ai has no catalog search\. Paste a companion URL into BotSearcher's search box/);
         assert.doesNotMatch(status.textContent, /no catalog search/);
     } finally {
         const { invalidateAvailability } = await import('../client/api.js');

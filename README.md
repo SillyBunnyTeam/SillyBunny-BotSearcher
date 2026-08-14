@@ -140,17 +140,25 @@ The details shown before import come from the selected source. A source may omit
 
 ### URL imports
 
-Open **Filters**, choose **Saucepan.ai** or **JannyAI**, paste a character URL,
-and choose **Inspect URL**. The resulting bytes go through the same intake
-review and exact/clean import actions as every other card.
+Paste a **Saucepan.ai** or **JannyAI/JanitorAI** character URL straight into
+the search box and press Enter. The dialog recognizes the address, states which
+source will fetch it, and opens the same review and exact/clean import screen
+as every other card. A URL whose source is switched off, or that no source
+supports, gets a message saying so instead of a search. Pasted URLs are never
+stored in the search history.
 
-Saucepan requires a handle/password login or bearer token under **Extensions >
-BotSearcher > Saucepan.ai account**. It is an import backend, not a searchable
-catalog in BotSearcher. JannyAI's browser option opens a persistent Playwright
-session on the server host; log in and complete any Cloudflare check in that
-window before importing. Public cards are read directly. Private cards use the
-JAR-style browser chat capture when JanitorAI exposes the assembled definition;
-if that capture fails, download the card manually and use **Inspect a card file**.
+Saucepan.ai requires a handle/password login or bearer token, either under
+**Extensions > BotSearcher > Saucepan.ai account** or in the login form the
+review screen shows when a login is missing. It is an import backend, not a
+searchable catalog in BotSearcher.
+
+JannyAI imports try SillyBunny's own downloader first, which needs no setup.
+When that download is blocked (commonly by Cloudflare on hosted servers) the
+import falls back to the browser bridge: a persistent Playwright session on the
+server host. Log in and complete any Cloudflare check in that window before
+importing. Public cards are read directly. Private cards use the JAR-style
+browser chat capture when JanitorAI exposes the assembled definition; if that
+capture fails, download the card manually and use **Inspect a card file**.
 
 ## Screenshots
 

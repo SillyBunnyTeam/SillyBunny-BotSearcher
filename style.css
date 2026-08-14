@@ -268,25 +268,6 @@
     justify-content: flex-end;
 }
 
-.sbbs-url-import {
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-xs, 4px);
-    padding-top: var(--spacing-sm, 8px);
-    border-top: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
-}
-
-.sbbs-url-import-form {
-    display: grid;
-    grid-template-columns: auto minmax(8rem, 14rem) auto minmax(12rem, 1fr) auto;
-    align-items: center;
-    gap: var(--spacing-xs, 4px) var(--spacing-sm, 8px);
-}
-
-.sbbs-url-import-form .text_pole {
-    min-width: 0;
-}
-
 /* ---- body ---- */
 
 .sbbs-body {
@@ -320,7 +301,8 @@
     align-items: flex-start;
     gap: var(--spacing-sm, 8px);
     padding: var(--spacing-sm, 8px) var(--spacing-md, 12px);
-    border-left: 3px solid var(--sb-muted-fg, currentColor);
+    border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--sb-radius-sm, 6px);
     color: var(--sb-muted-fg, currentColor);
     font-size: 0.9em;
     line-height: 1.45;
@@ -1209,12 +1191,15 @@
         justify-content: flex-start;
     }
 
-    .sbbs-url-import-form {
+    .sbbs-account-fields {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .sbbs-account-fields {
-        grid-template-columns: minmax(0, 1fr);
+    /* Chips sit close together and are removed with thumbs. A full 44px pad
+       would double every chip's height, so this is the size the pill absorbs. */
+    .sbbs-filter-chip-remove {
+        min-width: 34px;
+        min-height: 34px;
     }
 
     .sbbs-body {
@@ -1540,4 +1525,17 @@ p.sbbs-intake-warn {
     margin: var(--spacing-sm, 8px) 0;
     font-weight: 600;
     color: var(--sb-warning-fg, currentColor);
+}
+
+/*
+ * An account section embedded in the intake error screen rather than in the
+ * settings drawer: its own bordered box on a full row, so the login does not
+ * read as one more action button.
+ */
+.sbbs-detail-actions .sbbs-setting-account {
+    flex: 1 0 100%;
+    max-width: 32rem;
+    padding: var(--spacing-sm, 8px);
+    border: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--sb-radius-md, 10px);
 }

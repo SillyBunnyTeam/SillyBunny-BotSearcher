@@ -244,6 +244,9 @@ export async function mountSettings() {
     const settings = getSettings();
 
     content.append(
+        // The sections above this (sources, accounts, plugin) all carry their
+        // own headings; the everyday toggles get one too so the drawer chunks.
+        el('label', undefined, 'Preferences'),
         checkbox('sbbs_set_sfw', 'Request SFW results by default', settings.sfwOnlyDefault, (v) => updateSettings({ sfwOnlyDefault: v })),
         checkbox('sbbs_set_hide_ai', 'Hide AI-generated cards when the source supports it', settings.hideAiDefault, (v) => updateSettings({ hideAiDefault: v })),
         checkbox('sbbs_set_blur', 'Blur sensitive and unrated thumbnails until revealed', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
@@ -290,26 +293,30 @@ export async function mountSettings() {
     // Source list comes from the server, so it stays correct as adapters are
     // added. Appended after mounting so a missing plugin does not block the
     // rest of the panel.
+    //
+    // Reading order: the everyday Sources list first, then the account
+    // sections, preferences, and the diagnostic server-plugin status last —
+    // successive prepends stack, so the last prepend lands on top.
     try {
         const availability = await getAvailability();
         const { health } = availability;
         const sources = Array.isArray(health?.sources) ? health.sources : [];
-        if (sources.length > 0) {
-            content.prepend(sourceList(sources));
-        }
-        const botbooru = sources.find((source) => source?.id === 'botbooru');
-        if (availability.status === AVAILABILITY.OK && botbooru?.capabilities?.accountLogin === true) {
-            content.prepend(botbooruAccountControl());
+        const janny = sources.find((source) => source?.id === 'jannyai');
+        if (availability.status === AVAILABILITY.OK && janny?.capabilities?.browserImport === true) {
+            content.prepend(jannyBrowserControl());
         }
         const saucepan = sources.find((source) => source?.id === 'saucepan');
         if (availability.status === AVAILABILITY.OK && saucepan?.capabilities?.accountLogin === true) {
             content.prepend(saucepanAccountControl());
         }
-        const janny = sources.find((source) => source?.id === 'jannyai');
-        if (availability.status === AVAILABILITY.OK && janny?.capabilities?.browserImport === true) {
-            content.prepend(jannyBrowserControl());
+        const botbooru = sources.find((source) => source?.id === 'botbooru');
+        if (availability.status === AVAILABILITY.OK && botbooru?.capabilities?.accountLogin === true) {
+            content.prepend(botbooruAccountControl());
         }
-        content.prepend(serverPluginControl(availability));
+        if (sources.length > 0) {
+            content.prepend(sourceList(sources));
+        }
+        content.append(serverPluginControl(availability));
     } catch {
         // Plugin not installed yet; the rest of the panel still works.
     }
@@ -514,10 +521,16 @@ function botbooruAccountControl() {
     return wrapper;
 }
 
-function saucepanAccountControl() {
+/**
+ * The Saucepan.ai login section.
+ *
+ * Also embedded in the intake error screen when an import needs a login, so
+ * `idPrefix` keeps its input ids unique when the drawer copy exists too.
+ */
+export function saucepanAccountControl(idPrefix = 'sbbs_saucepan') {
     const wrapper = el('section', 'sbbs-setting sbbs-setting-account');
     const heading = el('strong', undefined, 'Saucepan.ai account');
-    heading.id = 'sbbs_saucepan_account_heading';
+    heading.id = `${idPrefix}_account_heading`;
     wrapper.setAttribute('aria-labelledby', heading.id);
 
     const status = el('span', 'sbbs-account-status');
@@ -525,8 +538,8 @@ function saucepanAccountControl() {
     status.setAttribute('aria-live', 'polite');
 
     const loginForm = el('form', 'sbbs-account-login');
-    const handleField = accountField('sbbs_saucepan_handle', 'Handle', 'text', 'username');
-    const passwordField = accountField('sbbs_saucepan_password', 'Password', 'password', 'current-password');
+    const handleField = accountField(`${idPrefix}_handle`, 'Handle', 'text', 'username');
+    const passwordField = accountField(`${idPrefix}_password`, 'Password', 'password', 'current-password');
     const login = el('button', 'menu_button', 'Log in');
     login.type = 'submit';
     const fields = el('div', 'sbbs-account-fields');
@@ -534,7 +547,7 @@ function saucepanAccountControl() {
     loginForm.append(fields, login);
 
     const tokenForm = el('div', 'sbbs-account-login');
-    const tokenField = accountField('sbbs_saucepan_token', 'Bearer token', 'password', 'off');
+    const tokenField = accountField(`${idPrefix}_token`, 'Bearer token', 'password', 'off');
     tokenField.input.maxLength = 8192;
     const setToken = el('button', 'menu_button', 'Use token');
     setToken.type = 'button';
@@ -552,8 +565,11 @@ function saucepanAccountControl() {
     const catalogNote = el(
         'span',
         'sbbs-setting-note',
-        'Saucepan.ai has no catalog search. Enable it under Sources, then choose Paste Saucepan.ai URL in BotSearcher.',
+        'Saucepan.ai has no catalog search. Paste a companion URL into BotSearcher\'s search box to review and import it.',
     );
+    // Someone reading this inside the import flow has already found the paste
+    // gesture; the how-to note is for the drawer only.
+    catalogNote.hidden = idPrefix !== 'sbbs_saucepan';
     wrapper.append(heading, catalogNote, status, loginForm, tokenForm, note, logout);
 
     let pending = false;
@@ -563,8 +579,8 @@ function saucepanAccountControl() {
     const render = (value = {}) => {
         loggedIn = value.loggedIn === true;
         setText(status, message || (loggedIn
-            ? 'Saucepan is ready for URL imports.'
-            : 'Not logged in. Saucepan card URLs require an account token.'));
+            ? 'Saucepan.ai is ready for URL imports.'
+            : 'Not logged in. Saucepan.ai card URLs require an account token.'));
         login.disabled = pending;
         setToken.disabled = pending;
         logout.disabled = pending || !loggedIn;
@@ -612,16 +628,16 @@ function saucepanAccountControl() {
                 username: handleField.input.value,
                 password: passwordField.input.value,
             }),
-            'Logging in to Saucepan...',
+            'Logging in to Saucepan.ai...',
         );
     });
     setToken.addEventListener('click', () => void run(
         () => post('/account/token', { source: 'saucepan', token: tokenField.input.value }),
-        'Saving the Saucepan token in server memory...',
+        'Saving the Saucepan.ai token in server memory...',
     ));
     logout.addEventListener('click', () => void run(
         () => post('/account/logout', { source: 'saucepan' }),
-        'Removing the Saucepan login...',
+        'Removing the Saucepan.ai login...',
     ));
 
     render();
@@ -632,10 +648,14 @@ function saucepanAccountControl() {
     return wrapper;
 }
 
-function jannyBrowserControl() {
+/**
+ * The JannyAI browser-bridge section; also embedded in the intake error screen
+ * when a bridge import needs its login finished.
+ */
+export function jannyBrowserControl(idPrefix = 'sbbs_janny') {
     const wrapper = el('section', 'sbbs-setting sbbs-setting-account');
     const heading = el('strong', undefined, 'JannyAI browser import');
-    heading.id = 'sbbs_janny_browser_heading';
+    heading.id = `${idPrefix}_browser_heading`;
     wrapper.setAttribute('aria-labelledby', heading.id);
     const status = el('span', 'sbbs-account-status');
     status.setAttribute('role', 'status');

@@ -17,12 +17,16 @@ import {
     importErrorMessage,
     insideRows,
     searchErrorMessage,
+    searchUnavailableMessage,
     unreachableReason,
     directRoutingNotice,
     sortLabel,
     sourceStatLine,
     serverPluginUpdateErrorMessage,
     tokenFootprint,
+    urlImportDisabledMessage,
+    urlImportReadyMessage,
+    urlImportUnsupportedMessage,
 } from '../client/copy.js';
 
 import { VERSION } from '../shared/schema.js';
@@ -311,18 +315,32 @@ test('import errors explain the failure without claiming certainty', () => {
     assert.equal(importErrorMessage(new Error('unknown')), 'The card could not be imported.');
 });
 
+test('URL-import copy names the source and the next action', () => {
+    assert.equal(urlImportReadyMessage('Saucepan.ai'), 'Press Enter to review this Saucepan.ai card before importing.');
+    assert.match(urlImportDisabledMessage('JannyAI'), /Enable JannyAI under Extensions > BotSearcher > Sources/);
+    assert.match(urlImportUnsupportedMessage(), /No supported source/);
+    assert.match(searchUnavailableMessage([]), /No sources are enabled/);
+    assert.match(searchUnavailableMessage(['Saucepan.ai']), /Paste a card URL from Saucepan\.ai/);
+    assert.match(searchUnavailableMessage(['A', 'B']), /from A and B/);
+});
+
+test('a stat line can omit a figure another line already shows', () => {
+    const stats = { tokens: 1, downloads: 2 };
+    assert.equal(sourceStatLine('botbooru', stats, ['tokens']), '2 downloads');
+    assert.equal(sourceStatLine('botbooru', stats), '1 token, 2 downloads');
+});
+
 test('browser template gives the search field a durable name and matching limit', () => {
     const browser = fs.readFileSync(path.join(ROOT, 'templates/browser.html'), 'utf8');
     const install = fs.readFileSync(path.join(ROOT, 'templates/plugin-missing.html'), 'utf8');
     const browserScript = fs.readFileSync(path.join(ROOT, 'client/browser.js'), 'utf8');
 
     assert.match(browser, /id="sbbs_query"[^>]*aria-label="Search character cards"/);
-    assert.match(browser, /id="sbbs_query"[^>]*maxlength="128"/);
+    // 512 fits a pasted card URL; server and history still cap queries at 128.
+    assert.match(browser, /id="sbbs_query"[^>]*maxlength="512"/);
     assert.match(browser, /id="sbbs_sfw_note"[^>]*aria-live="polite"/);
-    assert.match(browser, /id="sbbs_url_import_note"[^>]*role="status"/);
-    assert.match(browser, /id="sbbs_url_import_note"[^>]*aria-live="polite"/);
     assert.match(browser, /aria-label="Card details"/);
-    assert.match(browser, /aria-label="Card intake"/);
+    assert.match(browser, /aria-label="Review and import"/);
     assert.match(browserScript, /popup\.dlg\.setAttribute\('aria-label', 'Find cards online'\)/);
     assert.match(install, />Check again<\/button>/);
     assert.match(install, /class="sbbs-install-guidance" hidden/);

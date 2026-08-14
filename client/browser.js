@@ -35,10 +35,14 @@ import {
     formatCount,
     formatResultCount,
     searchErrorMessage,
+    searchUnavailableMessage,
     sortLabel,
     sourceStatLine,
     serverPluginUpdateErrorMessage,
     unreachableReason,
+    urlImportDisabledMessage,
+    urlImportReadyMessage,
+    urlImportUnsupportedMessage,
 } from './copy.js';
 import { buildFilters } from './filters.js';
 import { createVocabularyLoader } from './vocabulary.js';
@@ -76,7 +80,9 @@ function mergedSourceEntry(usable) {
     const members = usable.slice(0, MAX_FANOUT);
     return {
         id: ALL_SOURCES,
-        label: 'All sources',
+        // Lands mid-sentence ("Searching all sources...") and must not claim
+        // more than the fan-out cap actually sends.
+        label: usable.length > MAX_FANOUT ? `the first ${MAX_FANOUT} sources` : 'all sources',
         merged: members,
         clientHosts: [...new Set(members.flatMap((entry) => entry.clientHosts ?? []))],
         capabilities: {
@@ -138,6 +144,22 @@ async function openBrowserOnce(options) {
         allowVerticalScrolling: !connected,
         okButton: false,
         cancelButton: 'Close',
+        // Esc from a subview steps back to the results instead of tearing the
+        // whole dialog down with them. Only the Esc path (CANCELLED) is
+        // intercepted: the close button still closes from anywhere, and
+        // complete() sets popup.result before consulting this hook
+        // (public/scripts/popup.js:784).
+        onClosing: () => {
+            if (popup.result !== ctx.POPUP_RESULT.CANCELLED) {
+                return true;
+            }
+            const view = popup.content?.querySelector?.('.sbbs-root')?.dataset.view;
+            if (view !== 'detail' && view !== 'intake') {
+                return true;
+            }
+            popup.content.querySelector(`.sbbs-${view} .sbbs-back`)?.click();
+            return false;
+        },
         onClose: () => {
             dispose();
         },
@@ -175,6 +197,7 @@ function wireBrowser(popup, health, options) {
         bar: root.querySelector('.sbbs-bar'),
         source: root.querySelector('#sbbs_source'),
         query: root.querySelector('#sbbs_query'),
+        queryLabel: root.querySelector('label[for="sbbs_query"]'),
         go: root.querySelector('#sbbs_go'),
         sort: root.querySelector('#sbbs_sort'),
         sfw: root.querySelector('#sbbs_sfw'),
@@ -183,7 +206,6 @@ function wireBrowser(popup, health, options) {
         hideAi: root.querySelector('#sbbs_hide_ai'),
         filtersToggle: root.querySelector('#sbbs_filters_toggle'),
         filtersBadge: root.querySelector('#sbbs_filters_badge'),
-        saucepanUrlShortcut: root.querySelector('#sbbs_saucepan_url_shortcut'),
         filters: root.querySelector('#sbbs_filters'),
         filterFields: root.querySelector('#sbbs_filter_fields'),
         filtersClear: root.querySelector('#sbbs_filters_clear'),
@@ -200,11 +222,6 @@ function wireBrowser(popup, health, options) {
         intake: root.querySelector('#sbbs_intake'),
         inspectFile: root.querySelector('#sbbs_inspect_file'),
         cardFile: root.querySelector('#sbbs_card_file'),
-        urlImport: root.querySelector('#sbbs_url_import'),
-        urlSource: root.querySelector('#sbbs_url_source'),
-        cardUrl: root.querySelector('#sbbs_card_url'),
-        urlImportButton: root.querySelector('#sbbs_url_import_button'),
-        urlImportNote: root.querySelector('#sbbs_url_import_note'),
     };
 
     const settings = getSettings();
@@ -213,7 +230,6 @@ function wireBrowser(popup, health, options) {
     const searchable = enabledSources.filter((source) => source?.capabilities?.search);
     const urlSources = enabledSources.filter((source) => source?.capabilities?.urlImport
         || source?.capabilities?.browserImport);
-    const saucepanUrlSource = urlSources.find((source) => source.id === 'saucepan');
     const serverHasSearchOrUrlSource = sources.some((source) => source?.capabilities?.search
         || source?.capabilities?.urlImport
         || source?.capabilities?.browserImport);
@@ -255,38 +271,83 @@ function wireBrowser(popup, health, options) {
         account: getBotbooruAccount(),
     };
 
-    for (const source of urlSources) {
-        const option = document.createElement('option');
-        option.value = source.id;
-        setText(option, source.capabilities?.search !== true
-            ? `${source.label ?? source.id} (URL import only)`
-            : (source.label ?? source.id));
-        dom.urlSource?.append(option);
-    }
-    if (dom.urlImport) {
-        dom.urlImport.hidden = urlSources.length === 0;
-    }
-    dom.saucepanUrlShortcut.hidden = !saucepanUrlSource;
-    dom.saucepanUrlShortcut.addEventListener('click', () => {
-        if (!saucepanUrlSource) {
-            return;
+    const urlSourceLabels = urlSources.map((entry) => entry.label ?? entry.id);
+
+    /**
+     * Resolves a pasted card URL to the source that can import it.
+     *
+     * Matching is by host only; the server's own URL parser stays the authority
+     * and rejects anything else with bad_import_url. `enabled: false` marks a
+     * source the server offers but the user has switched off, so the message
+     * can say how to turn it on rather than shrugging.
+     *
+     * @param {string} raw
+     * @returns {{ source: any, enabled: boolean } | null} null when the text is not a URL at all
+     */
+    function findUrlImport(raw) {
+        let url;
+        try {
+            url = new URL(String(raw ?? '').trim());
+        } catch {
+            return null;
         }
-        dom.filters.hidden = false;
-        dom.filtersToggle.setAttribute('aria-expanded', 'true');
-        dom.urlSource.value = saucepanUrlSource.id;
-        dom.cardUrl.focus();
-    });
-    dom.urlImportButton?.addEventListener('click', () => {
-        const source = urlSources.find((entry) => entry.id === dom.urlSource?.value);
-        const url = dom.cardUrl?.value.trim() ?? '';
-        if (!source || url === '') {
-            setText(dom.urlImportNote, 'Choose a source and paste its card URL first.');
-            dom.cardUrl?.focus();
-            return;
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+            return null;
         }
-        setText(dom.urlImportNote, 'Fetching the card through the server bridge...');
-        openIntake({ url, source }, 'grid');
-    });
+        if (url.protocol !== 'https:') {
+            // Card URLs are https everywhere; treat http as an address we
+            // recognize as a URL but cannot import from.
+            return { source: null, enabled: false };
+        }
+        const host = url.hostname.toLowerCase().replace(/^www\./, '');
+        const matches = (entry) => Array.isArray(entry?.clientHosts) && entry.clientHosts.includes(host);
+        const enabled = urlSources.find(matches);
+        if (enabled) {
+            return { source: enabled, enabled: true };
+        }
+        const known = sources.find((entry) => (entry?.capabilities?.urlImport === true
+            || entry?.capabilities?.browserImport === true) && matches(entry));
+        return { source: known ?? null, enabled: false };
+    }
+
+    /**
+     * Recognizes a card URL in the search box and routes it to intake.
+     *
+     * On submit the URL opens the intake review; while typing it only sets the
+     * status line, so pasting never opens a screen the user did not ask for.
+     *
+     * @param {string} raw
+     * @param {{ open: boolean }} options
+     * @returns {boolean} whether the text was treated as a URL rather than a query
+     */
+    function handleUrlIntent(raw, { open }) {
+        const intent = findUrlImport(raw);
+        if (!intent) {
+            return false;
+        }
+        if (!intent.source) {
+            setText(dom.state, urlImportUnsupportedMessage());
+        } else if (!intent.enabled) {
+            setText(dom.state, urlImportDisabledMessage(intent.source.label ?? intent.source.id));
+        } else if (open) {
+            openIntake({ url: String(raw).trim(), source: intent.source }, 'grid');
+        } else {
+            setText(dom.state, urlImportReadyMessage(intent.source.label ?? intent.source.id));
+        }
+        return true;
+    }
+
+    // The search box doubles as the URL-import entry, so its name has to say so.
+    if (urlSources.length > 0) {
+        const name = usable.length > 0
+            ? 'Search character cards or paste a card URL'
+            : 'Paste a card URL';
+        setText(dom.queryLabel, name);
+        dom.query.setAttribute('aria-label', name);
+        dom.query.setAttribute('placeholder', usable.length > 0
+            ? 'Search cards, or paste a card URL'
+            : `Paste a card URL (${urlSourceLabels.join(', ')})`);
+    }
 
     dom.inspectFile?.addEventListener('click', () => dom.cardFile?.click());
     dom.cardFile?.addEventListener('change', () => {
@@ -323,25 +384,45 @@ function wireBrowser(popup, health, options) {
     });
 
     if (usable.length === 0) {
+        // The query row stays when a URL-import source is enabled: pasting a
+        // card URL into it is the one thing the dialog can still do.
         for (const row of dom.form?.querySelectorAll('.sbbs-bar-row') ?? []) {
-            row.hidden = true;
+            row.hidden = urlSources.length === 0 || !row.contains(dom.query);
         }
         dom.filtersToggle.hidden = true;
         dom.filters.hidden = false;
-        setText(dom.state, urlSources.length > 0
-            ? 'Paste a supported card URL below to inspect it.'
-            : (!serverHasSearchOrUrlSource
-                ? 'The server did not report any searchable or URL-import sources.'
-                : 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.'));
-        return () => {};
+        // Nothing behind them can filter or search in this mode.
+        dom.sfw.disabled = true;
+        setText(dom.state, !serverHasSearchOrUrlSource
+            ? 'The server did not report any searchable or URL-import sources.'
+            : searchUnavailableMessage(urlSourceLabels));
+        if (urlSources.length > 0) {
+            dom.form.addEventListener('submit', (event) => {
+                event.preventDefault();
+                if (!handleUrlIntent(dom.query.value, { open: true })) {
+                    setText(dom.state, searchUnavailableMessage(urlSourceLabels));
+                }
+            });
+            dom.query.addEventListener('input', () => {
+                handleUrlIntent(dom.query.value.trim(), { open: false });
+            });
+            requestAnimationFrame(() => dom.query.focus());
+        }
+        return () => {
+            state.disposed = true;
+            state.intakeController?.abort();
+        };
     }
 
     // "All sources" is a synthetic entry, not a source. It is only worth
-    // offering when there is more than one thing to merge.
+    // offering when there is more than one thing to merge — and when the fan-out
+    // cap excludes some sources, the label must not claim they are included.
     if (usable.length > 1) {
         const option = document.createElement('option');
         option.value = ALL_SOURCES;
-        setText(option, `All sources (${Math.min(usable.length, MAX_FANOUT)})`);
+        setText(option, usable.length > MAX_FANOUT
+            ? `First ${MAX_FANOUT} sources`
+            : `All sources (${usable.length})`);
         dom.source.append(option);
     }
     for (const source of usable) {
@@ -412,6 +493,11 @@ function wireBrowser(popup, health, options) {
     dom.form.addEventListener('submit', (event) => {
         event.preventDefault();
         clearTimeout(state.typingTimer);
+        // A pasted card URL is an import, not a query, and is never recorded
+        // in the search history.
+        if (handleUrlIntent(dom.query.value, { open: true })) {
+            return;
+        }
         rememberQuery(dom.query.value);
         refreshQueryHistory();
         void runSearch({ append: false });
@@ -436,6 +522,10 @@ function wireBrowser(popup, health, options) {
         dom.body?.setAttribute('aria-busy', 'false');
         dom.more.disabled = false;
         const value = dom.query.value.trim();
+        // A pasted card URL is an import: say what Enter will do, search nothing.
+        if (handleUrlIntent(value, { open: false })) {
+            return;
+        }
         // Below this a search is mostly noise, but clearing the box back to the
         // catalogue view is a real intent.
         if (value !== '' && value.length < MIN_TYPEAHEAD_LENGTH) {
@@ -697,6 +787,8 @@ function wireBrowser(popup, health, options) {
         dom.filtersBadge.hidden = active === 0;
         setText(dom.filtersBadge, String(active));
         dom.filtersClear.disabled = active === 0;
+        // The badge is a bare number; give the toggle itself the full name.
+        dom.filtersToggle.setAttribute('aria-label', active === 0 ? 'Filters' : `Filters, ${active} active`);
     }
 
     async function runSearch({ append }) {
@@ -1242,9 +1334,11 @@ function buildCardTags(item, source, card, allowFilter) {
  * Sources count different things under the same names — Chub's "downloads" is
  * its star count — so each is labelled rather than shown as a bare number, and
  * a figure the source did not report is omitted rather than shown as zero.
+ * The token count is left out here because the line above the footer already
+ * carries it; one card must not state the same figure twice.
  */
 function popularityOf(item, sourceId) {
-    return sourceStatLine(sourceId, item?.stats);
+    return sourceStatLine(sourceId, item?.stats, item?.stats?.tokens ? ['tokens'] : []);
 }
 
 function ratingOf(item) {

@@ -115,13 +115,14 @@ export function sortLabel(sort) {
     return text === '' ? 'Sort option' : text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-export function sourceStatLine(sourceId, stats) {
+export function sourceStatLine(sourceId, stats, omit = []) {
     if (!stats || typeof stats !== 'object') {
         return '';
     }
 
     const fields = STAT_FIELDS[sourceId] ?? [];
     return fields
+        .filter(([key]) => !omit.includes(key))
         .map(([key, label]) => formatCount(stats[key], label))
         .filter(Boolean)
         .join(', ');
@@ -249,6 +250,35 @@ export function directRoutingNotice(sourceLabel, reason) {
     return `${unreachableReason(sourceLabel, reason)} BotSearcher is now requesting ${sourceLabel} from this browser instead, so ${sourceLabel} sees your browser's address rather than the server's. You can turn this off in Extensions > BotSearcher.`;
 }
 
+// ---- URL import via the search box ----
+
+/** Shown while a recognized card URL sits in the search box. */
+export function urlImportReadyMessage(sourceLabel) {
+    return `Press Enter to review this ${sourceLabel} card before importing.`;
+}
+
+/** The pasted URL belongs to a source the user has switched off. */
+export function urlImportDisabledMessage(sourceLabel) {
+    return `Enable ${sourceLabel} under Extensions > BotSearcher > Sources to import cards from this address.`;
+}
+
+/** The pasted URL belongs to no source at all. */
+export function urlImportUnsupportedMessage() {
+    return 'No supported source imports cards from this address.';
+}
+
+/**
+ * What the dialog can still do when no searchable source is enabled.
+ *
+ * @param {string[]} urlSourceLabels labels of enabled URL-import sources
+ */
+export function searchUnavailableMessage(urlSourceLabels) {
+    if (urlSourceLabels.length === 0) {
+        return 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.';
+    }
+    return `No searchable source is enabled. Paste a card URL from ${list(urlSourceLabels)} to review and import it.`;
+}
+
 export function searchErrorMessage(error, sourceLabel) {
     switch (error?.code) {
         case 'botbooru_login_required':
@@ -333,17 +363,17 @@ export function accountErrorMessage(error) {
         case 'bad_account_request':
             return 'Enter a valid BotBooru username and password.';
         case 'saucepan_invalid_credentials':
-            return 'Saucepan did not accept that handle and password.';
+            return 'Saucepan.ai did not accept that handle and password.';
         case 'saucepan_login_required':
-            return 'Log in to Saucepan first.';
+            return 'Log in to Saucepan.ai first.';
         case 'saucepan_session_expired':
-            return 'Your Saucepan token expired. Log in again.';
+            return 'Your Saucepan.ai token expired. Log in again.';
         case 'saucepan_account_changed':
-            return 'The Saucepan login changed during this request. Try again.';
+            return 'The Saucepan.ai login changed during this request. Try again.';
         case 'saucepan_auth_unavailable':
-            return 'Saucepan account access is unavailable. Try again shortly.';
+            return 'Saucepan.ai account access is unavailable. Try again shortly.';
         case 'bad_saucepan_request':
-            return 'Enter a valid Saucepan handle/password or bearer token.';
+            return 'Enter a valid Saucepan.ai handle/password or bearer token.';
         case 'janny_browser_unavailable':
             return 'The JannyAI browser bridge is unavailable. Install Playwright and Chromium on the SillyBunny host.';
         case 'janny_login_required':
@@ -562,12 +592,12 @@ export function intakeSections(inside) {
     }
     if (inside.extensions?.unknown?.length > 0) {
         automation.push(row(
-            'Unrecognised extension data',
+            'Unrecognized extension data',
             inside.extensions.unknown.join(', '),
             'warn',
         ));
     }
-    section('Behaviour', automation);
+    section('Behavior', automation);
 
     // Things that are simply the character.
     const content = [];
@@ -606,7 +636,7 @@ export function intakeSections(inside) {
 function macroSummary(macros) {
     const names = (macros.names ?? []).slice(0, 6).map((name) => `{{${name}}}`);
     const count = formatCount(macros.count, 'use');
-    return names.length === 0 ? count : `${count} — ${names.join(', ')}${macros.names.length > names.length ? '...' : ''}`;
+    return names.length === 0 ? count : `${count}: ${names.join(', ')}${macros.names.length > names.length ? '...' : ''}`;
 }
 
 function htmlSummary(html) {
@@ -617,7 +647,7 @@ function htmlSummary(html) {
 function externalUrlSummary(externalUrls) {
     const hosts = (externalUrls.hosts ?? []).slice(0, 4);
     const count = formatCount(externalUrls.count, 'reference');
-    return hosts.length === 0 ? count : `${count} — ${hosts.join(', ')}${externalUrls.hosts.length > hosts.length ? '...' : ''}`;
+    return hosts.length === 0 ? count : `${count}: ${hosts.join(', ')}${externalUrls.hosts.length > hosts.length ? '...' : ''}`;
 }
 
 const PRIVATE_INFO_LABELS = Object.freeze({
@@ -719,11 +749,11 @@ export function cleanPlan(inside) {
     }
     const unknown = inside.extensions?.unknown ?? [];
     if (unknown.length > 0) {
-        items.push(`${formatCount(unknown.length, 'unrecognised extension block')} (${unknown.slice(0, 3).join(', ')})`);
+        items.push(`${formatCount(unknown.length, 'unrecognized extension block')} (${unknown.slice(0, 3).join(', ')})`);
     }
-    const unrecognised = (inside.malformed ?? []).filter((problem) => problem.problem === 'is not a field in this card format');
-    if (unrecognised.length > 0) {
-        items.push(formatCount(unrecognised.length, 'field outside the card format'));
+    const unrecognized = (inside.malformed ?? []).filter((problem) => problem.problem === 'is not a field in this card format');
+    if (unrecognized.length > 0) {
+        items.push(formatCount(unrecognized.length, 'field outside the card format'));
     }
     if ((inside.privateInfo ?? []).length > 0) {
         items.push(formatCount(inside.privateInfo.length, 'personal detail'));
@@ -818,13 +848,13 @@ export function intakeErrorMessage(error, sourceId) {
             }
             return 'SillyBunny could not download this card from the source.';
         case 'bad_import_url':
-            return 'That URL is not a supported Saucepan or JannyAI character address.';
+            return 'That URL is not a supported Saucepan.ai or JannyAI character address.';
         case 'saucepan_login_required':
-            return 'Log in to Saucepan under Extensions > BotSearcher before importing this card.';
+            return 'This Saucepan.ai card requires a login.';
         case 'saucepan_session_expired':
-            return 'Your Saucepan token expired. Log in again under Extensions > BotSearcher.';
+            return 'Your Saucepan.ai login expired. Log in again.';
         case 'janny_login_required':
-            return 'Open the JannyAI browser login under Extensions > BotSearcher, then try again.';
+            return 'The JannyAI browser session is not logged in.';
         case 'janny_browser_unavailable':
             return 'The JannyAI browser bridge is unavailable. Install Playwright and its Chromium browser on the SillyBunny host.';
         case 'janny_private_capture_failed':
@@ -836,7 +866,7 @@ export function intakeErrorMessage(error, sourceId) {
         case 'too_large':
             return 'That file is larger than BotSearcher will inspect.';
         case 'card_invalid':
-            return 'That file is not a character card BotSearcher recognises.';
+            return 'That file is not a character card BotSearcher recognizes.';
         case 'not_a_png':
             return 'That file is not a PNG card or a JSON card.';
         case 'png_malformed':

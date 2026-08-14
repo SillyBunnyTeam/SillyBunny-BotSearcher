@@ -29,6 +29,7 @@ import {
     prepareCardImport,
     readLocalCardFile,
 } from './importer.js';
+import { jannyBrowserControl, saucepanAccountControl } from './settings.js';
 import {
     additionalImportContents,
     cleanKeeps,
@@ -73,7 +74,8 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
     back.append(backIcon, el('span', undefined, 'Back'));
     back.addEventListener('click', onBack);
     header.append(back);
-    container.append(header, el('h2', 'sbbs-intake-title', 'Card intake'));
+    // Named after the button that opens it, so the transition explains itself.
+    container.append(header, el('h2', 'sbbs-intake-title', 'Review and import'));
 
     const status = el('div', 'sbbs-state', 'Fetching the card...');
     status.setAttribute('role', 'status');
@@ -87,7 +89,7 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
         if (error?.name === 'AbortError' || signal?.aborted) {
             return;
         }
-        showNotInspected(container, status, request, error, onBack);
+        showNotInspected(container, status, request, error, onBack, signal);
         return;
     }
 
@@ -104,7 +106,7 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
         if (error?.name === 'AbortError' || signal?.aborted) {
             return;
         }
-        showNotInspected(container, status, request, error, onBack);
+        showNotInspected(container, status, request, error, onBack, signal);
         return;
     }
 
@@ -204,31 +206,80 @@ async function loadBytes(request, signal) {
     if (request.file) {
         return readLocalCardFile(request.file);
     }
+    const bridged = request.source?.capabilities?.browserImport === true;
+    const native = request.source?.nativeImport === true;
     if (typeof request.url === 'string') {
-        return fetchUrlCard(request.url, request.source, { signal });
+        return native && bridged
+            ? nativeThenBridge({ importUrl: request.url }, request.source, signal)
+            : fetchUrlCard(request.url, request.source, { signal });
     }
-    if (request.source?.capabilities?.browserImport === true && typeof request.card?.importUrl === 'string') {
-        return fetchUrlCard(request.card.importUrl, request.source, { signal });
+    if (bridged && typeof request.card?.importUrl === 'string') {
+        return native
+            ? nativeThenBridge(request.card, request.source, signal)
+            : fetchUrlCard(request.card.importUrl, request.source, { signal });
     }
-    if (request.source?.nativeImport === true) {
+    if (native) {
         return fetchNativeCardBytes(request.card, request.source, { signal });
     }
     return prepareCardImport(request.card, request.source, { signal });
 }
 
 /**
+ * The zero-setup native downloader first, the browser bridge as the fallback
+ * for hosts Cloudflare blocks and for private cards.
+ *
+ * The bridge needs Playwright and a login on the server, so leading with it
+ * made a fresh install's first JannyAI import fail with setup instructions
+ * while the route that needs no setup sat unused. Login is the one bridge
+ * failure the user can act on from this screen; for every other bridge state
+ * the native error's guidance is the useful one, so that is the error kept.
+ */
+async function nativeThenBridge(card, source, signal) {
+    try {
+        return await fetchNativeCardBytes(card, source, { signal });
+    } catch (nativeError) {
+        if (nativeError?.name === 'AbortError' || signal?.aborted) {
+            throw nativeError;
+        }
+        try {
+            return await fetchUrlCard(card.importUrl, source, { signal });
+        } catch (bridgeError) {
+            if (bridgeError?.name === 'AbortError' || bridgeError?.message === 'janny_login_required') {
+                throw bridgeError;
+            }
+            if (bridgeError?.message === 'janny_browser_unavailable') {
+                // Lets the recovery text suggest setting the bridge up.
+                nativeError.bridgeUnavailable = true;
+            }
+            throw nativeError;
+        }
+    }
+}
+
+/**
  * When the card could not be fetched or read.
  *
  * A native card can still be imported the way it always was, so the offer stays
- * — clearly labelled as skipping the inspection rather than passing it.
+ * — clearly labelled as skipping the inspection rather than passing it. A
+ * login failure gets the matching login control inline: sending the user out
+ * of this modal to the settings drawer would throw away the URL, the results
+ * and their place in the task.
  */
-function showNotInspected(container, status, request, error, onBack) {
+function showNotInspected(container, status, request, error, onBack, signal) {
     setText(status, intakeErrorMessage(error, request.source?.id));
 
     const actions = el('div', 'sbbs-detail-actions');
     const recovery = nativeRecovery(request, error);
     if (recovery) {
         actions.append(recovery);
+    }
+
+    const code = error?.message ?? error?.code;
+    if (request.source?.id === 'saucepan' && ['saucepan_login_required', 'saucepan_session_expired'].includes(code)) {
+        actions.append(saucepanAccountControl('sbbs_intake_saucepan'));
+    }
+    if (request.source?.id === 'jannyai' && code === 'janny_login_required') {
+        actions.append(jannyBrowserControl('sbbs_intake_janny'));
     }
     if (request.source?.nativeImport === true && request.card) {
         actions.append(el(
@@ -248,7 +299,7 @@ function showNotInspected(container, status, request, error, onBack) {
                 const added = await importCard(request.card, request.source);
                 setText(anyway, 'Imported');
                 actions.append(openButton(added));
-                toastr.success('Character imported.', 'Imported');
+                toastr.success('Character imported.');
             } catch (importError) {
                 anyway.disabled = false;
                 setText(anyway, 'Try import again');
@@ -258,6 +309,13 @@ function showNotInspected(container, status, request, error, onBack) {
         });
         actions.append(anyway, result);
     }
+
+    // Worth offering for every failure: transient ones pass on a retry, and a
+    // login fixed just above needs one to take effect.
+    const tryAgain = el('button', 'menu_button', 'Try again');
+    tryAgain.type = 'button';
+    tryAgain.addEventListener('click', () => void showIntake(container, request, onBack, { signal }));
+    actions.append(tryAgain);
 
     const retry = el('button', 'menu_button', 'Back');
     retry.type = 'button';
@@ -287,6 +345,13 @@ function nativeRecovery(request, error) {
         }
     }
     recovery.append(instructions);
+    if (error?.bridgeUnavailable === true) {
+        recovery.append(el(
+            'p',
+            undefined,
+            'Setting up JannyAI browser import under Extensions > BotSearcher lets the server fetch cards Cloudflare blocks.',
+        ));
+    }
     return recovery;
 }
 
@@ -521,7 +586,7 @@ function actionBar(prepared, inside, match, onBack) {
             });
             setText(button, 'Imported');
             bar.append(openButton(added));
-            toastr.success('Character imported.', 'Imported');
+            toastr.success('Character imported.');
         } catch (error) {
             exact.disabled = false;
             clean.disabled = removals.length === 0;
@@ -534,12 +599,8 @@ function actionBar(prepared, inside, match, onBack) {
     exact.addEventListener('click', () => void run(exact, () => prepared));
     clean.addEventListener('click', () => void run(clean, () => cleanBytes(prepared)));
 
-    bar.append(exact, clean);
-    if (replaceLabel) {
-        bar.append(replaceLabel);
-    }
-    bar.append(status);
-
+    // The explanation of what Clean import will do sits ABOVE the two look-alike
+    // buttons, so the choice is informed before it is offered rather than after.
     const explanation = el('div', 'sbbs-intake-clean-note');
     if (removals.length === 0) {
         explanation.append(el('p', undefined, 'Clean import has nothing to remove from this card.'));
@@ -550,6 +611,12 @@ function actionBar(prepared, inside, match, onBack) {
         }
     }
     bar.append(explanation);
+
+    bar.append(exact, clean);
+    if (replaceLabel) {
+        bar.append(replaceLabel);
+    }
+    bar.append(status);
 
     // Returning to the grid has to stay reachable from the bottom of a long report.
     const backAgain = el('button', 'menu_button sbbs-intake-back', 'Back');

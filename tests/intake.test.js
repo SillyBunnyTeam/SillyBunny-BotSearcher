@@ -175,7 +175,7 @@ test('the report is shown and nothing is imported until a button is pressed', as
         assert.match(text, /2 scripts/, 'regex scripts are reported');
         assert.match(text, /34 entries/, 'the lorebook is reported');
         assert.match(text, /7 uses/, 'macros are reported');
-        assert.match(text, /risu_ext/, 'unrecognised extension data is named');
+        assert.match(text, /risu_ext/, 'unrecognized extension data is named');
         assert.match(text, /files\.example/, 'external URL hosts are named');
         assert.match(text, /ja\*\*\*\*om/, 'private details are shown redacted');
         assert.match(text, /SHA-256 aaaaaaaaaaaa/);
@@ -332,7 +332,7 @@ test('clean import states what it removes and what it keeps, and routes through 
 
         const note = host.container.querySelector('.sbbs-intake-clean-note').textContent;
         assert.match(note, /removes 2 regex scripts/);
-        assert.match(note, /1 unrecognised extension block \(risu_ext\)/);
+        assert.match(note, /1 unrecognized extension block \(risu_ext\)/);
         assert.match(note, /1 personal detail/);
         assert.match(note, /keeps 34 lorebook entries/, 'the character must be kept, and said to be');
         assert.match(note, /the system prompt/);
@@ -580,6 +580,89 @@ test('contents the listing never mentioned are called out', async () => {
         assert.match(text, /34 lorebook entries/);
         assert.match(text, /2 regex scripts/);
         assert.match(text, /a system prompt/);
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+const JANNY_SOURCE = Object.freeze({
+    id: 'jannyai',
+    label: 'JannyAI',
+    nativeImport: true,
+    clientHosts: Object.freeze(['jannyai.com', 'janitorai.com']),
+    capabilities: Object.freeze({ browserImport: true }),
+});
+const JANNY_CARD = Object.freeze({
+    id: '0b7a1a71-4c62-4de1-a44c-6f06a4ffe421',
+    name: 'Seraphina',
+    importUrl: 'https://janitorai.com/characters/0b7a1a71-4c62-4de1-a44c-6f06a4ffe421',
+    pageUrl: 'https://jannyai.com/characters/0b7a1a71-4c62-4de1-a44c-6f06a4ffe421_character-seraphina',
+});
+
+test('a JannyAI card uses the zero-setup native downloader before the browser bridge', async () => {
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response(PNG_BYTES, { headers: { 'X-Custom-Content-Type': 'character' } }),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-native-first');
+        await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-intake-list'), 'report did not render');
+
+        assert.ok(host.calls.some((call) => call.path.includes('/api/content/importURL')), 'native download runs first');
+        assert.ok(!host.calls.some((call) => call.path.includes('/url-card')), 'the bridge is not asked when native works');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('a blocked native download falls back to the browser bridge', async () => {
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response('blocked', { status: 502 }),
+            '/url-card': () => new Response(JSON.stringify({ spec: 'chara_card_v2' }), {
+                headers: { 'X-SBBS-Card-Kind': 'json' },
+            }),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-bridge-fallback');
+        await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-intake-list'), 'report did not render');
+
+        const nativeAt = host.calls.findIndex((call) => call.path.includes('/api/content/importURL'));
+        const bridgeAt = host.calls.findIndex((call) => call.path.includes('/url-card'));
+        assert.ok(nativeAt >= 0 && bridgeAt > nativeAt, 'the bridge runs only after native fails');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('with no bridge available a blocked JannyAI card keeps the native guidance and a retry', async () => {
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response('blocked', { status: 502 }),
+            '/url-card': jsonRoute({ error: 'janny_browser_unavailable' }, 503),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-both-fail');
+        await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+        await waitFor(() => /Cloudflare may be blocking/.test(host.container.textContent), 'native failure message did not render');
+
+        const text = host.container.textContent;
+        assert.match(text, /Setting up JannyAI browser import under Extensions > BotSearcher/);
+        assert.match(text, /Import without inspecting/);
+        assert.match(text, /Try again/);
     } finally {
         await settle(host.container);
         host.restore();

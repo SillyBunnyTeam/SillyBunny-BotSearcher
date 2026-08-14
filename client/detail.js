@@ -101,16 +101,25 @@ export async function showDetail(container, summary, source, onBack, options = {
         const img = document.createElement('img');
         img.alt = '';
         if (setImgSafe(img, previewSrc, source.clientHosts)) {
+            // A preview that never arrives must not sit as an empty box.
+            img.addEventListener('error', () => figure.remove(), { once: true });
             const rating = ratingOf(card);
             if (rating.value !== 'sfw' && settings.blurNsfw) {
                 figure.classList.add('sbbs-blurred');
-                // A real button, so revealing works by keyboard too.
-                const reveal = el('button', 'sbbs-reveal', `Show ${rating.reveal} image`);
-                reveal.type = 'button';
-                reveal.addEventListener('click', () => {
+                const show = () => {
                     figure.classList.remove('sbbs-blurred');
                     reveal.remove();
-                }, { once: true });
+                };
+                // A real button, so revealing works by keyboard too; the
+                // blurred artwork itself is the natural pointer target.
+                const reveal = el('button', 'sbbs-reveal', `Show ${rating.reveal} image`);
+                reveal.type = 'button';
+                reveal.addEventListener('click', show, { once: true });
+                figure.addEventListener('click', (event) => {
+                    if (event.target !== reveal && figure.classList.contains('sbbs-blurred')) {
+                        show();
+                    }
+                });
                 figure.append(reveal);
             }
             figure.append(img);
@@ -180,7 +189,11 @@ export async function showDetail(container, summary, source, onBack, options = {
 
     // ---- description ----
     if (card.description) {
-        main.append(el('h3', 'sbbs-detail-subhead', 'Description'));
+        // For a source with no per-card endpoint this text is the listing's own
+        // cropped excerpt, and the heading must not promise the whole thing.
+        main.append(el('h3', 'sbbs-detail-subhead', source.capabilities?.detail === false
+            ? 'Description (listing excerpt)'
+            : 'Description'));
         main.append(el('div', 'sbbs-description', card.description));
     }
     if (card.firstMessage) {
