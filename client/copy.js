@@ -345,7 +345,7 @@ export function accountErrorMessage(error) {
         case 'bad_saucepan_request':
             return 'Enter a valid Saucepan handle/password or bearer token.';
         case 'janny_browser_unavailable':
-            return 'The JannyAI browser bridge is unavailable. Install Playwright and Chromium on the SillyTavern host.';
+            return 'The JannyAI browser bridge is unavailable. Install Playwright and Chromium on the SillyBunny host.';
         case 'janny_login_required':
             return 'Finish the JannyAI login and Cloudflare check in the browser window first.';
         case 'rate_limited':
@@ -826,7 +826,7 @@ export function intakeErrorMessage(error, sourceId) {
         case 'janny_login_required':
             return 'Open the JannyAI browser login under Extensions > BotSearcher, then try again.';
         case 'janny_browser_unavailable':
-            return 'The JannyAI browser bridge is unavailable. Install Playwright and its Chromium browser on the SillyTavern host.';
+            return 'The JannyAI browser bridge is unavailable. Install Playwright and its Chromium browser on the SillyBunny host.';
         case 'janny_private_capture_failed':
             return 'JannyAI did not expose this private card through the browser session. Try again or download the card manually.';
         case 'not_a_character':

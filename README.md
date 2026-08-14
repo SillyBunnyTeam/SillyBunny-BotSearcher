@@ -33,7 +33,7 @@ npm --prefix plugins/SillyBunny-BotSearcher exec -- playwright install chromium
 
 The JannyAI bridge is headful by design: Cloudflare clearance is kept in a
 persistent profile and a real browser window must be able to start on the
-SillyTavern host. On a Linux host without a desktop session, configure a
+SillyBunny host. On a Linux host without a desktop session, configure a
 display service or use the manual card-file fallback. Set
 `SBBS_JANNY_PROFILE_DIR` if the default profile location is not suitable.
 By default it is `.sillybunny-janny-profile` inside the server-plugin directory
@@ -196,7 +196,7 @@ settings, URLs, or logs. Saucepan's fragment proof and ordering are checked
 before the card is assembled.
 
 The JannyAI bridge launches a persistent, headful browser profile on the
-SillyTavern host. Its cookies, Cloudflare clearance, and any temporary chat
+SillyBunny host. Its cookies, Cloudflare clearance, and any temporary chat
 session remain on that host; the frontend receives only the validated card
 bytes. Private-card capture creates a temporary chat and attempts to delete it
 after the capture; it also temporarily selects a throwaway proxy preset and

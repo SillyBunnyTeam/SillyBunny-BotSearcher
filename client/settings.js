@@ -644,7 +644,7 @@ function jannyBrowserControl() {
     const note = el(
         'span',
         'sbbs-setting-note',
-        'This opens a persistent, visible Playwright browser on the SillyTavern host. Complete JannyAI login and Cloudflare verification there; cookies stay on that host.',
+        'This opens a persistent, visible Playwright browser on the SillyBunny host. Complete JannyAI login and Cloudflare verification there; cookies stay on that host.',
     );
     wrapper.append(heading, status, login, refresh, logout, note);
 
