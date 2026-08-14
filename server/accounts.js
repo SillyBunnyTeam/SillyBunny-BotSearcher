@@ -4,6 +4,7 @@ import { FIELD_LIMITS } from '../shared/schema.js';
 import { botbooru } from './sources/botbooru.js';
 import { contextFor } from './http.js';
 import { UpstreamError } from './guards.js';
+import { saucepan } from './sources/saucepan.js';
 
 const VALIDATION_TTL_MS = 60_000;
 
@@ -364,6 +365,113 @@ export function createBotbooruAccounts({
             generations.clear();
             activeMutations.clear();
             activeRefreshes.clear();
+        },
+    });
+}
+
+/**
+ * Profile-scoped Saucepan bearer sessions. Passwords and pasted tokens never
+ * leave this process after the upstream call; status responses contain no
+ * credential material.
+ */
+export function createSaucepanAccounts({
+    adapter = saucepan,
+    makeContext = contextFor,
+} = {}) {
+    const sessions = new Map();
+    const generations = new Map();
+    const generation = (handle) => generations.get(handle) ?? 0;
+    const beginMutation = (handle) => {
+        const next = generation(handle) + 1;
+        generations.set(handle, next);
+        return next;
+    };
+
+    const signedOut = () => ({ source: 'saucepan', loggedIn: false });
+    const signedIn = () => ({ source: 'saucepan', loggedIn: true });
+    const requireHandle = (handle) => {
+        if (typeof handle !== 'string' || handle.trim() === '' || handle.length > FIELD_LIMITS.id) {
+            throw new AccountError('account_profile_required', 401);
+        }
+        return handle;
+    };
+    const validToken = (token) => typeof token === 'string'
+        && token.length > 0
+        && token.length <= FIELD_LIMITS.accountToken
+        && /^[\x21-\x7e]+$/.test(token);
+    const tokenContext = (token) => makeContext(adapter, { bearerToken: token });
+
+    return Object.freeze({
+        status(handle) {
+            requireHandle(handle);
+            return sessions.has(handle) ? signedIn() : signedOut();
+        },
+
+        async login(handle, username, password) {
+            requireHandle(handle);
+            const normalizedUsername = typeof username === 'string' ? username.trim() : '';
+            if (normalizedUsername === '' || normalizedUsername.length > FIELD_LIMITS.accountUsername
+                || typeof password !== 'string' || password.length === 0
+                || password.length > FIELD_LIMITS.accountPassword) {
+                throw new AccountError('bad_saucepan_request', 400);
+            }
+
+            const operation = beginMutation(handle);
+            let token;
+            try {
+                token = await adapter.login(makeContext(adapter), normalizedUsername, password);
+            } catch (error) {
+                if (hasHttpStatus(error, ['400', '401', '403'])) {
+                    throw new AccountError('saucepan_invalid_credentials', 401);
+                }
+                throw new AccountError('saucepan_auth_unavailable', 502);
+            }
+            if (!validToken(token)) {
+                throw new AccountError('saucepan_auth_unavailable', 502);
+            }
+            if (generation(handle) !== operation) {
+                throw new AccountError('saucepan_account_changed', 409);
+            }
+            sessions.set(handle, token);
+            return signedIn();
+        },
+
+        setToken(handle, token) {
+            requireHandle(handle);
+            if (!validToken(token)) {
+                throw new AccountError('bad_saucepan_request', 400);
+            }
+            beginMutation(handle);
+            sessions.set(handle, token);
+            return signedIn();
+        },
+
+        context(handle) {
+            requireHandle(handle);
+            const token = sessions.get(handle);
+            if (!token) {
+                throw new AccountError('saucepan_login_required', 401);
+            }
+            return tokenContext(token);
+        },
+
+        logout(handle) {
+            requireHandle(handle);
+            beginMutation(handle);
+            sessions.delete(handle);
+            return signedOut();
+        },
+
+        invalidate(handle) {
+            if (typeof handle === 'string') {
+                beginMutation(handle);
+                sessions.delete(handle);
+            }
+        },
+
+        clear() {
+            sessions.clear();
+            generations.clear();
         },
     });
 }

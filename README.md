@@ -10,6 +10,7 @@ The frontend extension and server plugin are both required. Search requests go t
 - Server plugins enabled in SillyBunny
 - The BotSearcher frontend extension and server plugin from this repository
 - Node.js 22, 24, or 26 for the server plugin
+- Playwright's Chromium browser and a usable desktop/display on the SillyBunny host for the JannyAI browser bridge (optional)
 - A reverse proxy or host configuration that rejects oversized plugin requests before JSON or multipart parsing
 
 ## Installation
@@ -26,7 +27,17 @@ git -C data/default-user/extensions/SillyBunny-BotSearcher checkout "$RELEASE"
 git clone "$REPO" plugins/SillyBunny-BotSearcher
 git -C plugins/SillyBunny-BotSearcher checkout "$RELEASE"
 npm --prefix plugins/SillyBunny-BotSearcher ci --omit=dev --ignore-scripts --no-audit --no-fund
+# Optional: install the browser used by JannyAI's Cloudflare-aware importer.
+npm --prefix plugins/SillyBunny-BotSearcher exec -- playwright install chromium
 ```
+
+The JannyAI bridge is headful by design: Cloudflare clearance is kept in a
+persistent profile and a real browser window must be able to start on the
+SillyTavern host. On a Linux host without a desktop session, configure a
+display service or use the manual card-file fallback. Set
+`SBBS_JANNY_PROFILE_DIR` if the default profile location is not suitable.
+By default it is `.sillybunny-janny-profile` inside the server-plugin directory
+so the host updater preserves it with the plugin.
 
 Adjust the frontend extension path for the SillyBunny user you run. If you use the extension manager or plugin installer initially, immediately check out the same verified release in both resulting directories and install the server package's production dependencies as above.
 
@@ -47,7 +58,7 @@ BotSearcher shows the active server-plugin version in **Extensions > BotSearcher
 
 After installing a SillyBunny release that introduces this updater, stop and start the top-level launcher or service once. An ordinary in-app restart cannot add the updater protocol to a supervisor process that was already running older host code.
 
-The host-owned updater accepts only BotSearcher's installed directory and the frontend's exact `vX.Y.Z` release. It verifies no tracked Git changes and a matching repository, installs locked production dependencies with lifecycle scripts disabled, preserves `.cursor-key`, replaces the plugin only after graceful shutdown, and keeps the old directory as a rollback backup. It will not install a missing plugin, downgrade a newer server, or replace symlinked development checkouts. Other untracked state is not copied into the active release; it remains in the rollback backup.
+The host-owned updater accepts only BotSearcher's installed directory and the frontend's exact `vX.Y.Z` release. It verifies no tracked Git changes and a matching repository, installs locked production dependencies with lifecycle scripts disabled, preserves `.cursor-key` and the Janny browser profile, replaces the plugin only after graceful shutdown, and keeps the old directory as a rollback backup. It will not install a missing plugin, downgrade a newer server, or replace symlinked development checkouts. Other untracked state is not copied into the active release; it remains in the rollback backup.
 
 Older SillyBunny versions and non-admin users can use the guided fallback below only when the installed server is a stable older release. Do not use it to override an automatic updater refusal. Resolve dirty, wrong-remote, downgrade, or externally managed installations through their owner or deployment process instead.
 
@@ -56,7 +67,7 @@ Stop SillyBunny completely, then run the complete block in Git Bash (including o
 ```bash
 set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
-RELEASE=v0.5.1
+RELEASE=v0.6.0
 REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
@@ -127,6 +138,20 @@ Each result shows the name, creator, token count, the source's own one-line summ
 
 The details shown before import come from the selected source. A source may omit fields or report incomplete information. JannyAI's public index has no reliable per-card detail endpoint, so its detail pane uses the cropped description and metadata from the search listing. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
+### URL imports
+
+Open **Filters**, choose **Saucepan.ai** or **JannyAI**, paste a character URL,
+and choose **Inspect URL**. The resulting bytes go through the same intake
+review and exact/clean import actions as every other card.
+
+Saucepan requires a handle/password login or bearer token under **Extensions >
+BotSearcher > Saucepan.ai account**. It is an import backend, not a searchable
+catalog in BotSearcher. JannyAI's browser option opens a persistent Playwright
+session on the server host; log in and complete any Cloudflare check in that
+window before importing. Public cards are read directly. Private cards use the
+JAR-style browser chat capture when JanitorAI exposes the assembled definition;
+if that capture fails, download the card manually and use **Inspect a card file**.
+
 ## Screenshots
 
 ### Desktop
@@ -161,6 +186,23 @@ The NSFW switch in BotSearcher updates BotBooru's account-wide `show_nsfw` prefe
 ### JannyAI search requests
 
 JannyAI search uses the read-only public search key published by JannyAI's own web clients. BotSearcher keeps that value server-side and sends it only for an exact `POST` to `search.jannyai.com/multi-search`; it is not accepted from the browser, sent to other paths, or replayed across redirects. The request uses no relay and does not forge an `Origin` or `Referer` header. If JannyAI rotates the public key, the adapter must be updated before searches work again.
+
+### Saucepan and JannyAI URL imports
+
+Saucepan credentials are sent only to Saucepan's fixed sign-in endpoint. A
+bearer supplied by login or the token field stays in server-process memory,
+scoped to the current SillyBunny profile, and is not written to extension
+settings, URLs, or logs. Saucepan's fragment proof and ordering are checked
+before the card is assembled.
+
+The JannyAI bridge launches a persistent, headful browser profile on the
+SillyTavern host. Its cookies, Cloudflare clearance, and any temporary chat
+session remain on that host; the frontend receives only the validated card
+bytes. Private-card capture creates a temporary chat and attempts to delete it
+after the capture; it also temporarily selects a throwaway proxy preset and
+restores the account's JanitorAI generation settings afterward. The bridge is
+intentionally not a general URL proxy: it
+accepts only JannyAI/JanitorAI character URLs and Saucepan companion URLs.
 
 ### When a source refuses your server
 
@@ -204,6 +246,7 @@ Direct browser thumbnails can follow image-host redirects and use browser image-
 | Pygmalion | Yes | Native | Full-size images; no preview endpoint |
 | RisuRealm | Yes | Native | Full-size images; data comes from SvelteKit page data |
 | JannyAI | Yes | Native | Preview images; listing metadata only |
+| Saucepan.ai | No | URL assembled | Requires a Saucepan account or bearer token |
 | Wyvern | Yes | Assembled | Resized CDN images |
 | Character Tavern | Yes | Assembled | Thumbnails are unavailable through the server |
 | Quillgen | No | Downloaded | Limited public catalog |

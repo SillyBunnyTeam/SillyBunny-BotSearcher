@@ -21,6 +21,7 @@ import { el, setLinkSafe, setText } from './render.js';
 import {
     cleanBytes,
     commitPreparedCardImport,
+    fetchUrlCard,
     fetchNativeCardBytes,
     importCard,
     inspectBytes,
@@ -203,6 +204,12 @@ async function loadBytes(request, signal) {
     if (request.file) {
         return readLocalCardFile(request.file);
     }
+    if (typeof request.url === 'string') {
+        return fetchUrlCard(request.url, request.source, { signal });
+    }
+    if (request.source?.capabilities?.browserImport === true && typeof request.card?.importUrl === 'string') {
+        return fetchUrlCard(request.card.importUrl, request.source, { signal });
+    }
     if (request.source?.nativeImport === true) {
         return fetchNativeCardBytes(request.card, request.source, { signal });
     }
@@ -294,6 +301,9 @@ function originLine(request, inside) {
     }
     if (typeof request.card?.pageUrl === 'string' && request.card.pageUrl !== '') {
         rows.push({ label: 'Original address', value: request.card.pageUrl });
+    }
+    if (typeof request.url === 'string' && request.url !== '') {
+        rows.push({ label: 'Original address', value: request.url });
     }
     if (inside.creator) {
         // The listing's creator and the card's own can disagree; both are shown

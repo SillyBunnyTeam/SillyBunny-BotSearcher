@@ -61,6 +61,16 @@
                 <input id="sbbs_card_file" class="sbbs-visually-hidden" type="file" accept=".png,.json,image/png,application/json" tabindex="-1" aria-hidden="true">
                 <span class="sbbs-setting-note">Reports what is inside a PNG or JSON card before importing it. You can also drop one onto this dialog.</span>
             </div>
+            <div id="sbbs_url_import" class="sbbs-url-import" hidden>
+                <div id="sbbs_url_import_form" class="sbbs-url-import-form">
+                    <label for="sbbs_url_source">Import from source</label>
+                    <select id="sbbs_url_source" class="text_pole"></select>
+                    <label for="sbbs_card_url">Card URL</label>
+                    <input id="sbbs_card_url" class="text_pole" type="url" maxlength="512" autocomplete="url" placeholder="Paste a card URL">
+                    <button id="sbbs_url_import_button" class="menu_button" type="button">Inspect URL</button>
+                </div>
+                <span id="sbbs_url_import_note" class="sbbs-setting-note">The server fetches the card through the selected source's authenticated bridge, then opens the same intake review.</span>
+            </div>
         </div>
       </form>
     </header>

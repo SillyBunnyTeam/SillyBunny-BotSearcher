@@ -13,7 +13,8 @@
 import { PLUGIN_ID } from '../shared/schema.js';
 import { createRouter } from './router.js';
 import { LOG_TAG } from './guards.js';
-import { createBotbooruAccounts } from './accounts.js';
+import { createBotbooruAccounts, createSaucepanAccounts } from './accounts.js';
+import { createJannyBrowser } from './janny-browser.js';
 
 export const info = {
     id: PLUGIN_ID,
@@ -26,6 +27,8 @@ const state = {
     /** @type {Set<NodeJS.Timeout>} Any timer created later must land here so exit() can clear it. */
     timers: new Set(),
     accounts: createBotbooruAccounts(),
+    saucepan: createSaucepanAccounts(),
+    jannyBrowser: createJannyBrowser(),
 };
 
 /**
@@ -46,6 +49,8 @@ export async function exit() {
         }
         state.timers.clear();
         state.accounts.clear();
+        state.saucepan.clear();
+        await state.jannyBrowser.close();
     } catch {
         // Nothing actionable during shutdown.
     }

@@ -21,6 +21,7 @@ import {
     UPDATE_CAPABILITY,
     getAvailability,
     getServerPluginUpdateCapabilities,
+    post,
     updateServerPlugin,
 } from './api.js';
 import {
@@ -300,6 +301,14 @@ export async function mountSettings() {
         if (availability.status === AVAILABILITY.OK && botbooru?.capabilities?.accountLogin === true) {
             content.prepend(botbooruAccountControl());
         }
+        const saucepan = sources.find((source) => source?.id === 'saucepan');
+        if (availability.status === AVAILABILITY.OK && saucepan?.capabilities?.accountLogin === true) {
+            content.prepend(saucepanAccountControl());
+        }
+        const janny = sources.find((source) => source?.id === 'jannyai');
+        if (availability.status === AVAILABILITY.OK && janny?.capabilities?.browserImport === true) {
+            content.prepend(jannyBrowserControl());
+        }
         content.prepend(serverPluginControl(availability));
     } catch {
         // Plugin not installed yet; the rest of the panel still works.
@@ -502,6 +511,183 @@ function botbooruAccountControl() {
         }
     });
 
+    return wrapper;
+}
+
+function saucepanAccountControl() {
+    const wrapper = el('section', 'sbbs-setting sbbs-setting-account');
+    const heading = el('strong', undefined, 'Saucepan.ai account');
+    heading.id = 'sbbs_saucepan_account_heading';
+    wrapper.setAttribute('aria-labelledby', heading.id);
+
+    const status = el('span', 'sbbs-account-status');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+
+    const loginForm = el('form', 'sbbs-account-login');
+    const handleField = accountField('sbbs_saucepan_handle', 'Handle', 'text', 'username');
+    const passwordField = accountField('sbbs_saucepan_password', 'Password', 'password', 'current-password');
+    const login = el('button', 'menu_button', 'Log in');
+    login.type = 'submit';
+    const fields = el('div', 'sbbs-account-fields');
+    fields.append(handleField.wrapper, passwordField.wrapper);
+    loginForm.append(fields, login);
+
+    const tokenForm = el('div', 'sbbs-account-login');
+    const tokenField = accountField('sbbs_saucepan_token', 'Bearer token', 'password', 'off');
+    tokenField.input.maxLength = 8192;
+    const setToken = el('button', 'menu_button', 'Use token');
+    setToken.type = 'button';
+    const tokenFields = el('div', 'sbbs-account-fields');
+    tokenFields.append(tokenField.wrapper, setToken);
+    tokenForm.append(tokenFields);
+
+    const logout = el('button', 'menu_button', 'Log out');
+    logout.type = 'button';
+    const note = el(
+        'span',
+        'sbbs-setting-note',
+        'The password and token are not stored in extension settings. The bearer stays in server memory until logout or restart.',
+    );
+    wrapper.append(heading, status, loginForm, tokenForm, note, logout);
+
+    let pending = false;
+    let message = '';
+    let loggedIn = false;
+
+    const render = (value = {}) => {
+        loggedIn = value.loggedIn === true;
+        setText(status, message || (loggedIn
+            ? 'Saucepan is ready for URL imports.'
+            : 'Not logged in. Saucepan card URLs require an account token.'));
+        login.disabled = pending;
+        setToken.disabled = pending;
+        logout.disabled = pending || !loggedIn;
+        handleField.input.disabled = pending;
+        passwordField.input.disabled = pending;
+        tokenField.input.disabled = pending;
+    };
+
+    const refresh = async () => {
+        const result = await post('/account/status', { source: 'saucepan' });
+        message = '';
+        render(result);
+        return result;
+    };
+
+    const run = async (operation, busyMessage) => {
+        if (pending) {
+            return;
+        }
+        pending = true;
+        message = busyMessage;
+        render({ loggedIn });
+        try {
+            const result = await operation();
+            message = '';
+            render(result);
+        } catch (error) {
+            message = accountErrorMessage(error);
+            render({ loggedIn });
+        } finally {
+            passwordField.input.value = '';
+            tokenField.input.value = '';
+            pending = false;
+            if (wrapper.isConnected) {
+                render({ loggedIn });
+            }
+        }
+    };
+
+    loginForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        void run(
+            () => post('/account/login', {
+                source: 'saucepan',
+                username: handleField.input.value,
+                password: passwordField.input.value,
+            }),
+            'Logging in to Saucepan...',
+        );
+    });
+    setToken.addEventListener('click', () => void run(
+        () => post('/account/token', { source: 'saucepan', token: tokenField.input.value }),
+        'Saving the Saucepan token in server memory...',
+    ));
+    logout.addEventListener('click', () => void run(
+        () => post('/account/logout', { source: 'saucepan' }),
+        'Removing the Saucepan login...',
+    ));
+
+    render();
+    void refresh().catch((error) => {
+        message = accountErrorMessage(error);
+        render({ loggedIn: false });
+    });
+    return wrapper;
+}
+
+function jannyBrowserControl() {
+    const wrapper = el('section', 'sbbs-setting sbbs-setting-account');
+    const heading = el('strong', undefined, 'JannyAI browser import');
+    heading.id = 'sbbs_janny_browser_heading';
+    wrapper.setAttribute('aria-labelledby', heading.id);
+    const status = el('span', 'sbbs-account-status');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    const login = el('button', 'menu_button', 'Open JannyAI login window');
+    login.type = 'button';
+    const refresh = el('button', 'menu_button', 'Refresh status');
+    refresh.type = 'button';
+    const logout = el('button', 'menu_button', 'Log out');
+    logout.type = 'button';
+    const note = el(
+        'span',
+        'sbbs-setting-note',
+        'This opens a persistent, visible Playwright browser on the SillyTavern host. Complete JannyAI login and Cloudflare verification there; cookies stay on that host.',
+    );
+    wrapper.append(heading, status, login, refresh, logout, note);
+
+    let pending = false;
+    const render = (value = {}) => {
+        if (pending) {
+            setText(status, 'Checking the JannyAI browser session...');
+        } else if (value.loggedIn === true) {
+            setText(status, 'JannyAI browser session is ready.');
+        } else if (value.ready === false) {
+            setText(status, 'Browser bridge is not ready. Install Playwright/Chromium on the server host if needed.');
+        } else {
+            setText(status, 'Not logged in to JannyAI.');
+        }
+        login.disabled = pending;
+        refresh.disabled = pending;
+        logout.disabled = pending || value.loggedIn !== true;
+    };
+
+    const request = async (path, message) => {
+        if (pending) {
+            return;
+        }
+        pending = true;
+        setText(status, message);
+        render({});
+        try {
+            const result = await post(path, {});
+            render(result);
+        } catch (error) {
+            setText(status, accountErrorMessage(error));
+        } finally {
+            pending = false;
+            if (wrapper.isConnected) {
+                void post('/janny/status', {}).then(render).catch(() => render({}));
+            }
+        }
+    };
+
+    login.addEventListener('click', () => void request('/janny/login', 'Opening the JannyAI browser window...'));
+    refresh.addEventListener('click', () => void request('/janny/status', 'Checking the JannyAI browser session...'));
+    logout.addEventListener('click', () => void request('/janny/logout', 'Clearing the JannyAI browser session...'));
+    void request('/janny/status', 'Checking the JannyAI browser session...');
     return wrapper;
 }
 

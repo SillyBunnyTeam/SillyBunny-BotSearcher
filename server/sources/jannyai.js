@@ -252,6 +252,7 @@ export const jannyai = Object.freeze({
         sorts: SORTS,
         sfwToggle: true,
         detail: false,
+        browserImport: true,
     }),
 
     async search(ctx, args) {

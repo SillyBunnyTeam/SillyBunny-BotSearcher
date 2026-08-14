@@ -7,11 +7,10 @@
  * by csrf-sync's default ignoredMethods, which is why the availability probe is
  * a GET and everything else is a POST.
  *
- * The contract is deliberately narrow: the client names a SOURCE, never a URL.
- * There is no route on this router that will fetch a URL supplied by the caller.
- * /ingest does not weaken that: it accepts a PAYLOAD the browser already fetched
- * from a URL this server built, so there is still no path from client input to an
- * outbound request.
+ * The contract is deliberately narrow: the client names a SOURCE. The one URL
+ * route below accepts only source-specific character URLs, parses them into a
+ * validated id, and never becomes an arbitrary relay. /ingest accepts a PAYLOAD
+ * the browser already fetched from a URL this server built.
  */
 
 import {
@@ -46,7 +45,8 @@ import {
 import { validateCardBytes, CardBytesError } from './cardbytes.js';
 import { cleanCard } from './cardclean.js';
 import { getVocabulary, hasVocabulary } from './vocabulary.js';
-import { AccountError, accountProfileHandle, createBotbooruAccounts } from './accounts.js';
+import { AccountError, accountProfileHandle, createBotbooruAccounts, createSaucepanAccounts } from './accounts.js';
+import { JannyBrowserError, createJannyBrowser, parseJannyUrl } from './janny-browser.js';
 
 /**
  * Default thumbnail cap. A 320px preview is 20-60 KB, so anything near this is
@@ -82,6 +82,8 @@ const TERMINAL_ACCOUNT_PARTIALS = new Set([
  */
 export function createRouter(router, state) {
     const accounts = state.accounts ?? createBotbooruAccounts();
+    const saucepanAccounts = state.saucepan ?? createSaucepanAccounts();
+    const jannyBrowser = state.jannyBrowser ?? createJannyBrowser();
 
     router.get('/healthz', wrap(async (_request, response) => {
         response.json({
@@ -113,7 +115,8 @@ export function createRouter(router, state) {
         if (!handle) {
             return;
         }
-        await respondWithAccount(response, () => accounts.status(handle));
+        const store = accountStoreFor(resolved.adapter, accounts, saucepanAccounts);
+        await respondWithAccount(response, () => store.status(handle));
     }));
 
     router.post('/account/login', jsonGuard, wrap(async (request, response) => {
@@ -134,17 +137,45 @@ export function createRouter(router, state) {
             return;
         }
 
-        await respondWithAccount(response, () => accounts.login(
+        const store = accountStoreFor(resolved.adapter, accounts, saucepanAccounts);
+        await respondWithAccount(response, () => store.login(
             handle,
             own(request.body, 'username'),
             own(request.body, 'password'),
         ));
     }));
 
+    router.post('/account/token', jsonGuard, wrap(async (request, response) => {
+        response.set('Cache-Control', 'no-store');
+        const resolved = resolveAccountSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        if (resolved.adapter.id !== 'saucepan') {
+            fail(response, 400, 'account_action_unsupported');
+            return;
+        }
+        const handle = accountHandle(request, response);
+        if (!handle) {
+            return;
+        }
+        const limited = await consume('accountLogin', handle, { failClosed: true });
+        if (!limited.allowed) {
+            response.set('Retry-After', String(limited.retryAfterSeconds));
+            fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
+            return;
+        }
+        await respondWithAccount(response, () => saucepanAccounts.setToken(handle, own(request.body, 'token')));
+    }));
+
     router.post('/account/nsfw', jsonGuard, wrap(async (request, response) => {
         response.set('Cache-Control', 'no-store');
         const resolved = resolveAccountSource(request, response);
         if (!resolved) {
+            return;
+        }
+        if (resolved.adapter.id !== 'botbooru') {
+            fail(response, 400, 'account_action_unsupported');
             return;
         }
         const handle = accountHandle(request, response);
@@ -170,7 +201,23 @@ export function createRouter(router, state) {
         if (!handle) {
             return;
         }
-        await respondWithAccount(response, () => accounts.logout(handle));
+        const store = accountStoreFor(resolved.adapter, accounts, saucepanAccounts);
+        await respondWithAccount(response, () => store.logout(handle));
+    }));
+
+    router.post('/janny/status', jsonGuard, wrap(async (_request, response) => {
+        response.set('Cache-Control', 'no-store');
+        await respondWithJanny(response, () => jannyBrowser.status());
+    }));
+
+    router.post('/janny/login', jsonGuard, wrap(async (_request, response) => {
+        response.set('Cache-Control', 'no-store');
+        await respondWithJanny(response, () => jannyBrowser.login());
+    }));
+
+    router.post('/janny/logout', jsonGuard, wrap(async (_request, response) => {
+        response.set('Cache-Control', 'no-store');
+        await respondWithJanny(response, () => jannyBrowser.logout());
     }));
 
     router.post('/tags', jsonGuard, wrap(async (request, response) => {
@@ -617,6 +664,89 @@ export function createRouter(router, state) {
                 // contents report is NOT sent here: it now carries the card's
                 // own prompt text for measuring, which no header could hold.
                 // The client posts these bytes to /inspect for that.
+                'X-SBBS-Card-Kind': verdict.kind,
+            });
+            response.send(buffer);
+        } finally {
+            gate.release();
+        }
+    }));
+
+    router.post('/url-card', jsonGuard, wrap(async (request, response) => {
+        const resolved = resolveSource(request, response);
+        if (!resolved) {
+            return;
+        }
+        const { adapter } = resolved;
+        const rawUrl = own(request.body, 'url');
+        const parsed = adapter.id === 'jannyai'
+            ? parseJannyUrl(rawUrl)
+            : (typeof adapter.parseImportUrl === 'function' ? adapter.parseImportUrl(rawUrl) : null);
+        if (!parsed) {
+            fail(response, 400, 'bad_import_url');
+            return;
+        }
+
+        const gate = await gateRequest(request, response, adapter.id, 'card', {
+            allowDown: adapter.id === 'jannyai',
+        });
+        if (!gate) {
+            return;
+        }
+
+        try {
+            let card;
+            try {
+                if (adapter.id === 'jannyai') {
+                    card = (await jannyBrowser.fetchCard(rawUrl)).card;
+                } else if (adapter.id === 'saucepan') {
+                    const handle = accountProfileHandle(request);
+                    const context = saucepanAccounts.context(handle);
+                    card = await adapter.buildCard(context, parsed.id);
+                } else {
+                    fail(response, 400, 'url_import_unsupported');
+                    return;
+                }
+            } catch (error) {
+                if (sendAccountError(response, error)) {
+                    return;
+                }
+                if (error instanceof JannyBrowserError) {
+                    fail(response, error.status, error.code);
+                    return;
+                }
+                if (adapter.id === 'saucepan' && error instanceof UpstreamError && error.code === 'http_error'
+                    && String(error.detail) === '401') {
+                    saucepanAccounts.invalidate(accountProfileHandle(request));
+                    fail(response, 401, 'saucepan_session_expired');
+                    return;
+                }
+                throw error;
+            }
+
+            const buffer = Buffer.from(JSON.stringify(card), 'utf8');
+            if (buffer.length > MAX_CARD_BYTES) {
+                fail(response, 422, 'too_large');
+                return;
+            }
+
+            let verdict;
+            try {
+                verdict = validateCardBytes(buffer, 'json');
+            } catch (error) {
+                if (error instanceof CardBytesError) {
+                    fail(response, 422, error.code);
+                    return;
+                }
+                throw error;
+            }
+
+            response.set({
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': String(buffer.length),
+                'X-Content-Type-Options': 'nosniff',
+                'Content-Security-Policy': "default-src 'none'; sandbox",
+                'Content-Disposition': `attachment; filename="${cardFileName(adapter.id, parsed.id, verdict.kind)}"`,
                 'X-SBBS-Card-Kind': verdict.kind,
             });
             response.send(buffer);
@@ -1117,6 +1247,18 @@ async function respondWithAccount(response, operation) {
     }
 }
 
+async function respondWithJanny(response, operation) {
+    try {
+        response.json(await operation());
+    } catch (error) {
+        if (error instanceof JannyBrowserError) {
+            fail(response, error.status, error.code);
+            return;
+        }
+        throw error;
+    }
+}
+
 function sendAccountError(response, error) {
     if (!(error instanceof AccountError)) {
         return false;
@@ -1130,11 +1272,15 @@ function resolveAccountSource(request, response) {
     if (!resolved) {
         return null;
     }
-    if (resolved.adapter.id !== 'botbooru' || resolved.adapter.capabilities.accountLogin !== true) {
+    if (resolved.adapter.capabilities.accountLogin !== true) {
         fail(response, 400, 'account_unsupported');
         return null;
     }
     return resolved;
+}
+
+function accountStoreFor(adapter, botbooruAccounts, saucepanAccounts) {
+    return adapter.id === 'saucepan' ? saucepanAccounts : botbooruAccounts;
 }
 
 function accountHandle(request, response) {
@@ -1265,10 +1411,10 @@ async function callAdapter(adapter, fn, { trackHealth = true, ignoreAuthenticati
  * in-flight cap.
  * @returns {Promise<{ release: () => void } | null>}
  */
-async function gateRequest(request, response, sourceId, limiterName) {
+async function gateRequest(request, response, sourceId, limiterName, { allowDown = false } = {}) {
     // While a source is in cooldown, answer immediately and make no outbound
     // request at all.
-    if (isDown(sourceId)) {
+    if (!allowDown && isDown(sourceId)) {
         fail(response, 503, 'source_down');
         return null;
     }

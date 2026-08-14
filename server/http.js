@@ -95,9 +95,7 @@ function requestShape(adapter, url, options) {
             throw new UpstreamError('bad_authorization', adapter.id);
         }
         const authHost = typeof adapter.authHost === 'string' ? adapter.authHost.toLowerCase() : '';
-        const allowedAuthHost = authHost === 'botbooru.com' || adapter.allowInsecureForTests === true;
-        if (adapter.id !== 'botbooru'
-            || !allowedAuthHost
+        if (authHost === '' || !adapter.allowedHosts.includes(authHost)
             || url.hostname.toLowerCase() !== authHost) {
             throw new UpstreamError('authorization_not_allowed', adapter.id);
         }
@@ -108,7 +106,7 @@ function requestShape(adapter, url, options) {
 }
 
 /**
- * @param {{ id: string, allowedHosts: readonly string[] }} adapter
+ * @param {{ id: string, allowedHosts: readonly string[], requestHeaders?: Record<string, string> }} adapter
  * @param {URL} url
  */
 function assertReachable(adapter, url) {
@@ -136,9 +134,9 @@ function assertReachable(adapter, url) {
  * the destination at every hop. node-fetch's own `follow` does not re-check the
  * host, which is why redirects are handled manually here.
  *
- * @param {{ id: string, allowedHosts: readonly string[] }} adapter
+ * @param {{ id: string, allowedHosts: readonly string[], requestHeaders?: Record<string, string> }} adapter
  * @param {URL | string} target
- * @param {{ accept: string, maxBytes: number, signal: AbortSignal, timedOut: () => boolean, method?: string, body?: string, contentType?: string, bearerToken?: string }} options
+ * @param {{ accept: string, maxBytes: number, signal: AbortSignal, timedOut: () => boolean, method?: string, body?: string, contentType?: string, bearerToken?: string, headers?: Record<string, string> }} options
  */
 async function request(adapter, target, options) {
     let url = target instanceof URL ? target : new URL(String(target));
@@ -148,7 +146,12 @@ async function request(adapter, target, options) {
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
         assertReachable(adapter, url);
         const shape = requestShape(adapter, url, options);
-        const headers = { ...BASE_HEADERS, Accept: accept };
+        const headers = {
+            ...BASE_HEADERS,
+            ...(adapter.requestHeaders ?? {}),
+            ...(options.headers ?? {}),
+            Accept: accept,
+        };
         if (shape.contentType) {
             headers['Content-Type'] = shape.contentType;
         }
@@ -265,9 +268,9 @@ function declaredTooLarge(response, maxBytes) {
  * Fetches and parses JSON, then rejects prototype-poisoning payloads before the
  * caller can walk them.
  *
- * @param {{ id: string, allowedHosts: readonly string[] }} adapter
+ * @param {{ id: string, allowedHosts: readonly string[], requestHeaders?: Record<string, string> }} adapter
  * @param {URL | string} url
- * @param {{ maxBytes?: number, timeoutMs?: number, signal?: AbortSignal, method?: string, body?: string, contentType?: string, bearerToken?: string }} [options]
+ * @param {{ maxBytes?: number, timeoutMs?: number, signal?: AbortSignal, method?: string, body?: string, contentType?: string, bearerToken?: string, headers?: Record<string, string> }} [options]
  * @returns {Promise<any>}
  */
 export async function fetchJson(adapter, url, {
@@ -278,6 +281,7 @@ export async function fetchJson(adapter, url, {
     body,
     contentType,
     bearerToken,
+    headers,
 } = {}) {
     const deadline = createDeadline(timeoutMs, signal);
     let response;
@@ -291,6 +295,7 @@ export async function fetchJson(adapter, url, {
             body,
             contentType,
             bearerToken,
+            headers,
         });
 
         if (!response.ok) {
@@ -337,9 +342,9 @@ export async function fetchJson(adapter, url, {
  * Fetches raw bytes with the same host and size discipline. Used by the card
  * byte path and the thumbnail proxy.
  *
- * @param {{ id: string, allowedHosts: readonly string[] }} adapter
+ * @param {{ id: string, allowedHosts: readonly string[], requestHeaders?: Record<string, string> }} adapter
  * @param {URL | string} url
- * @param {{ accept?: string, maxBytes?: number, timeoutMs?: number, signal?: AbortSignal, bearerToken?: string }} [options]
+ * @param {{ accept?: string, maxBytes?: number, timeoutMs?: number, signal?: AbortSignal, bearerToken?: string, headers?: Record<string, string> }} [options]
  * @returns {Promise<{ buffer: Buffer, contentType: string, status: number }>}
  */
 export async function fetchBytes(adapter, url, {
@@ -348,6 +353,7 @@ export async function fetchBytes(adapter, url, {
     timeoutMs = 20000,
     signal,
     bearerToken,
+    headers,
 } = {}) {
     const deadline = createDeadline(timeoutMs, signal);
     let response;
@@ -358,6 +364,7 @@ export async function fetchBytes(adapter, url, {
             signal: deadline.signal,
             timedOut: deadline.timedOut,
             bearerToken,
+            headers,
         });
 
         if (!response.ok) {

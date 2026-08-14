@@ -14,6 +14,7 @@ import { quillgen } from './sources/quillgen.js';
 import { wyvern } from './sources/wyvern.js';
 import { charactertavern } from './sources/charactertavern.js';
 import { jannyai } from './sources/jannyai.js';
+import { saucepan } from './sources/saucepan.js';
 
 /** @type {Readonly<Record<string, any>>} */
 export const SOURCES = Object.freeze({
@@ -25,6 +26,7 @@ export const SOURCES = Object.freeze({
     wyvern,
     charactertavern,
     jannyai,
+    saucepan,
 });
 
 /**
@@ -94,6 +96,8 @@ export function describeSources(stateOf, reasonOf = () => null) {
                 detail: adapter.capabilities.detail,
                 tagVocabulary: adapter.capabilities.tagVocabulary === true,
                 accountLogin: adapter.capabilities.accountLogin === true,
+                urlImport: adapter.capabilities.urlImport === true,
+                browserImport: adapter.capabilities.browserImport === true,
                 nsfwRequiresAccount: adapter.capabilities.nsfwRequiresAccount === true,
                 // The client builds its filter controls from this, so a source
                 // that declares nothing shows no controls rather than showing

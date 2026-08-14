@@ -113,8 +113,8 @@ test('manifest and package agree on the extension identity', async () => {
     assert.match(EXTENSION_NAME, /^[A-Za-z0-9._-]+$/, 'extension dir name must survive sanitize()');
     assert.deepEqual(
         pkg.sillybunny?.serverPlugin?.preservePaths,
-        ['.cursor-key'],
-        'exact-release updates must preserve the server-minted cursor secret',
+        ['.cursor-key', '.sillybunny-janny-profile'],
+        'exact-release updates must preserve runtime secrets and the Janny browser profile',
     );
     const ignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
     assert.match(ignore, /^\.sillybunny-release\.json$/m, 'host release metadata must not dirty the managed checkout');

@@ -86,6 +86,30 @@ export async function prepareCardImport(card, source, { signal } = {}) {
     return { file: fileFrom(bytes, fileName, kind), kind };
 }
 
+/** Fetches a validated card from one of the server's fixed URL-import bridges. */
+export async function fetchUrlCard(url, source, { signal } = {}) {
+    if (typeof url !== 'string' || url.trim() === '' || typeof source?.id !== 'string') {
+        throw new Error('bad_import_url');
+    }
+
+    const ctx = context();
+    const requestSignal = signal ?? AbortSignal.timeout(120_000);
+    const response = await fetch(`${PLUGIN_BASE}/url-card`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify({ source: source.id, url: url.trim() }),
+        signal: requestSignal,
+    });
+    if (!response.ok) {
+        throw await cardResponseError(response);
+    }
+
+    const kind = response.headers.get('X-SBBS-Card-Kind') === 'png' ? 'png' : 'json';
+    const bytes = await readResponseBytes(response, MAX_CARD_BYTES, requestSignal);
+    return { file: fileFrom(bytes, `${source.id}-url.${kind}`, kind), kind };
+}
+
 /**
  * Asks SillyBunny to download a native source's card and hand back the bytes,
  * so the intake screen can describe what the import would actually bring in.

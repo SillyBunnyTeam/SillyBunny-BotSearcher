@@ -199,23 +199,22 @@ function wireBrowser(popup, health, options) {
         intake: root.querySelector('#sbbs_intake'),
         inspectFile: root.querySelector('#sbbs_inspect_file'),
         cardFile: root.querySelector('#sbbs_card_file'),
+        urlImport: root.querySelector('#sbbs_url_import'),
+        urlSource: root.querySelector('#sbbs_url_source'),
+        cardUrl: root.querySelector('#sbbs_card_url'),
+        urlImportButton: root.querySelector('#sbbs_url_import_button'),
+        urlImportNote: root.querySelector('#sbbs_url_import_note'),
     };
 
     const settings = getSettings();
     const sources = Array.isArray(health?.sources) ? health.sources : [];
     const searchable = sources.filter((source) => source?.capabilities?.search);
+    const urlSources = sources.filter((source) => source?.capabilities?.urlImport
+        || source?.capabilities?.browserImport);
     // Every enabled source stays in the picker, including one the server
     // currently has in cooldown. Selecting it explains why and offers a reload,
     // which is more useful than the source not being there to select.
     const usable = searchable.filter((source) => isSourceEnabled(source, settings.enabledSources));
-
-    if (usable.length === 0) {
-        dom.bar.hidden = true;
-        setText(dom.state, searchable.length === 0
-            ? 'The server did not report any searchable sources.'
-            : 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.');
-        return () => {};
-    }
 
     /** Card element -> record and immutable source snapshot. */
     const records = new Map();
@@ -249,6 +248,75 @@ function wireBrowser(popup, health, options) {
         /** Public status only. The bearer remains in the server process. */
         account: getBotbooruAccount(),
     };
+
+    for (const source of urlSources) {
+        const option = document.createElement('option');
+        option.value = source.id;
+        setText(option, source.label ?? source.id);
+        dom.urlSource?.append(option);
+    }
+    if (dom.urlImport) {
+        dom.urlImport.hidden = urlSources.length === 0;
+    }
+    dom.urlImportButton?.addEventListener('click', () => {
+        const source = urlSources.find((entry) => entry.id === dom.urlSource?.value);
+        const url = dom.cardUrl?.value.trim() ?? '';
+        if (!source || url === '') {
+            setText(dom.urlImportNote, 'Choose a source and paste its card URL first.');
+            dom.cardUrl?.focus();
+            return;
+        }
+        setText(dom.urlImportNote, 'Fetching the card through the server bridge...');
+        openIntake({ url, source }, 'grid');
+    });
+
+    dom.inspectFile?.addEventListener('click', () => dom.cardFile?.click());
+    dom.cardFile?.addEventListener('change', () => {
+        const file = dom.cardFile.files?.[0];
+        dom.cardFile.value = '';
+        if (file) {
+            openIntake({ file }, 'grid');
+        }
+    });
+
+    // Keep file inspection available even when every searchable source is
+    // disabled or the server only exposes URL-import sources.
+    dom.root.addEventListener('dragover', (event) => {
+        if (!event.dataTransfer?.types?.includes('Files')) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = 'copy';
+        dom.root.classList.add('sbbs-dragging');
+    });
+    for (const name of ['dragleave', 'dragend']) {
+        dom.root.addEventListener(name, () => dom.root.classList.remove('sbbs-dragging'));
+    }
+    dom.root.addEventListener('drop', (event) => {
+        const file = event.dataTransfer?.files?.[0];
+        if (!file) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        dom.root.classList.remove('sbbs-dragging');
+        openIntake({ file }, dom.root.dataset.view === 'detail' ? 'detail' : 'grid');
+    });
+
+    if (usable.length === 0) {
+        for (const row of dom.form?.querySelectorAll('.sbbs-bar-row') ?? []) {
+            row.hidden = true;
+        }
+        dom.filtersToggle.hidden = true;
+        dom.filters.hidden = false;
+        setText(dom.state, searchable.length === 0
+            ? (urlSources.length === 0
+                ? 'The server did not report any searchable or URL-import sources.'
+                : 'Paste a Saucepan or JannyAI card URL below to inspect it.')
+            : 'No sources are enabled. Enable one in Extensions > BotSearcher > Sources.');
+        return () => {};
+    }
 
     // "All sources" is a synthetic entry, not a source. It is only worth
     // offering when there is more than one thing to merge.
@@ -321,48 +389,6 @@ function wireBrowser(popup, health, options) {
         state.filters?.clear();
         updateFilterBadge();
         void runSearch({ append: false });
-    });
-
-    dom.inspectFile?.addEventListener('click', () => dom.cardFile?.click());
-    dom.cardFile?.addEventListener('change', () => {
-        const file = dom.cardFile.files?.[0];
-        // Cleared immediately so choosing the same file twice fires again.
-        dom.cardFile.value = '';
-        if (file) {
-            openIntake({ file }, 'grid');
-        }
-    });
-
-    /**
-     * Dropping a card onto this dialog inspects it instead of importing it.
-     *
-     * SillyBunny's own handler is delegated from document.body in the bubble
-     * phase (public/scripts/dragdrop.js:60), so stopping propagation here means
-     * the host never sees the drop — which is the whole point: a card dropped
-     * onto the intake dialog must not simultaneously be imported by the app
-     * behind it.
-     */
-    dom.root.addEventListener('dragover', (event) => {
-        if (!event.dataTransfer?.types?.includes('Files')) {
-            return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = 'copy';
-        dom.root.classList.add('sbbs-dragging');
-    });
-    for (const name of ['dragleave', 'dragend']) {
-        dom.root.addEventListener(name, () => dom.root.classList.remove('sbbs-dragging'));
-    }
-    dom.root.addEventListener('drop', (event) => {
-        const file = event.dataTransfer?.files?.[0];
-        if (!file) {
-            return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        dom.root.classList.remove('sbbs-dragging');
-        openIntake({ file }, dom.root.dataset.view === 'detail' ? 'detail' : 'grid');
     });
 
     dom.form.addEventListener('submit', (event) => {

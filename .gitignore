@@ -6,5 +6,7 @@ node_modules
 bun.lock
 # Token-signing secret, generated on first run. Per install, never committed.
 .cursor-key
+# Persistent Playwright cookies and Cloudflare clearance for JannyAI imports.
+.sillybunny-janny-profile
 # Host-managed exact-release pin metadata.
 .sillybunny-release.json

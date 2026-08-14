@@ -332,6 +332,22 @@ export function accountErrorMessage(error) {
             return 'The BotBooru account changed during this request. Try again.';
         case 'bad_account_request':
             return 'Enter a valid BotBooru username and password.';
+        case 'saucepan_invalid_credentials':
+            return 'Saucepan did not accept that handle and password.';
+        case 'saucepan_login_required':
+            return 'Log in to Saucepan first.';
+        case 'saucepan_session_expired':
+            return 'Your Saucepan token expired. Log in again.';
+        case 'saucepan_account_changed':
+            return 'The Saucepan login changed during this request. Try again.';
+        case 'saucepan_auth_unavailable':
+            return 'Saucepan account access is unavailable. Try again shortly.';
+        case 'bad_saucepan_request':
+            return 'Enter a valid Saucepan handle/password or bearer token.';
+        case 'janny_browser_unavailable':
+            return 'The JannyAI browser bridge is unavailable. Install Playwright and Chromium on the SillyTavern host.';
+        case 'janny_login_required':
+            return 'Finish the JannyAI login and Cloudflare check in the browser window first.';
         case 'rate_limited':
             return 'Too many login attempts. Wait before trying again.';
         default:
@@ -801,6 +817,18 @@ export function intakeErrorMessage(error, sourceId) {
                 return 'SillyBunny could not download this JannyAI card. Cloudflare may be blocking the native import.';
             }
             return 'SillyBunny could not download this card from the source.';
+        case 'bad_import_url':
+            return 'That URL is not a supported Saucepan or JannyAI character address.';
+        case 'saucepan_login_required':
+            return 'Log in to Saucepan under Extensions > BotSearcher before importing this card.';
+        case 'saucepan_session_expired':
+            return 'Your Saucepan token expired. Log in again under Extensions > BotSearcher.';
+        case 'janny_login_required':
+            return 'Open the JannyAI browser login under Extensions > BotSearcher, then try again.';
+        case 'janny_browser_unavailable':
+            return 'The JannyAI browser bridge is unavailable. Install Playwright and its Chromium browser on the SillyTavern host.';
+        case 'janny_private_capture_failed':
+            return 'JannyAI did not expose this private card through the browser session. Try again or download the card manually.';
         case 'not_a_character':
             return 'That link is not a character card.';
         case 'import_url_rejected':

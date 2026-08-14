@@ -24,7 +24,7 @@ export const PROTOCOL_VERSION = 7;
 export const MAX_FANOUT = 4;
 
 /** Release version. `tests/invariants.test.js` asserts this matches package.json and manifest.json. */
-export const VERSION = '0.5.1';
+export const VERSION = '0.6.0';
 
 export const PLUGIN_ID = 'sillybunny-botsearcher';
 

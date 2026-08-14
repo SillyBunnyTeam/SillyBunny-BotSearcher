@@ -1,6 +1,6 @@
 {
     "name": "sillybunny-botsearcher",
-    "version": "0.5.1",
+    "version": "0.6.0",
     "description": "Server plugin required by the SillyBunny BotSearcher frontend extension.",
     "type": "module",
     "main": "server/index.js",
@@ -13,6 +13,7 @@
     },
     "dependencies": {
         "node-fetch": "^3.3.2",
+        "playwright": "^1.62.1",
         "rate-limiter-flexible": "^11.2.0"
     },
     "devDependencies": {
@@ -29,7 +30,8 @@
         "serverPlugin": {
             "id": "sillybunny-botsearcher",
             "preservePaths": [
-                ".cursor-key"
+                ".cursor-key",
+                ".sillybunny-janny-profile"
             ]
         }
     },

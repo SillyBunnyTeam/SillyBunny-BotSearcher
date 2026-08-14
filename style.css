@@ -268,6 +268,25 @@
     justify-content: flex-end;
 }
 
+.sbbs-url-import {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs, 4px);
+    padding-top: var(--spacing-sm, 8px);
+    border-top: 1px solid var(--sb-shell-border, rgba(255, 255, 255, 0.12));
+}
+
+.sbbs-url-import-form {
+    display: grid;
+    grid-template-columns: auto minmax(8rem, 14rem) auto minmax(12rem, 1fr) auto;
+    align-items: center;
+    gap: var(--spacing-xs, 4px) var(--spacing-sm, 8px);
+}
+
+.sbbs-url-import-form .text_pole {
+    min-width: 0;
+}
+
 /* ---- body ---- */
 
 .sbbs-body {
@@ -1187,6 +1206,10 @@
 
     .sbbs-filter-boolean {
         justify-content: flex-start;
+    }
+
+    .sbbs-url-import-form {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .sbbs-account-fields {
