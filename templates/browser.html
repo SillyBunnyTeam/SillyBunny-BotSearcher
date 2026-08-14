@@ -25,6 +25,7 @@
                 <span>Filters</span>
                 <span id="sbbs_filters_badge" class="sbbs-filters-badge" hidden></span>
             </button>
+            <button id="sbbs_saucepan_url_shortcut" class="menu_button" type="button" hidden>Paste Saucepan.ai URL</button>
         </div>
         <div id="sbbs_filters" class="sbbs-filters" hidden>
             <!--
@@ -69,7 +70,7 @@
                     <input id="sbbs_card_url" class="text_pole" type="url" maxlength="512" autocomplete="url" placeholder="Paste a card URL">
                     <button id="sbbs_url_import_button" class="menu_button" type="button">Inspect URL</button>
                 </div>
-                <span id="sbbs_url_import_note" class="sbbs-setting-note">The server fetches the card through the selected source's authenticated bridge, then opens the same intake review.</span>
+                <span id="sbbs_url_import_note" class="sbbs-setting-note" role="status" aria-live="polite">The server fetches the card through the selected source's authenticated bridge, then opens the same intake review.</span>
             </div>
         </div>
       </form>

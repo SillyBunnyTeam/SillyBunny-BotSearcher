@@ -319,6 +319,8 @@ test('browser template gives the search field a durable name and matching limit'
     assert.match(browser, /id="sbbs_query"[^>]*aria-label="Search character cards"/);
     assert.match(browser, /id="sbbs_query"[^>]*maxlength="128"/);
     assert.match(browser, /id="sbbs_sfw_note"[^>]*aria-live="polite"/);
+    assert.match(browser, /id="sbbs_url_import_note"[^>]*role="status"/);
+    assert.match(browser, /id="sbbs_url_import_note"[^>]*aria-live="polite"/);
     assert.match(browser, /aria-label="Card details"/);
     assert.match(browser, /aria-label="Card intake"/);
     assert.match(browserScript, /popup\.dlg\.setAttribute\('aria-label', 'Find cards online'\)/);

@@ -183,6 +183,7 @@ function wireBrowser(popup, health, options) {
         hideAi: root.querySelector('#sbbs_hide_ai'),
         filtersToggle: root.querySelector('#sbbs_filters_toggle'),
         filtersBadge: root.querySelector('#sbbs_filters_badge'),
+        saucepanUrlShortcut: root.querySelector('#sbbs_saucepan_url_shortcut'),
         filters: root.querySelector('#sbbs_filters'),
         filterFields: root.querySelector('#sbbs_filter_fields'),
         filtersClear: root.querySelector('#sbbs_filters_clear'),
@@ -212,6 +213,7 @@ function wireBrowser(popup, health, options) {
     const searchable = enabledSources.filter((source) => source?.capabilities?.search);
     const urlSources = enabledSources.filter((source) => source?.capabilities?.urlImport
         || source?.capabilities?.browserImport);
+    const saucepanUrlSource = urlSources.find((source) => source.id === 'saucepan');
     const serverHasSearchOrUrlSource = sources.some((source) => source?.capabilities?.search
         || source?.capabilities?.urlImport
         || source?.capabilities?.browserImport);
@@ -256,12 +258,24 @@ function wireBrowser(popup, health, options) {
     for (const source of urlSources) {
         const option = document.createElement('option');
         option.value = source.id;
-        setText(option, source.label ?? source.id);
+        setText(option, source.capabilities?.search !== true
+            ? `${source.label ?? source.id} (URL import only)`
+            : (source.label ?? source.id));
         dom.urlSource?.append(option);
     }
     if (dom.urlImport) {
         dom.urlImport.hidden = urlSources.length === 0;
     }
+    dom.saucepanUrlShortcut.hidden = !saucepanUrlSource;
+    dom.saucepanUrlShortcut.addEventListener('click', () => {
+        if (!saucepanUrlSource) {
+            return;
+        }
+        dom.filters.hidden = false;
+        dom.filtersToggle.setAttribute('aria-expanded', 'true');
+        dom.urlSource.value = saucepanUrlSource.id;
+        dom.cardUrl.focus();
+    });
     dom.urlImportButton?.addEventListener('click', () => {
         const source = urlSources.find((entry) => entry.id === dom.urlSource?.value);
         const url = dom.cardUrl?.value.trim() ?? '';

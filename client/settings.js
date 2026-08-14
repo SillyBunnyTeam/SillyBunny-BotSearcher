@@ -549,7 +549,12 @@ function saucepanAccountControl() {
         'sbbs-setting-note',
         'The password and token are not stored in extension settings. The bearer stays in server memory until logout or restart.',
     );
-    wrapper.append(heading, status, loginForm, tokenForm, note, logout);
+    const catalogNote = el(
+        'span',
+        'sbbs-setting-note',
+        'Saucepan.ai has no catalog search. Enable it under Sources, then choose Paste Saucepan.ai URL in BotSearcher.',
+    );
+    wrapper.append(heading, catalogNote, status, loginForm, tokenForm, note, logout);
 
     let pending = false;
     let message = '';
@@ -913,7 +918,9 @@ function sourceList(sources) {
 
         row.append(input, el('span', undefined, source.label ?? source.id));
 
-        if (source.tier > DEFAULT_MAX_TIER) {
+        if (source.capabilities?.search !== true && source.capabilities?.urlImport === true) {
+            row.append(el('small', 'sbbs-source-note', 'URL import only, no catalog search'));
+        } else if (source.tier > DEFAULT_MAX_TIER) {
             row.append(el('small', 'sbbs-source-note', 'limited public catalog'));
         }
         if (source.state === 'down') {

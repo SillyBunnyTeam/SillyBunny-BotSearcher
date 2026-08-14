@@ -735,12 +735,207 @@ test('an enabled URL-only source stays available without a catalogue source', as
         );
         assert.equal(popup.content.querySelector('#sbbs_url_import').hidden, false, 'URL import stays visible');
         assert.deepEqual([...urlSource.options].map((option) => option.value), ['saucepan']);
+        assert.deepEqual([...urlSource.options].map((option) => option.textContent), ['Saucepan.ai (URL import only)']);
         assert.deepEqual([...source.options].map((option) => option.value), [], 'Saucepan must not enter the catalogue picker');
+        assert.equal(
+            popup.content.querySelector('#sbbs_saucepan_url_shortcut').closest('.sbbs-bar-row').hidden,
+            true,
+            'catalogue-free mode keeps the secondary shortcut out of the hidden catalogue controls',
+        );
         assert.match(popup.content.querySelector('#sbbs_state').textContent, /Paste a supported card URL/);
         assert.doesNotMatch(popup.content.querySelector('#sbbs_state').textContent, /No sources are enabled/);
 
         popup.complete();
         await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
+test('the Saucepan shortcut opens URL import with Saucepan selected', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        MutationObserver: globalThis.MutationObserver,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        CSS: globalThis.CSS,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        MutationObserver: dom.window.MutationObserver,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+        CSS: { escape: (value) => String(value) },
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    const searches = [];
+    globalThis.fetch = async (url, options = {}) => {
+        const path = String(url);
+        if (path.endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
+                sources: [
+                    { id: 'botbooru', label: 'Botbooru', tier: 0, state: 'up', clientHosts: ['botbooru.com'], capabilities: { search: true, sorts: ['latest'], sfwToggle: true, detail: true } },
+                    { id: 'saucepan', label: 'Saucepan.ai', tier: 2, state: 'up', capabilities: { search: false, accountLogin: true, urlImport: true } },
+                ],
+            });
+        }
+        if (path.endsWith('/search')) {
+            searches.push(JSON.parse(options.body));
+            return jsonResponse({ items: [], nextCursor: null, total: 0 });
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popups = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popups.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    const extensionSettings = {
+        SillyBunnyBotSearcher: { enabledSources: ['botbooru', 'saucepan'], defaultSource: 'botbooru' },
+    };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+            renderExtensionTemplateAsync: async () => TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { openBrowser } = await import('../client/browser.js?saucepan-shortcut');
+        const opened = openBrowser();
+        await waitFor(() => popups.length === 1 && searches.length === 1, 'mixed-source browser did not settle');
+
+        const popup = popups[0];
+        const shortcut = popup.content.querySelector('#sbbs_saucepan_url_shortcut');
+        const filters = popup.content.querySelector('#sbbs_filters');
+        const filtersToggle = popup.content.querySelector('#sbbs_filters_toggle');
+        const urlSource = popup.content.querySelector('#sbbs_url_source');
+        const cardUrl = popup.content.querySelector('#sbbs_card_url');
+
+        assert.equal(shortcut.hidden, false);
+        assert.equal(shortcut.textContent, 'Paste Saucepan.ai URL');
+        assert.equal(filters.hidden, true);
+        assert.equal(filtersToggle.getAttribute('aria-expanded'), 'false');
+        assert.equal(urlSource.options[0].textContent, 'Saucepan.ai (URL import only)');
+        assert.deepEqual(searches[0], {
+            query: '',
+            limit: 24,
+            cursor: null,
+            filters: { sfwOnly: true, hideAi: false },
+            source: 'botbooru',
+            sort: 'latest',
+        });
+
+        shortcut.click();
+        assert.equal(filters.hidden, false);
+        assert.equal(filtersToggle.getAttribute('aria-expanded'), 'true');
+        assert.equal(urlSource.value, 'saucepan');
+        assert.equal(dom.window.document.activeElement, cardUrl);
+
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});
+
+test('Saucepan settings explain URL-only use and keep unavailable status separate', async () => {
+    const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        fetch: globalThis.fetch,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+    });
+
+    globalThis.fetch = async (url) => {
+        const path = String(url);
+        if (path.endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
+                sources: [{
+                    id: 'saucepan', label: 'Saucepan.ai', tier: 3, state: 'down',
+                    capabilities: { search: false, accountLogin: true, urlImport: true },
+                }],
+            });
+        }
+        if (path.endsWith('/account/status')) {
+            return jsonResponse({ source: 'saucepan', loggedIn: false });
+        }
+        if (path.endsWith('/capabilities')) {
+            return jsonResponse({}, 403);
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings: {},
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+        }),
+    };
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { mountSettings } = await import('../client/settings.js?saucepan-settings-guidance');
+        await mountSettings();
+        await waitFor(() => /Not logged in/.test(dom.window.document.querySelector('#sbbs_saucepan_account_heading')?.parentElement?.textContent ?? ''), 'Saucepan account status did not load');
+
+        const row = dom.window.document.querySelector('.sbbs-source-row');
+        const status = dom.window.document.querySelector('#sbbs_saucepan_account_heading').parentElement.querySelector('.sbbs-account-status');
+        assert.match(row.textContent, /URL import only, no catalog search/);
+        assert.doesNotMatch(row.textContent, /limited public catalog/);
+        assert.match(row.textContent, /unavailable/);
+        assert.match(dom.window.document.body.textContent, /Saucepan\.ai has no catalog search\. Enable it under Sources, then choose Paste Saucepan\.ai URL in BotSearcher\./);
+        assert.doesNotMatch(status.textContent, /no catalog search/);
     } finally {
         const { invalidateAvailability } = await import('../client/api.js');
         invalidateAvailability();
