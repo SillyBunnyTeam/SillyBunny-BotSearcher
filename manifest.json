@@ -1,7 +1,7 @@
 {
     "display_name": "BotSearcher",
     "author": "platberlitz",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "description": "Search supported character-card sites and import cards into SillyBunny. Requires the BotSearcher server plugin.",
     "requires": [],
     "optional": [],
