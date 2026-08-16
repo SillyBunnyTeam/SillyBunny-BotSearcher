@@ -435,6 +435,8 @@
  * image is cropped by object-fit: cover instead, which is the intent.
  */
 .sbbs-card-img {
+    /* Anchors the selection mark. */
+    position: relative;
     aspect-ratio: 2 / 3;
     min-height: 0;
     overflow: hidden;
@@ -609,6 +611,79 @@
 .sbbs-card-tag-button:focus-visible {
     outline: 2px solid var(--sb-focus-ring, currentColor);
     outline-offset: 1px;
+}
+
+/* ---- selecting cards ---- */
+
+/*
+ * One row above the grid: the mode toggle alone when off, the count and the
+ * actions beside it when on. Sticky inside the scrolling body, so a selection
+ * made at the bottom of a long grid can be imported without scrolling back up.
+ */
+.sbbs-selection {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-sm, 8px);
+    padding-block: var(--spacing-xs, 4px);
+    background: var(--sb-shell-surface, var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.72)));
+}
+
+.sbbs-selection[hidden] {
+    display: none;
+}
+
+.sbbs-select-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs, 4px);
+}
+
+.sbbs-selection-count {
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.9em;
+    margin-inline-start: auto;
+}
+
+.sbbs-selection-count:empty {
+    display: none;
+}
+
+/*
+ * The mark sits on the thumbnail's bottom corner: the top corners already
+ * carry the rating and source chips. An empty ring on every card says the
+ * mode is on; a filled one says this card is in.
+ */
+.sbbs-root[data-selecting="true"] .sbbs-card-img::after {
+    content: '';
+    position: absolute;
+    inset-block-end: var(--spacing-xs, 4px);
+    inset-inline-end: var(--spacing-xs, 4px);
+    z-index: 2;
+    width: 1.35rem;
+    height: 1.35rem;
+    border-radius: 50%;
+    border: 2px solid var(--sb-shell-border, currentColor);
+    background: var(--sb-shell-surface, rgba(0, 0, 0, 0.72));
+    /* Same pairing as the filter-count badge, so the mark reads on any theme. */
+    color: var(--sb-accent-fg, canvas);
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 1.15rem;
+    text-align: center;
+}
+
+.sbbs-root[data-selecting="true"] .sbbs-card-selected .sbbs-card-img::after {
+    content: '\2713';
+    border-color: var(--sb-accent, currentColor);
+    background: var(--sb-accent, currentColor);
+}
+
+.sbbs-root[data-selecting="true"] .sbbs-card-selected {
+    border-color: var(--sb-accent, currentColor);
 }
 
 .sbbs-more {
@@ -1415,6 +1490,36 @@
 .sbbs-intake-name {
     margin: 0;
     font-size: 1.3em;
+}
+
+/* One line per card in a batch: name, site, then what happened to it. */
+.sbbs-bulk-list {
+    margin: 0;
+    padding-inline-start: 1.5em;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs, 4px);
+}
+
+.sbbs-bulk-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--spacing-xs, 4px) var(--spacing-sm, 8px);
+}
+
+.sbbs-bulk-name {
+    font-weight: 600;
+}
+
+.sbbs-bulk-source,
+.sbbs-bulk-outcome {
+    color: var(--sb-muted-fg, currentColor);
+    font-size: 0.9em;
+}
+
+.sbbs-bulk-outcome {
+    flex: 1 1 100%;
 }
 
 .sbbs-intake-identity {

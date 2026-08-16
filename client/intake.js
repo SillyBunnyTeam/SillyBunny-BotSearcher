@@ -28,18 +28,22 @@ import {
     openCharacter,
     prepareCardImport,
     readLocalCardFile,
+    removeCharacter,
 } from './importer.js';
 import { jannyBrowserControl, saucepanAccountControl } from './settings.js';
 import {
     additionalImportContents,
+    bulkImportSummary,
     cleanKeeps,
     cleanPlan,
     duplicateMessage,
+    formatCount,
     importErrorMessage,
     intakeErrorMessage,
     intakeIdentity,
     intakeSections,
     tokenFootprint,
+    undoErrorMessage,
 } from './copy.js';
 
 /** Fields compared against an installed copy, in the order they are listed. */
@@ -61,30 +65,25 @@ function context() {
  * @param {HTMLElement} container the #sbbs_intake node
  * @param {{ card?: any, source?: any, file?: File }} request where the card is coming from
  * @param {() => void} onBack
- * @param {{ signal?: AbortSignal }} [options]
+ * @param {{ signal?: AbortSignal, direct?: boolean }} [options] `direct` skips the
+ *   report and imports as soon as the bytes are in hand, unless a character of
+ *   the same name is already installed — that choice stays with the user
  */
-export async function showIntake(container, request, onBack, { signal } = {}) {
+export async function showIntake(container, request, onBack, { signal, direct = false } = {}) {
     container.replaceChildren();
 
-    const header = el('div', 'sbbs-detail-header');
-    const back = el('button', 'menu_button sbbs-back');
-    back.type = 'button';
-    const backIcon = el('i', 'fa-solid fa-arrow-left');
-    backIcon.setAttribute('aria-hidden', 'true');
-    back.append(backIcon, el('span', undefined, 'Back'));
-    back.addEventListener('click', onBack);
-    header.append(back);
+    const back = backButton(onBack);
     // Named after the button that opens it, so the transition explains itself.
-    container.append(header, el('h2', 'sbbs-intake-title', 'Review and import'));
+    container.append(header(back), el('h2', 'sbbs-intake-title', direct ? 'Import' : 'Review and import'));
 
     const status = el('div', 'sbbs-state', 'Fetching the card...');
     status.setAttribute('role', 'status');
     container.append(status);
     back.focus();
 
-    let prepared;
+    let staged;
     try {
-        prepared = await loadBytes(request, signal);
+        staged = await stage(request, signal, (text) => setText(status, text));
     } catch (error) {
         if (error?.name === 'AbortError' || signal?.aborted) {
             return;
@@ -97,25 +96,17 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
         return;
     }
 
-    setText(status, 'Inspecting the card...');
+    const { prepared, inside, found } = staged;
 
-    let report;
-    try {
-        report = await inspectBytes(prepared.file, { signal });
-    } catch (error) {
-        if (error?.name === 'AbortError' || signal?.aborted) {
-            return;
-        }
-        showNotInspected(container, status, request, error, onBack, signal);
-        return;
-    }
-
-    if (signal?.aborted) {
+    // Skipping the review is a preference; adding a second copy of an installed
+    // character, or importing blind when the collection could not be read, is
+    // not one it covers. Those land on the full screen.
+    if (direct && found === null) {
+        await importDirect(container, status, prepared, inside, request, onBack);
         return;
     }
 
     status.remove();
-    const inside = report?.inside ?? {};
     const body = el('div', 'sbbs-intake-body');
 
     // ---- identity ----
@@ -137,10 +128,6 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
     }
 
     // ---- already installed? ----
-    const found = await findInstalled(inside);
-    if (signal?.aborted) {
-        return;
-    }
     const match = found?.unknown === true ? null : found;
     const duplicate = el('p', found ? 'sbbs-intake-duplicate sbbs-intake-warn' : 'sbbs-intake-duplicate');
     setText(duplicate, duplicateMessage(found));
@@ -194,6 +181,73 @@ export async function showIntake(container, request, onBack, { signal } = {}) {
 
     container.append(body);
     container.append(actionBar(prepared, inside, match, onBack));
+}
+
+/**
+ * Everything that happens before the user decides: bytes, report, and whether
+ * a character of that name is already installed. Nothing here imports.
+ *
+ * @param {{ card?: any, source?: any, file?: File, url?: string }} request
+ * @param {AbortSignal | undefined} signal
+ * @param {(text: string) => void} onStep
+ * @returns {Promise<{ prepared: { file: File, kind: string }, inside: any, found: any }>}
+ */
+async function stage(request, signal, onStep) {
+    const prepared = await loadBytes(request, signal);
+    if (signal?.aborted) {
+        throw new DOMException('aborted', 'AbortError');
+    }
+    onStep('Inspecting the card...');
+    const report = await inspectBytes(prepared.file, { signal });
+    const inside = report?.inside ?? {};
+    const found = await findInstalled(inside);
+    return { prepared, inside, found };
+}
+
+/**
+ * The review screen switched off: import as soon as the bytes are in hand.
+ * The screen still names the card and offers Open and Undo, so a mistaken
+ * import is one click from gone.
+ */
+async function importDirect(container, status, prepared, inside, request, onBack) {
+    const name = inside.name || request.card?.name || prepared.file.name;
+    container.append(el('h3', 'sbbs-intake-name', name));
+    setText(status, 'Importing...');
+
+    const bar = el('div', 'sbbs-detail-actions');
+    const result = el('span', 'sbbs-import-status');
+    result.setAttribute('role', 'status');
+    try {
+        const added = await commitPreparedCardImport(prepared);
+        status.remove();
+        setText(result, 'Imported.');
+        toastr.success('Character imported.');
+        bar.append(...afterImport(added, { replaced: false, onUndone: () => setText(result, 'Import undone.') }));
+    } catch (error) {
+        setText(status, importErrorMessage(error));
+        toastr.error(importErrorMessage(error), 'Import failed');
+    }
+    bar.append(result, backButton(onBack, 'sbbs-intake-back'));
+    container.append(bar);
+}
+
+function backButton(onBack, className = 'sbbs-back') {
+    const back = el('button', `menu_button ${className}`);
+    back.type = 'button';
+    if (className === 'sbbs-back') {
+        const icon = el('i', 'fa-solid fa-arrow-left');
+        icon.setAttribute('aria-hidden', 'true');
+        back.append(icon);
+    }
+    back.append(el('span', undefined, 'Back'));
+    back.addEventListener('click', onBack);
+    return back;
+}
+
+function header(back) {
+    const bar = el('div', 'sbbs-detail-header');
+    bar.append(back);
+    return bar;
 }
 
 /**
@@ -298,8 +352,15 @@ function showNotInspected(container, status, request, error, onBack, signal) {
             try {
                 const added = await importCard(request.card, request.source);
                 setText(anyway, 'Imported');
-                actions.append(openButton(added));
                 toastr.success('Character imported.');
+                actions.append(...afterImport(added, {
+                    replaced: false,
+                    onUndone: () => {
+                        anyway.disabled = false;
+                        setText(anyway, 'Import without inspecting');
+                        setText(result, 'Import undone.');
+                    },
+                }));
             } catch (importError) {
                 anyway.disabled = false;
                 setText(anyway, 'Try import again');
@@ -539,6 +600,42 @@ function openButton(added) {
 }
 
 /**
+ * Open and Undo, offered together after an import that added a character.
+ *
+ * A replace gets Open only: the character was the user's own before the import,
+ * so "undoing" it would delete their copy rather than the imported one.
+ *
+ * @param {{ avatar: string, name: string }} added
+ * @param {{ replaced: boolean, onUndone: () => void }} options
+ * @returns {HTMLElement[]}
+ */
+function afterImport(added, { replaced, onUndone }) {
+    const open = openButton(added);
+    if (replaced) {
+        return [open];
+    }
+    const undo = el('button', 'menu_button sbbs-undo-import', 'Undo import');
+    undo.type = 'button';
+    undo.addEventListener('click', async () => {
+        undo.disabled = true;
+        open.disabled = true;
+        setText(undo, 'Removing...');
+        try {
+            await removeCharacter(added.avatar);
+            open.remove();
+            undo.remove();
+            onUndone();
+        } catch (error) {
+            undo.disabled = false;
+            open.disabled = false;
+            setText(undo, 'Undo import');
+            toastr.error(undoErrorMessage(error), 'Undo failed');
+        }
+    });
+    return [open, undo];
+}
+
+/**
  * Exact or clean, plus replace when the card is already installed.
  *
  * Clean import states what it will drop from THIS card and what it will keep,
@@ -581,12 +678,22 @@ function actionBar(prepared, inside, match, onBack) {
 
         try {
             const bytes = await transform();
+            const replaced = replaceInput?.checked === true;
             const added = await commitPreparedCardImport(bytes, {
-                replaceAvatar: replaceInput?.checked ? match.avatar : undefined,
+                replaceAvatar: replaced ? match.avatar : undefined,
             });
             setText(button, 'Imported');
-            bar.append(openButton(added));
             toastr.success('Character imported.');
+            bar.append(...afterImport(added, {
+                replaced,
+                onUndone: () => {
+                    // Back to the choice, so the card can be imported again.
+                    exact.disabled = false;
+                    clean.disabled = removals.length === 0;
+                    setText(button, original);
+                    setText(status, 'Import undone.');
+                },
+            }));
         } catch (error) {
             exact.disabled = false;
             clean.disabled = removals.length === 0;
@@ -619,10 +726,166 @@ function actionBar(prepared, inside, match, onBack) {
     bar.append(status);
 
     // Returning to the grid has to stay reachable from the bottom of a long report.
-    const backAgain = el('button', 'menu_button sbbs-intake-back', 'Back');
-    backAgain.type = 'button';
-    backAgain.addEventListener('click', onBack);
-    bar.append(backAgain);
+    bar.append(backButton(onBack, 'sbbs-intake-back'));
 
     return bar;
+}
+
+
+/** How many times one card is retried after the server asks it to wait. */
+const BULK_RETRY_LIMIT = 3;
+
+/**
+ * Imports several selected cards in turn, on one screen, one line each.
+ *
+ * Every card still gets fetched and inspected, so a damaged file is refused
+ * and a character already in the collection is skipped rather than duplicated —
+ * that decision (replace, or add a copy) is one the review screen offers and a
+ * batch cannot. What the batch drops is the report itself.
+ *
+ * Cards go one at a time. The host serializes imports anyway, and the server's
+ * per-user download limit is obeyed rather than raced: when it says wait, the
+ * line says so and the card is retried after that many seconds.
+ *
+ * @param {HTMLElement} container the #sbbs_intake node
+ * @param {{ item: any, source: any }[]} entries the selected cards
+ * @param {() => void} onBack
+ * @param {{ signal?: AbortSignal }} [options]
+ */
+export async function showBulkImport(container, entries, onBack, { signal } = {}) {
+    container.replaceChildren();
+
+    const back = backButton(onBack);
+    container.append(header(back), el('h2', 'sbbs-intake-title', `Import ${formatCount(entries.length, 'card')}`));
+
+    const status = el('div', 'sbbs-state', 'Starting...');
+    status.setAttribute('role', 'status');
+
+    const list = el('ol', 'sbbs-bulk-list');
+    const outcomes = entries.map(({ item, source }) => {
+        const row = el('li', 'sbbs-bulk-row');
+        row.append(el('span', 'sbbs-bulk-name', item?.name || 'Untitled'));
+        if (source?.label) {
+            row.append(el('span', 'sbbs-bulk-source', source.label));
+        }
+        const outcome = el('span', 'sbbs-bulk-outcome', 'Waiting');
+        row.append(outcome);
+        list.append(row);
+        return outcome;
+    });
+
+    const bar = el('div', 'sbbs-detail-actions');
+    bar.append(backButton(onBack, 'sbbs-intake-back'));
+    container.append(status, list, bar);
+    back.focus();
+
+    /** @type {{ avatar: string, name: string, outcome: HTMLElement }[]} */
+    const added = [];
+    let installed = 0;
+    let failed = 0;
+
+    for (let index = 0; index < entries.length; index++) {
+        if (signal?.aborted) {
+            return;
+        }
+        const { item, source } = entries[index];
+        const outcome = outcomes[index];
+        setText(status, `Importing ${index + 1} of ${entries.length}...`);
+        setText(outcome, 'Fetching...');
+
+        let phase = 'inspect';
+        try {
+            const staged = await stageWithRetry({ card: item, source }, signal, (text) => setText(outcome, text));
+            if (staged.found) {
+                installed++;
+                setText(outcome, `${duplicateMessage(staged.found)} Not imported.`);
+                continue;
+            }
+            phase = 'import';
+            const character = await commitPreparedCardImport(staged.prepared);
+            added.push({ ...character, outcome });
+            setText(outcome, 'Imported');
+        } catch (error) {
+            if (error?.name === 'AbortError' || signal?.aborted) {
+                return;
+            }
+            failed++;
+            setText(outcome, `Not imported: ${phase === 'import'
+                ? importErrorMessage(error)
+                : intakeErrorMessage(error, source?.id)}`);
+        }
+    }
+
+    setText(status, bulkImportSummary({ imported: added.length, installed, failed }));
+    if (added.length > 0) {
+        toastr.success(bulkImportSummary({ imported: added.length, installed, failed }));
+        bar.prepend(undoAllButton(added, status));
+    }
+}
+
+/** stage(), retried when the server answered with a wait rather than a refusal. */
+async function stageWithRetry(request, signal, onStep) {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            return await stage(request, signal, onStep);
+        } catch (error) {
+            const wait = error?.retryAfter;
+            if (!Number.isFinite(wait) || attempt >= BULK_RETRY_LIMIT) {
+                throw error;
+            }
+            const seconds = Math.min(wait, 120);
+            onStep(`Waiting ${formatCount(Math.ceil(seconds), 'second')} for the server's download limit...`);
+            await sleep(seconds * 1000, signal);
+            onStep('Fetching...');
+        }
+    }
+}
+
+function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+        const abort = () => {
+            clearTimeout(timer);
+            reject(new DOMException('aborted', 'AbortError'));
+        };
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', abort);
+            resolve();
+        }, ms);
+        signal?.addEventListener('abort', abort, { once: true });
+    });
+}
+
+/**
+ * Removes every character the batch added, in reverse order, and says on each
+ * line whether it went. Skipped and failed cards were never added, so there is
+ * nothing to undo for them.
+ */
+function undoAllButton(added, status) {
+    const undo = el('button', 'menu_button sbbs-undo-import', `Undo ${formatCount(added.length, 'import')}`);
+    undo.type = 'button';
+    undo.addEventListener('click', async () => {
+        undo.disabled = true;
+        setText(undo, 'Removing...');
+        for (const entry of [...added].reverse()) {
+            if (entry.removed) {
+                continue;
+            }
+            try {
+                await removeCharacter(entry.avatar);
+                entry.removed = true;
+                setText(entry.outcome, 'Removed again');
+            } catch (error) {
+                setText(entry.outcome, `Still in your collection: ${undoErrorMessage(error)}`);
+            }
+        }
+        const removed = added.filter((entry) => entry.removed).length;
+        setText(status, `Removed ${removed} of ${formatCount(added.length, 'imported card')}.`);
+        if (removed === added.length) {
+            undo.remove();
+        } else {
+            undo.disabled = false;
+            setText(undo, 'Try removing again');
+        }
+    });
+    return undo;
 }

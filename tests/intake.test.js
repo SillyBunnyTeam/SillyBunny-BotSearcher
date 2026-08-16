@@ -668,3 +668,140 @@ test('with no bridge available a blocked JannyAI card keeps the native guidance 
         host.restore();
     }
 });
+
+/** A collection that is empty until an import lands, as the real one is. */
+function collectionThatFillsAfter(refreshesBeforeAdded, entry) {
+    let refreshes = 0;
+    return async () => {
+        const list = globalThis.SillyTavern.getContext().characters;
+        if (++refreshes > refreshesBeforeAdded) {
+            list.splice(0, list.length, entry);
+        }
+    };
+}
+
+test('with the review off, a card not yet installed is imported at once and can be undone', async () => {
+    const host = installHost({
+        routes: {
+            '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': jsonRoute(REPORT),
+        },
+        getCharacters: collectionThatFillsAfter(1, { name: 'Seraphina', avatar: 'sera.png' }),
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?direct');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, { direct: true });
+        await waitFor(() => host.container.querySelector('.sbbs-undo-import'), 'direct import did not finish');
+
+        assert.ok(host.calls.some((call) => call.path.includes('/api/characters/import')), 'the card must be imported');
+        assert.equal(host.container.querySelector('.sbbs-intake-list'), null, 'no report is rendered');
+        assert.match(host.container.textContent, /Seraphina/);
+        assert.match(host.container.querySelector('.sbbs-import-status').textContent, /Imported\./);
+        assert.ok(host.container.querySelector('.sbbs-open-character'));
+
+        host.container.querySelector('.sbbs-undo-import').click();
+        await waitFor(() => /Import undone/.test(host.container.textContent), 'undo did not report');
+        const deletion = host.calls.find((call) => call.path.includes('/api/characters/delete'));
+        assert.deepEqual(JSON.parse(deletion.options.body), { avatar_url: 'sera.png', delete_chats: false });
+        assert.equal(host.container.querySelector('.sbbs-open-character'), null, 'Open goes with the character');
+    } finally {
+        host.restore();
+    }
+});
+
+test('with the review off, an installed character still gets the review screen', async () => {
+    const host = installHost({
+        characters: [{ name: 'Seraphina', avatar: 'sera.png', data: {} }],
+        routes: {
+            '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?direct-installed');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, { direct: true });
+        await waitFor(() => host.container.querySelector('.sbbs-intake-list'), 'the review did not render');
+
+        assert.ok(!host.calls.some((call) => call.path.includes('/api/characters/import')), 'nothing may be imported unasked');
+        assert.match(host.container.textContent, /Already in your collection as "Seraphina"/);
+        assert.ok(host.container.querySelector('.sbbs-intake-replace'), 'the replace choice is offered');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('an ordinary import offers Undo, and undoing it reopens the choice', async () => {
+    const host = installHost({
+        routes: {
+            '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': jsonRoute(REPORT),
+        },
+        getCharacters: collectionThatFillsAfter(1, { name: 'Seraphina', avatar: 'sera.png' }),
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?undo');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-import'), 'actions did not render');
+        await settle(host.container);
+
+        const exact = host.container.querySelector('.sbbs-import');
+        exact.click();
+        await waitFor(() => host.container.querySelector('.sbbs-undo-import'), 'import did not finish');
+        assert.equal(exact.disabled, true);
+
+        host.container.querySelector('.sbbs-undo-import').click();
+        await waitFor(() => /Import undone/.test(host.container.textContent), 'undo did not report');
+        assert.equal(exact.disabled, false, 'the card can be imported again');
+        assert.equal(exact.textContent, 'Import exactly');
+    } finally {
+        host.restore();
+    }
+});
+
+test('a batch imports each card, skips installed ones, obeys the download limit, and can be undone', async () => {
+    let cardCalls = 0;
+    const host = installHost({
+        routes: {
+            '/card': () => {
+                // The server's limiter answers once with a wait; the batch obeys it.
+                if (++cardCalls === 1) {
+                    return new Response(JSON.stringify({ error: 'rate_limited', retryAfter: 0.01 }), { status: 429 });
+                }
+                return new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } });
+            },
+            '/inspect': jsonRoute(REPORT),
+        },
+        // Empty until the first import lands, so the second card of the same
+        // name is found installed and skipped rather than duplicated.
+        getCharacters: collectionThatFillsAfter(1, { name: 'Seraphina', avatar: 'sera.png' }),
+    });
+
+    try {
+        const { showBulkImport } = await import('../client/intake.js?bulk');
+        const entries = [
+            { item: { id: 'card-1', name: 'Seraphina' }, source: BYTE_SOURCE },
+            { item: { id: 'card-2', name: 'Seraphina (mirror)' }, source: { id: 'chub', label: 'Chub' } },
+        ];
+        await showBulkImport(host.container, entries, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-undo-import'), 'the batch did not finish');
+
+        const outcomes = [...host.container.querySelectorAll('.sbbs-bulk-outcome')].map((node) => node.textContent);
+        assert.equal(outcomes[0], 'Imported');
+        assert.match(outcomes[1], /Already in your collection as "Seraphina".*Not imported\./);
+        assert.equal(cardCalls, 3, 'the first card was fetched again after the wait; the second once');
+        assert.equal(host.calls.filter((call) => call.path.includes('/api/characters/import')).length, 1);
+        assert.match(host.container.querySelector('.sbbs-state').textContent, /Imported 1 card\. 1 already in your collection\./);
+        assert.match(host.container.textContent, /Chub/, 'each line names its site');
+
+        host.container.querySelector('.sbbs-undo-import').click();
+        await waitFor(() => /Removed 1 of 1 imported card/.test(host.container.textContent), 'undo did not report');
+        assert.equal(host.calls.filter((call) => call.path.includes('/api/characters/delete')).length, 1);
+        assert.equal(host.container.querySelectorAll('.sbbs-bulk-outcome')[0].textContent, 'Removed again');
+    } finally {
+        host.restore();
+    }
+});

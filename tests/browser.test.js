@@ -1798,3 +1798,182 @@ test('the browser is single-flight, ignores stale searches, deduplicates, and pr
         dom.window.close();
     }
 });
+
+test('cards can be selected for one import and walked with the arrow keys', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'https://local.test/' });
+    const previous = {
+        document: globalThis.document,
+        window: globalThis.window,
+        MutationObserver: globalThis.MutationObserver,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
+        CSS: globalThis.CSS,
+        fetch: globalThis.fetch,
+        toastr: globalThis.toastr,
+        SillyTavern: globalThis.SillyTavern,
+    };
+    Object.assign(globalThis, {
+        document: dom.window.document,
+        window: dom.window,
+        MutationObserver: dom.window.MutationObserver,
+        requestAnimationFrame: (callback) => setTimeout(callback, 0),
+        CSS: { escape: (value) => String(value) },
+        toastr: { error() {}, info() {}, success() {} },
+    });
+
+    const cardRequests = [];
+    globalThis.fetch = async (url, options = {}) => {
+        const path = String(url);
+        if (path.endsWith('/healthz')) {
+            return jsonResponse({
+                protocol: PROTOCOL_VERSION,
+                version: VERSION,
+                sources: [
+                    { id: 'quillgen', label: 'Quillgen', tier: 0, state: 'up', clientHosts: ['quillgen.example'], capabilities: { search: true, sorts: ['default'], detail: true } },
+                ],
+            });
+        }
+        if (path.endsWith('/search')) {
+            return jsonResponse({
+                total: 3,
+                nextCursor: 'more',
+                items: [card('quillgen', 'a', 'Alpha'), card('quillgen', 'b', 'Beta'), card('quillgen', 'c', 'Gamma')],
+            });
+        }
+        if (path.endsWith('/card')) {
+            cardRequests.push(JSON.parse(options.body));
+            return jsonResponse({ error: 'card_invalid' }, 400);
+        }
+        throw new Error(`unexpected request: ${url}`);
+    };
+
+    const popups = [];
+    class Popup {
+        constructor(html, _type, _title, options) {
+            this.options = options;
+            this.content = document.createElement('div');
+            this.content.innerHTML = html;
+            this.dlg = document.createElement('dialog');
+            this.dlg.append(this.content);
+            document.body.append(this.dlg);
+            popups.push(this);
+        }
+
+        show() {
+            return new Promise((resolve) => { this.resolveClosed = resolve; });
+        }
+
+        complete() {
+            this.options.onClose?.();
+            this.dlg.remove();
+            this.resolveClosed?.();
+        }
+    }
+
+    const extensionSettings = { SillyBunnyBotSearcher: { defaultSource: 'quillgen' } };
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            extensionSettings,
+            characters: [],
+            saveSettingsDebounced() {},
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+            getCharacters: async () => {},
+            renderExtensionTemplateAsync: async () => TEMPLATE,
+            Popup,
+            POPUP_TYPE: { DISPLAY: 'display' },
+            POPUP_RESULT: { CANCELLED: 'cancelled' },
+        }),
+    };
+
+    const key = (target, name) => target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+
+    try {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        const { openBrowser } = await import('../client/browser.js?selection');
+        const opened = openBrowser();
+        await waitFor(() => popups.length === 1 && popups[0].content.querySelectorAll('.sbbs-card').length === 3, 'results did not render');
+
+        const popup = popups[0];
+        const root = popup.content.querySelector('.sbbs-root');
+        const cards = [...popup.content.querySelectorAll('.sbbs-card-open')];
+        const toggle = popup.content.querySelector('#sbbs_select_toggle');
+        const importSelected = popup.content.querySelector('#sbbs_import_selected');
+        const count = popup.content.querySelector('#sbbs_selection_count');
+        const more = popup.content.querySelector('#sbbs_more');
+        const query = popup.content.querySelector('#sbbs_query');
+
+        // ---- keyboard ----
+        cards[0].focus();
+        key(cards[0], 'ArrowRight');
+        assert.equal(document.activeElement, cards[1]);
+        key(cards[1], 'End');
+        assert.equal(document.activeElement, cards[2]);
+        key(cards[2], 'ArrowLeft');
+        assert.equal(document.activeElement, cards[1]);
+        key(cards[1], 'Home');
+        assert.equal(document.activeElement, cards[0]);
+        key(cards[0], 'ArrowLeft');
+        assert.equal(document.activeElement, cards[0], 'the first card is the end of the line');
+        // Every card shares one row in this layout, so Down leaves the grid.
+        assert.equal(more.hidden, false);
+        key(cards[0], 'ArrowDown');
+        assert.equal(document.activeElement, more, 'Down off the last row lands on Load more');
+        cards[2].focus();
+        key(cards[2], '/');
+        assert.equal(document.activeElement, query, '"/" returns to the search box');
+        key(query, '/');
+        assert.equal(document.activeElement, query);
+
+        // ---- selecting ----
+        const selection = popup.content.querySelector('#sbbs_selection');
+        assert.equal(selection.hidden, false, 'the mode toggle is offered as soon as there are results');
+        assert.equal(toggle.getAttribute('aria-pressed'), 'false');
+        assert.equal(importSelected.hidden, true);
+        assert.equal(cards[0].hasAttribute('aria-pressed'), false, 'outside the mode a card is a plain button');
+
+        toggle.click();
+        assert.equal(root.dataset.selecting, 'true');
+        assert.equal(cards[0].getAttribute('aria-pressed'), 'false');
+        assert.equal(importSelected.disabled, true);
+
+        cards[0].click();
+        assert.equal(root.dataset.view, 'grid', 'in the mode a click selects rather than opens');
+        assert.equal(cards[0].getAttribute('aria-pressed'), 'true');
+        assert.ok(cards[0].closest('.sbbs-card').classList.contains('sbbs-card-selected'));
+        assert.equal(count.textContent, '1 selected');
+        assert.equal(importSelected.disabled, false);
+
+        popup.content.querySelector('#sbbs_select_all').click();
+        assert.equal(count.textContent, '3 selected');
+        cards[1].click();
+        assert.equal(count.textContent, '2 selected');
+
+        // Esc leaves the mode before it leaves the dialog.
+        popup.result = 'cancelled';
+        assert.equal(popup.options.onClosing(), false);
+        assert.equal(root.dataset.selecting, 'false');
+        assert.equal(cards[0].hasAttribute('aria-pressed'), false);
+        assert.equal(popup.options.onClosing(), true, 'a second Esc closes');
+
+        toggle.click();
+        cards[0].click();
+        cards[2].click();
+        importSelected.click();
+        assert.equal(root.dataset.view, 'intake');
+        await waitFor(() => /Imported 0 cards\. 2 failed\./.test(popup.content.querySelector('.sbbs-intake .sbbs-state')?.textContent ?? ''), 'the batch did not finish');
+        assert.deepEqual(cardRequests.map((request) => request.id), ['a', 'c'], 'exactly the selected cards, in grid order');
+        assert.match(popup.content.querySelector('.sbbs-intake-title').textContent, /Import 2 cards/);
+
+        popup.content.querySelector('.sbbs-intake .sbbs-back').click();
+        assert.equal(root.dataset.view, 'grid');
+        assert.equal(root.dataset.selecting, 'false', 'the batch done, the grid is back to opening cards');
+
+        popup.complete();
+        await opened;
+    } finally {
+        const { invalidateAvailability } = await import('../client/api.js');
+        invalidateAvailability();
+        Object.assign(globalThis, previous);
+        dom.window.close();
+    }
+});

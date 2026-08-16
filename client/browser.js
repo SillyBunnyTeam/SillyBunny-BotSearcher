@@ -26,7 +26,7 @@ import { el, setText, setImgSafe } from './render.js';
 import { getSettings, updateSettings, isSourceEnabled, rememberQuery } from './settings.js';
 import { createResultCache } from './cache.js';
 import { showDetail } from './detail.js';
-import { showIntake } from './intake.js';
+import { showBulkImport, showIntake } from './intake.js';
 import {
     availabilityCopy,
     compareReleaseVersions,
@@ -153,12 +153,19 @@ async function openBrowserOnce(options) {
             if (popup.result !== ctx.POPUP_RESULT.CANCELLED) {
                 return true;
             }
-            const view = popup.content?.querySelector?.('.sbbs-root')?.dataset.view;
-            if (view !== 'detail' && view !== 'intake') {
-                return true;
+            const root = popup.content?.querySelector?.('.sbbs-root');
+            const view = root?.dataset.view;
+            if (view === 'detail' || view === 'intake') {
+                popup.content.querySelector(`.sbbs-${view} .sbbs-back`)?.click();
+                return false;
             }
-            popup.content.querySelector(`.sbbs-${view} .sbbs-back`)?.click();
-            return false;
+            // Selecting cards is a mode of the grid; Esc leaves the mode before
+            // it leaves the dialog.
+            if (root?.dataset.selecting === 'true') {
+                popup.content.querySelector('#sbbs_select_toggle')?.click();
+                return false;
+            }
+            return true;
         },
         onClose: () => {
             dispose();
@@ -216,6 +223,11 @@ function wireBrowser(popup, health, options) {
         reload: root.querySelector('#sbbs_reload'),
         queryHistory: root.querySelector('#sbbs_query_history'),
         body: root.querySelector('.sbbs-body'),
+        selection: root.querySelector('#sbbs_selection'),
+        selectToggle: root.querySelector('#sbbs_select_toggle'),
+        selectionCount: root.querySelector('#sbbs_selection_count'),
+        selectAll: root.querySelector('#sbbs_select_all'),
+        importSelected: root.querySelector('#sbbs_import_selected'),
         grid: root.querySelector('#sbbs_grid'),
         more: root.querySelector('#sbbs_more'),
         detail: root.querySelector('#sbbs_detail'),
@@ -332,7 +344,7 @@ function wireBrowser(popup, health, options) {
         } else if (open) {
             openIntake({ url: String(raw).trim(), source: intent.source }, 'grid');
         } else {
-            setText(dom.state, urlImportReadyMessage(intent.source.label ?? intent.source.id));
+            setText(dom.state, urlImportReadyMessage(intent.source.label ?? intent.source.id, getSettings().skipReview));
         }
         return true;
     }
@@ -543,6 +555,68 @@ function wireBrowser(popup, health, options) {
     });
     dom.more.addEventListener('click', () => void runSearch({ append: true }));
 
+    dom.selectToggle.addEventListener('click', () => setSelecting(dom.root.dataset.selecting !== 'true'));
+    dom.selectAll.addEventListener('click', () => {
+        for (const open of records.keys()) {
+            setSelected(open, true);
+        }
+        updateSelectionBar();
+    });
+    dom.importSelected.addEventListener('click', () => {
+        const entries = selectedRecords();
+        if (entries.length === 0) {
+            return;
+        }
+        openSubview('grid', (container, onBack, signal) => showBulkImport(container, entries, () => {
+            // The batch is done with; the grid comes back in its ordinary mode.
+            setSelecting(false);
+            onBack();
+        }, { signal }));
+    });
+
+    // Arrow keys move between cards; Home and End jump to the ends. Down off
+    // the last row lands on Load more, which is where the keyboard user was
+    // heading. Only the card buttons take part: a tag button inside a card
+    // keeps its own keys.
+    dom.grid.addEventListener('keydown', (event) => {
+        if (!event.target?.classList?.contains('sbbs-card-open') || event.altKey || event.ctrlKey || event.metaKey) {
+            return;
+        }
+        const cards = [...records.keys()].filter((open) => open.isConnected);
+        const index = cards.indexOf(event.target);
+        if (index < 0) {
+            return;
+        }
+        const columns = columnsOf(cards);
+        let next = null;
+        switch (event.key) {
+            case 'ArrowRight': next = index + 1; break;
+            case 'ArrowLeft': next = index - 1; break;
+            case 'ArrowDown': next = index + columns; break;
+            case 'ArrowUp': next = index - columns; break;
+            case 'Home': next = 0; break;
+            case 'End': next = cards.length - 1; break;
+            default: return;
+        }
+        event.preventDefault();
+        if (next >= cards.length && event.key === 'ArrowDown' && !dom.more.hidden) {
+            dom.more.focus();
+            return;
+        }
+        cards[Math.max(0, Math.min(next, cards.length - 1))]?.focus();
+    });
+
+    // "/" from anywhere in the results puts the cursor in the search box.
+    dom.root.addEventListener('keydown', (event) => {
+        if (event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey
+            || dom.root.dataset.view !== 'grid' || isTyping(event.target)) {
+            return;
+        }
+        event.preventDefault();
+        dom.query.focus();
+        dom.query.select();
+    });
+
     const unsubscribeAccount = subscribeBotbooruAccount((account) => {
         const previousRevision = state.account.revision;
         state.account = account;
@@ -675,12 +749,24 @@ function wireBrowser(popup, health, options) {
      * detail pane returns there and a dropped file returns to the results.
      */
     function openIntake(request, returnTo) {
+        // A file chosen for inspection is inspected whatever the preference says;
+        // the preference is about imports the user has already decided on.
+        const direct = !request.file && getSettings().skipReview;
+        openSubview(returnTo, (container, onBack, signal) => showIntake(container, request, onBack, { signal, direct }));
+    }
+
+    /**
+     * Mounts a screen in the intake pane and takes it down again on Back.
+     * @param {'grid' | 'detail'} returnTo
+     * @param {(container: HTMLElement, onBack: () => void, signal: AbortSignal) => Promise<void>} render
+     */
+    function openSubview(returnTo, render) {
         state.intakeController?.abort();
         const controller = new AbortController();
         state.intakeController = controller;
         dom.root.dataset.view = 'intake';
 
-        void showIntake(dom.intake, request, () => {
+        void render(dom.intake, () => {
             controller.abort();
             state.intakeController = null;
             dom.intake.replaceChildren();
@@ -688,7 +774,45 @@ function wireBrowser(popup, health, options) {
             if (returnTo === 'grid') {
                 dom.query?.focus();
             }
-        }, { signal: controller.signal });
+        }, controller.signal);
+    }
+
+    // ---- selecting cards for one import ----
+
+    function setSelecting(on) {
+        dom.root.dataset.selecting = String(on);
+        dom.selectToggle.setAttribute('aria-pressed', String(on));
+        for (const open of records.keys()) {
+            if (on) {
+                setSelected(open, false);
+            } else {
+                open.removeAttribute('aria-pressed');
+                open.closest('.sbbs-card')?.classList.remove('sbbs-card-selected');
+            }
+        }
+        updateSelectionBar();
+    }
+
+    function setSelected(open, on) {
+        open.setAttribute('aria-pressed', String(on));
+        open.closest('.sbbs-card')?.classList.toggle('sbbs-card-selected', on);
+    }
+
+    /** The selection lives on the buttons themselves, so a rebuilt grid starts empty. */
+    function selectedRecords() {
+        return [...records.entries()]
+            .filter(([open]) => open.isConnected && open.getAttribute('aria-pressed') === 'true')
+            .map(([, record]) => record);
+    }
+
+    function updateSelectionBar() {
+        const selecting = dom.root.dataset.selecting === 'true';
+        const count = selecting ? selectedRecords().length : 0;
+        dom.selection.hidden = !selecting && records.size === 0;
+        setText(dom.selectionCount, selecting ? `${count} selected` : '');
+        dom.selectAll.hidden = !selecting;
+        dom.importSelected.hidden = !selecting;
+        dom.importSelected.disabled = count === 0;
     }
 
     function closeIntake() {
@@ -714,6 +838,7 @@ function wireBrowser(popup, health, options) {
         records.clear();
         dom.body?.setAttribute('aria-busy', 'false');
         dom.grid.replaceChildren();
+        updateSelectionBar();
         dom.detail.replaceChildren();
         dom.root.dataset.view = 'grid';
         dom.more.hidden = true;
@@ -754,6 +879,7 @@ function wireBrowser(popup, health, options) {
                 records.delete(open);
             }
         }
+        updateSelectionBar();
         state.items = state.items.filter((item) => item?.source !== 'botbooru');
         state.itemKeys = new Set(state.items.map((item) => `${item.source}:${item.id}`));
         dom.more.hidden = state.nextCursor === null;
@@ -821,6 +947,7 @@ function wireBrowser(popup, health, options) {
             state.itemKeys.clear();
             records.clear();
             dom.grid.replaceChildren();
+            updateSelectionBar();
             showSkeletons();
         }
         dom.more.hidden = true;
@@ -1038,6 +1165,7 @@ function wireBrowser(popup, health, options) {
     function showSourceFailure(dead, reason) {
         dom.grid.replaceChildren();
         records.clear();
+        updateSelectionBar();
         state.items = [];
         state.itemKeys.clear();
         state.nextCursor = null;
@@ -1118,6 +1246,11 @@ function wireBrowser(popup, health, options) {
                 if (!record) {
                     return;
                 }
+                if (dom.root.dataset.selecting === 'true') {
+                    setSelected(open, open.getAttribute('aria-pressed') !== 'true');
+                    updateSelectionBar();
+                    return;
+                }
                 state.detailController?.abort();
                 const detailController = new AbortController();
                 state.detailController = detailController;
@@ -1156,10 +1289,14 @@ function wireBrowser(popup, health, options) {
                     onIntake: (request) => openIntake(request, 'detail'),
                 });
             });
+            if (dom.root.dataset.selecting === 'true') {
+                setSelected(open, false);
+            }
             const li = document.createElement('li');
             li.append(card);
             dom.grid.append(li);
         }
+        updateSelectionBar();
     }
 
     function showSkeletons() {
@@ -1193,6 +1330,27 @@ function wireBrowser(popup, health, options) {
         state.vocabulary.clear();
         unsubscribeAccount();
     };
+}
+
+/**
+ * How many cards share the first row. Measured from layout rather than read
+ * from the stylesheet, since the grid is auto-fill and the count depends on
+ * the dialog's width at that moment.
+ * @param {HTMLElement[]} cards
+ */
+function columnsOf(cards) {
+    const top = cards[0]?.getBoundingClientRect().top;
+    let columns = 0;
+    while (columns < cards.length && cards[columns].getBoundingClientRect().top === top) {
+        columns++;
+    }
+    return Math.max(1, columns);
+}
+
+/** Whether a key press belongs to a text field rather than to the dialog. */
+function isTyping(target) {
+    return target?.isContentEditable === true
+        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName);
 }
 
 /**

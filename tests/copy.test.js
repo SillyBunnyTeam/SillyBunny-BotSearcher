@@ -15,6 +15,8 @@ import {
     formatNumber,
     formatResultCount,
     importErrorMessage,
+    bulkImportSummary,
+    undoErrorMessage,
     insideRows,
     searchErrorMessage,
     searchUnavailableMessage,
@@ -317,11 +319,21 @@ test('import errors explain the failure without claiming certainty', () => {
 
 test('URL-import copy names the source and the next action', () => {
     assert.equal(urlImportReadyMessage('Saucepan.ai'), 'Press Enter to review this Saucepan.ai card before importing.');
+    // With the review switched off, Enter must not promise a screen that will not appear.
+    assert.equal(urlImportReadyMessage('Saucepan.ai', true), 'Press Enter to import this Saucepan.ai card.');
     assert.match(urlImportDisabledMessage('JannyAI'), /Enable JannyAI under Extensions > BotSearcher > Sources/);
     assert.match(urlImportUnsupportedMessage(), /No supported source/);
     assert.match(searchUnavailableMessage([]), /No sources are enabled/);
     assert.match(searchUnavailableMessage(['Saucepan.ai']), /Paste a card URL from Saucepan\.ai/);
     assert.match(searchUnavailableMessage(['A', 'B']), /from A and B/);
+});
+
+test('a batch summary counts what happened and leaves out zeros', () => {
+    assert.equal(bulkImportSummary({ imported: 3, installed: 0, failed: 0 }), 'Imported 3 cards.');
+    assert.equal(bulkImportSummary({ imported: 1, installed: 2, failed: 0 }), 'Imported 1 card. 2 already in your collection.');
+    assert.equal(bulkImportSummary({ imported: 0, installed: 1, failed: 2 }), 'Imported 0 cards. 1 already in your collection and 2 failed.');
+    assert.match(undoErrorMessage(new Error('character_missing')), /no longer in your collection/);
+    assert.match(undoErrorMessage(new Error('delete_failed')), /Delete it from the character list/);
 });
 
 test('a stat line can omit a figure another line already shows', () => {

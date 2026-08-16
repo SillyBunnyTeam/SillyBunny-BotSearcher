@@ -63,6 +63,8 @@ const DEFAULTS = Object.freeze({
     resultsPerPage: 24,
     sortBySource: Object.freeze({}),
     showTrustPanel: true,
+    /** The review screen is the product's trust step, so skipping it is an opt-in. */
+    skipReview: false,
     /** Browser-direct fallback changes who sees the user's network address. */
     allowDirectRequests: false,
     /** Search terms can be sensitive, so persistence is an explicit opt-in. */
@@ -142,6 +144,7 @@ export function getSettings() {
         resultsPerPage: PAGE_SIZES.includes(read('resultsPerPage')) ? read('resultsPerPage') : DEFAULTS.resultsPerPage,
         sortBySource: { ...sortBySource },
         showTrustPanel: read('showTrustPanel') !== false,
+        skipReview: read('skipReview') === true,
         allowDirectRequests: read('allowDirectRequests') === true,
         saveQueryHistory: read('saveQueryHistory') === true,
         queryHistory: read('saveQueryHistory') === true && Array.isArray(read('queryHistory'))
@@ -251,6 +254,13 @@ export async function mountSettings() {
         checkbox('sbbs_set_hide_ai', 'Hide AI-generated cards when the source supports it', settings.hideAiDefault, (v) => updateSettings({ hideAiDefault: v })),
         checkbox('sbbs_set_blur', 'Blur sensitive and unrated thumbnails until revealed', settings.blurNsfw, (v) => updateSettings({ blurNsfw: v })),
         checkbox('sbbs_set_trust', 'Show the Card contents panel', settings.showTrustPanel, (v) => updateSettings({ showTrustPanel: v })),
+        checkbox(
+            'sbbs_set_skip_review',
+            'Import without the review screen',
+            settings.skipReview,
+            (v) => updateSettings({ skipReview: v }),
+            'Import adds the card as soon as you choose it, without a report of its contents. If a character of the same name is already in your collection, the review screen still opens so you can choose to replace it or add a copy.',
+        ),
         checkbox(
             'sbbs_set_direct',
             'Request a source from this browser when the server cannot reach it',

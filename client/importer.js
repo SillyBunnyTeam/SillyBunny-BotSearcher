@@ -307,15 +307,24 @@ async function addedCharacter(before) {
 
 async function cardResponseError(response) {
     let code = `http_${response.status}`;
+    let retryAfter;
     try {
         const payload = await response.json();
         if (typeof payload?.error === 'string') {
             code = payload.error;
         }
+        // A limiter's answer carries how long to wait; a bulk import obeys it.
+        if (Number.isFinite(payload?.retryAfter) && payload.retryAfter > 0) {
+            retryAfter = payload.retryAfter;
+        }
     } catch {
         // Not JSON; the status is enough.
     }
-    return new Error(code);
+    const error = new Error(code);
+    if (retryAfter !== undefined) {
+        error.retryAfter = retryAfter;
+    }
+    return error;
 }
 
 function nameOfAvatar(avatar) {
@@ -334,6 +343,51 @@ function snapshotCharacters() {
 
 function snapshotAvatars() {
     return snapshotCharacters().map((entry) => entry.avatar);
+}
+
+/**
+ * Removes a character an import just added. Chats are left alone.
+ *
+ * When that character is the one currently open, the host's own command is
+ * used, because it also closes the chat and resets the selection; the host does
+ * not expose deleteCharacter() on getContext(). It is not used otherwise,
+ * since it closes whatever chat is open even when the character is unrelated.
+ * The plain route plus a list refresh is what the host does in that case
+ * (public/script.js deleteCharacter), minus per-character UI bookkeeping a
+ * fresh import never accumulated.
+ *
+ * @param {string} avatar
+ */
+export async function removeCharacter(avatar) {
+    const ctx = context();
+    const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+    const index = characters.findIndex((entry) => entry?.avatar === avatar);
+    if (index < 0) {
+        throw new Error('character_missing');
+    }
+
+    if (ctx.characterId !== undefined && String(ctx.characterId) === String(index)) {
+        const result = await ctx.executeSlashCommandsWithOptions(
+            `/char-delete char="${avatar}" silent=true deleteChats=false`,
+        );
+        if (result?.pipe !== 'true') {
+            throw new Error('delete_failed');
+        }
+        return;
+    }
+
+    const response = await fetch('/api/characters/delete', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify({ avatar_url: avatar, delete_chats: false }),
+    });
+    if (!response.ok) {
+        throw new Error('delete_failed');
+    }
+    const character = characters[index];
+    await ctx.getCharacters();
+    await ctx.eventSource?.emit?.(ctx.eventTypes?.CHARACTER_DELETED, { id: index, character });
 }
 
 /**

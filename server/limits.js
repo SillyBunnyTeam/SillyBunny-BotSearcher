@@ -19,7 +19,7 @@ const limiters = {
      *
      * Raised from 30 when the query box began searching as the user types. A
      * debounced phrase is a handful of requests rather than one, and a merged
-     * search across four sources still costs one point here — the per-source
+     * search across several sources still costs one point here — the per-source
      * limiter below is what actually protects the sites.
      */
     search: new RateLimiterMemory({ points: 90, duration: 60 }),

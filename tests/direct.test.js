@@ -273,7 +273,7 @@ test('a merged search caps its fan-out and ignores unknown sources', async (t) =
     }
 
     const { body } = await app.post('/search', {
-        // Seven real sources, one that does not exist, and a duplicate.
+        // Every real source, one that does not exist, and a duplicate.
         sources: [...Object.keys(SOURCES), 'chub', 'not-a-source'],
         limit: 12,
     });

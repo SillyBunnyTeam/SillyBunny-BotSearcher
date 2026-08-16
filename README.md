@@ -110,7 +110,7 @@ Open the character import screen and select **Find cards online**, or use the sl
 
 The browser immediately loads the saved or default source's catalog. Enter a search term to narrow it, then open a result to review its details. Each source remembers its own sort choice.
 
-**All sources** in the source list searches several sites at once, up to four, and interleaves the results one from each site in turn. Results are not ranked against each other: no source returns a relevance score, and the counts they do return mean different things, so any merged ordering would be invented. Each card shows which site it came from, and a card that exists on more than one of them is shown once, from whichever site is listed first.
+**All sources** in the source list searches every enabled site at once, up to eight, and interleaves the results one from each site in turn. Results are not ranked against each other: no source returns a relevance score, and the counts they do return mean different things, so any merged ordering would be invented. Each card shows which site it came from, and a card that exists on more than one of them is shown once, from whichever site is listed first.
 
 Sort and filter controls are hidden while searching all sources. The sites share no sort vocabulary, and a filter only some of them support would silently narrow part of the list. Each source keeps the sort it was last given individually. If a site does not answer, it is named below the search bar and the other sites' results are still shown.
 
@@ -135,6 +135,10 @@ Results update shortly after you stop typing, from three characters onward; pres
 Search history is off by default. If you enable it, terms are stored in SillyBunny profile settings and may be included in server backups; card names and filters are not stored. Clear saved terms under **Extensions > BotSearcher > Search history**.
 
 Each result shows the name, creator, token count, the source's own one-line summary, the popularity figures that source reported, and up to four tags. Where the source supports tag filtering, clicking a tag adds it to the filters; on other sources the tags are shown but are not clickable. Figures a source does not report are omitted rather than shown as zero, and the labels follow that source's own meaning — Chub's download count is its star count.
+
+**Select cards** above the results switches the grid into a selection mode: clicking a card marks it instead of opening it, **Select all** marks every loaded card, and **Import selected** imports the marked cards one after another on a single screen. See [Importing several cards at once](#importing-several-cards-at-once).
+
+The dialog can be worked from the keyboard. Arrow keys move between result cards, Home and End jump to the first and last, and Down from the last row lands on **Load more**. Enter opens the focused card (or marks it, in selection mode). `/` puts the cursor back in the search box from anywhere in the results. Esc steps back: out of a card, out of the review screen, out of selection mode, and finally out of the dialog.
 
 The details shown before import come from the selected source. A source may omit fields or report incomplete information. JannyAI's public index has no reliable per-card detail endpoint, so its detail pane uses the cropped description and metadata from the search listing. For imports that the BotSearcher server downloads, the server also validates the downloaded card and reports the contents it found in those bytes.
 
@@ -318,7 +322,17 @@ A cleaned PNG is spliced, not re-encoded: only the text chunks carrying card dat
 
 When a card is already in your collection, **Replace the installed copy** overwrites it instead of adding a second one.
 
+After an import that added a character, **Undo import** removes it again. Chats are left alone. A replace offers no undo, since the character it would remove was yours before the import.
+
 Review the card description and contents before starting a chat. Structural validation confirms that data is a supported card format; it does not determine whether the card's instructions are safe or appropriate.
+
+### Importing without the review
+
+**Import without the review screen** under **Extensions > BotSearcher** turns the review off. The card's button then reads **Import**, a pasted URL imports on Enter, and the card is added as soon as its bytes arrive. Two things still open the review: a character of the same name already in your collection, because whether to replace it or add a copy is your call, and a collection that could not be read, because that answer is not known. **Inspect a card file** always inspects. The card is still fetched and validated the same way, and the screen that confirms the import offers **Open character** and **Undo import**.
+
+### Importing several cards at once
+
+**Import selected** in selection mode imports the marked cards one after another, exactly as downloaded, and lists what happened to each: imported, already in your collection (and therefore not imported), or failed with the reason. Every card is still fetched and validated first, so a damaged file is refused. When the server's download limit is reached, the line says how long it is waiting and the card is retried afterwards. **Undo imports** at the end removes every character the batch added; skipped and failed cards were never added.
 
 ### Source-reported contents
 
@@ -349,6 +363,7 @@ These controls do not make third-party card instructions safe. They also do not 
 | Hide AI-generated cards | Off | Requests this filter only from Botbooru, the source that supports it. |
 | Blur sensitive and unrated thumbnails | On | Blurs thumbnails marked sensitive or lacking a reported rating until revealed. Rating labels remain visible when blur is off. |
 | Show the Card contents panel | On | Shows the source-reported content details on the details pane. The intake screen is not affected by this setting; it reports on every import. |
+| Import without the review screen | Off | Imports a card as soon as it is chosen, without the report. The review still opens for a character already in your collection, or when the collection could not be read. |
 | Request a source from this browser when the server cannot reach it | Off | Applies when a source refuses connections from your server. The source then sees your browser's IP address instead of the server's. With this off, such a source stays listed but cannot return results. |
 | Results per page | 24 | Requests 12, 24, or 48 results at a time. |
 | Save search history in SillyBunny profile settings | Off | Stores search terms for suggestions. Disable it to clear saved terms. |

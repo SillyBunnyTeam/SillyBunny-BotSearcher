@@ -209,7 +209,7 @@ export async function showDetail(container, summary, source, onBack, options = {
     container.append(body);
 
     // ---- actions ----
-    container.append(actionBar(card, source, onIntake));
+    container.append(actionBar(card, source, onIntake, settings.skipReview));
 }
 
 function isExpectedDetail(card, summary, source) {
@@ -270,15 +270,20 @@ function insidePanel(inside) {
  * collection, so the panel above is what the SOURCE says and the next screen is
  * what the card's own bytes say.
  */
-function actionBar(card, source, onIntake) {
+function actionBar(card, source, onIntake, skipReview) {
     const bar = el('div', 'sbbs-detail-actions');
 
     const button = el('button', 'menu_button sbbs-import');
     button.type = 'button';
-    setText(button, 'Review and import');
+    setText(button, skipReview ? 'Import' : 'Review and import');
     button.addEventListener('click', () => onIntake?.({ card, source }));
 
     bar.append(button);
-    bar.append(el('p', 'sbbs-trust-note', 'Cards come from third-party sites. The next screen reports what is inside this one before anything is added to your collection.'));
+    // With the review switched off the button does what it says, and the note
+    // has to say where that was decided rather than promise a screen that will
+    // not appear.
+    bar.append(el('p', 'sbbs-trust-note', skipReview
+        ? 'Cards come from third-party sites. The review screen is off under Extensions > BotSearcher, so this adds the card without a report of its contents.'
+        : 'Cards come from third-party sites. The next screen reports what is inside this one before anything is added to your collection.'));
     return bar;
 }

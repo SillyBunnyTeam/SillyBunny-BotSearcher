@@ -16,12 +16,12 @@ export const PROTOCOL_VERSION = 7;
 /**
  * How many sources one search may fan out to.
  *
- * Each source in a search is another upstream request, and the reference
- * deployment is a single-core box sharing its memory with several other apps.
- * Four is enough to be worth doing and few enough that a merged search costs
- * about what a single-source one did.
+ * Each source in a search is another upstream request. Eight covers every
+ * searchable source today, so "All sources" means all of them; the per-source
+ * limiters in server/limits.js are what protect the sites and the box, and the
+ * page budget is shared out between the sources rather than multiplied.
  */
-export const MAX_FANOUT = 4;
+export const MAX_FANOUT = 8;
 
 /** Release version. `tests/invariants.test.js` asserts this matches package.json and manifest.json. */
 export const VERSION = '0.7.0';

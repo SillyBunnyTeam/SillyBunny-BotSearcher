@@ -252,9 +252,15 @@ export function directRoutingNotice(sourceLabel, reason) {
 
 // ---- URL import via the search box ----
 
-/** Shown while a recognized card URL sits in the search box. */
-export function urlImportReadyMessage(sourceLabel) {
-    return `Press Enter to review this ${sourceLabel} card before importing.`;
+/**
+ * Shown while a recognized card URL sits in the search box.
+ * @param {string} sourceLabel
+ * @param {boolean} [direct] the review screen is switched off in settings
+ */
+export function urlImportReadyMessage(sourceLabel, direct = false) {
+    return direct
+        ? `Press Enter to import this ${sourceLabel} card.`
+        : `Press Enter to review this ${sourceLabel} card before importing.`;
 }
 
 /** The pasted URL belongs to a source the user has switched off. */
@@ -407,6 +413,32 @@ export function importErrorMessage(error) {
         default:
             return 'The card could not be imported.';
     }
+}
+
+/** Removing a character that an import just added. */
+export function undoErrorMessage(error) {
+    switch (error?.message) {
+        case 'character_missing':
+            return 'The character is no longer in your collection.';
+        default:
+            return 'The character could not be removed. Delete it from the character list.';
+    }
+}
+
+/**
+ * The closing line of a bulk import: what was added, what was skipped because
+ * it was already installed, and what failed. Zero counts are left out.
+ */
+export function bulkImportSummary({ imported, installed, failed }) {
+    const parts = [];
+    if (installed > 0) {
+        parts.push(`${installed} already in your collection`);
+    }
+    if (failed > 0) {
+        parts.push(`${failed} failed`);
+    }
+    const head = `Imported ${formatCount(imported, 'card')}.`;
+    return parts.length === 0 ? head : `${head} ${list(parts)}.`;
 }
 
 function list(items) {

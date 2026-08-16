@@ -203,3 +203,52 @@ test('committing inspected cards serializes host imports', async () => {
         restore();
     }
 });
+
+test('undoing an import deletes through the plain route unless the character is the open one', async () => {
+    const characters = [
+        { avatar: 'Other.png', name: 'Other' },
+        { avatar: 'Seraphina.png', name: 'Seraphina' },
+    ];
+    const calls = [];
+    const commands = [];
+    let refreshes = 0;
+    let characterId;
+    const restore = installHost(async (url, options) => {
+        calls.push({ url: String(url), body: JSON.parse(options.body) });
+        return response('{}');
+    }, characters);
+    // The harness's context has no open character; this test needs to vary it.
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            characters,
+            characterId,
+            getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }),
+            getCharacters: async () => { refreshes++; },
+            executeSlashCommandsWithOptions: async (command) => {
+                commands.push(command);
+                return { pipe: 'true' };
+            },
+        }),
+    };
+
+    try {
+        const { removeCharacter } = await import('../client/importer.js?remove');
+
+        // Not the open character: the route, then a list refresh.
+        characterId = '0';
+        await removeCharacter('Seraphina.png');
+        assert.deepEqual(calls, [{ url: '/api/characters/delete', body: { avatar_url: 'Seraphina.png', delete_chats: false } }]);
+        assert.equal(refreshes, 1);
+        assert.deepEqual(commands, []);
+
+        // The open character: the host's own command, which also closes its chat.
+        characterId = '1';
+        await removeCharacter('Seraphina.png');
+        assert.equal(calls.length, 1, 'the open character must not be deleted behind the host\'s back');
+        assert.deepEqual(commands, ['/char-delete char="Seraphina.png" silent=true deleteChats=false']);
+
+        await assert.rejects(removeCharacter('Missing.png'), /character_missing/);
+    } finally {
+        restore();
+    }
+});

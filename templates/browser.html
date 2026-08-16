@@ -8,7 +8,7 @@
                 the server and by rememberQuery().
             -->
             <label class="sbbs-visually-hidden" for="sbbs_query">Search character cards</label>
-            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" placeholder="Search character cards" maxlength="512" enterkeyhint="search" autocomplete="off" spellcheck="false" list="sbbs_query_history">
+            <input id="sbbs_query" class="text_pole sbbs-query" type="search" aria-label="Search character cards" aria-keyshortcuts="/" placeholder="Search character cards" maxlength="512" enterkeyhint="search" autocomplete="off" spellcheck="false" list="sbbs_query_history">
             <!-- Previous searches, offered by the browser's own dropdown. -->
             <datalist id="sbbs_query_history"></datalist>
             <button id="sbbs_go" class="menu_button sbbs-go" type="submit" title="Search" aria-label="Search">
@@ -87,6 +87,21 @@
         <div id="sbbs_partial" class="sbbs-partial" role="status" hidden></div>
         <!-- Offers to clear a failed source's cooldown and try it again. -->
         <div id="sbbs_reload" class="sbbs-reload" hidden></div>
+        <!--
+            Selecting several cards for one import. Off, it is a single button;
+            on, the grid's cards toggle instead of opening and this row carries
+            the count and the actions. Sticky, so Import selected stays in reach
+            at the bottom of a long grid.
+        -->
+        <div id="sbbs_selection" class="sbbs-selection" hidden>
+            <button id="sbbs_select_toggle" class="menu_button sbbs-select-toggle" type="button" aria-pressed="false">
+                <i class="fa-solid fa-square-check" aria-hidden="true"></i>
+                <span>Select cards</span>
+            </button>
+            <span id="sbbs_selection_count" class="sbbs-selection-count" role="status"></span>
+            <button id="sbbs_select_all" class="menu_button sbbs-selection-action" type="button">Select all</button>
+            <button id="sbbs_import_selected" class="menu_button sbbs-selection-action sbbs-import" type="button" disabled>Import selected</button>
+        </div>
         <ul id="sbbs_grid" class="sbbs-grid" role="list"></ul>
         <button id="sbbs_more" class="menu_button sbbs-more" type="button" hidden>Load more</button>
     </div>
