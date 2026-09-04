@@ -198,7 +198,7 @@ async function stage(request, signal, onStep) {
         throw new DOMException('aborted', 'AbortError');
     }
     onStep('Inspecting the card...');
-    const report = await inspectBytes(prepared.file, { signal });
+    const report = prepared.report ?? await inspectBytes(prepared.file, { signal });
     const inside = report?.inside ?? {};
     const found = await findInstalled(inside);
     return { prepared, inside, found };
@@ -289,24 +289,38 @@ async function loadBytes(request, signal) {
  * the native error's guidance is the useful one, so that is the error kept.
  */
 async function nativeThenBridge(card, source, signal) {
+    // A native reply is only trusted once it inspects as a real card. A JSON
+    // card has no portrait, so the bridge still gets its turn; the JSON stays
+    // as the last resort so the text imports with the generic portrait.
+    let fallback = null;
+    let nativeError;
     try {
-        return await fetchNativeCardBytes(card, source, { signal });
-    } catch (nativeError) {
-        if (nativeError?.name === 'AbortError' || signal?.aborted) {
-            throw nativeError;
+        const prepared = await fetchNativeCardBytes(card, source, { signal });
+        prepared.report = await inspectBytes(prepared.file, { signal });
+        if (prepared.kind === 'png') {
+            return prepared;
         }
-        try {
-            return await fetchUrlCard(card.importUrl, source, { signal });
-        } catch (bridgeError) {
-            if (bridgeError?.name === 'AbortError' || bridgeError?.message === 'janny_login_required') {
-                throw bridgeError;
-            }
-            if (bridgeError?.message === 'janny_browser_unavailable') {
-                // Lets the recovery text suggest setting the bridge up.
-                nativeError.bridgeUnavailable = true;
-            }
-            throw nativeError;
+        fallback = prepared;
+    } catch (error) {
+        if (error?.name === 'AbortError' || signal?.aborted) {
+            throw error;
         }
+        nativeError = error;
+    }
+    try {
+        return await fetchUrlCard(card.importUrl, source, { signal });
+    } catch (bridgeError) {
+        if (bridgeError?.name === 'AbortError' || bridgeError?.message === 'janny_login_required') {
+            throw bridgeError;
+        }
+        if (fallback) {
+            return fallback;
+        }
+        if (bridgeError?.message === 'janny_browser_unavailable') {
+            // Lets the recovery text suggest setting the bridge up.
+            nativeError.bridgeUnavailable = true;
+        }
+        throw nativeError;
     }
 }
 

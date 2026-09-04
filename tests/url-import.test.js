@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
+import zlib from 'node:zlib';
 
 import { createSaucepanAccounts } from '../server/accounts.js';
-import { buildPrivateCard, parseJannyUrl } from '../server/janny-browser.js';
+import { buildPrivateCard, parseJannyUrl, resolveAvatarUrl } from '../server/janny-browser.js';
 import { createRouter } from '../server/router.js';
 import {
     assembleFragments,
     parseCompanionUrl,
     saucepan,
 } from '../server/sources/saucepan.js';
-import { validateCardBytes } from '../server/cardbytes.js';
+import { PNG_SIGNATURE, crc32Range, validateCardBytes } from '../server/cardbytes.js';
 
 const UUID = '311a6844-61d6-4468-aa98-91ecc7fbae86';
 const CARD = {
@@ -133,10 +134,11 @@ test('the Janny browser mapper reconstructs a private card from a captured promp
 
 test('the URL-card bridge accepts only the two explicit source URL forms', async (t) => {
     const calls = [];
+    let avatarPng = null;
     const jannyBrowser = {
         async fetchCard(url) {
             calls.push(url);
-            return { id: UUID, card: CARD };
+            return { id: UUID, card: CARD, avatarPng };
         },
     };
     const app = express();
@@ -173,6 +175,53 @@ test('the URL-card bridge accepts only the two explicit source URL forms', async
     assert.equal(accepted.headers.get('x-sbbs-card-kind'), 'json');
     assert.deepEqual(JSON.parse(await accepted.text()), CARD);
     assert.deepEqual(calls, [`https://jannyai.com/characters/${UUID}_character-test`]);
+
+    // With a portrait the same card comes back inside a PNG, so the host keeps
+    // the picture instead of substituting its generic one.
+    avatarPng = tinyPng();
+    const pictured = await post({ source: 'jannyai', url: `https://janitorai.com/characters/${UUID}` });
+    assert.equal(pictured.status, 200);
+    assert.equal(pictured.headers.get('x-sbbs-card-kind'), 'png');
+    assert.match(pictured.headers.get('content-disposition'), /\.png"$/);
+    const bytes = Buffer.from(await pictured.arrayBuffer());
+    assert.ok(bytes.subarray(0, 8).equals(PNG_SIGNATURE));
+    assert.equal(validateCardBytes(bytes, 'png').inside.name, 'Bridge card');
+});
+
+function tinyPng() {
+    const chunk = (type, data) => {
+        const out = Buffer.alloc(data.length + 12);
+        out.writeUInt32BE(data.length, 0);
+        out.write(type, 4, 'latin1');
+        data.copy(out, 8);
+        out.writeUInt32BE(crc32Range(out, 4, 8 + data.length), 8 + data.length);
+        return out;
+    };
+    return Buffer.concat([
+        PNG_SIGNATURE,
+        chunk('IHDR', Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0])),
+        chunk('IDAT', zlib.deflateSync(Buffer.from([0, 0, 0, 0, 0]))),
+        chunk('IEND', Buffer.alloc(0)),
+    ]);
+}
+
+test('the avatar is only ever fetched from the fixed JanitorAI image host', () => {
+    const ella = 'https://ella.janitorai.com/bot-avatars/RKZ7faULC-0hCJm-_FzxO.webp?width=1200';
+    assert.equal(resolveAvatarUrl({ avatar: 'RKZ7faULC-0hCJm-_FzxO.webp' }), ella);
+    assert.equal(resolveAvatarUrl({ profile_image: 'a.jpg' }), 'https://ella.janitorai.com/bot-avatars/a.jpg?width=1200');
+    assert.equal(resolveAvatarUrl({ avatar: 'x.webp' }, 'https://ella.janitorai.com/chats/y.png?width=400'), 'https://ella.janitorai.com/chats/y.png?width=400');
+
+    // Metadata and page markup are attacker-influenced: nothing else is fetched.
+    assert.equal(resolveAvatarUrl({ avatar: 'https://ella.janitorai.com/bot-avatars/a.png' }), null);
+    assert.equal(resolveAvatarUrl({ avatar: '../etc/passwd.png' }), null);
+    assert.equal(resolveAvatarUrl({ avatar: 'a.svg' }), null);
+    assert.equal(resolveAvatarUrl({}, 'http://ella.janitorai.com/bot-avatars/a.png'), null);
+    assert.equal(resolveAvatarUrl({}, 'https://ella.janitorai.com:8443/bot-avatars/a.png'), null);
+    assert.equal(resolveAvatarUrl({}, 'https://user:pw@ella.janitorai.com/bot-avatars/a.png'), null);
+    assert.equal(resolveAvatarUrl({}, 'https://ella.janitorai.com.evil/bot-avatars/a.png'), null);
+    assert.equal(resolveAvatarUrl({}, 'https://ella.janitorai.com/other/a.png'), null);
+    assert.equal(resolveAvatarUrl({}, 'https://127.0.0.1/bot-avatars/a.png'), null);
+    assert.equal(resolveAvatarUrl(null, null), null);
 });
 
 test('Janny URL parsing allows the site and JanitorAI import forms only', () => {

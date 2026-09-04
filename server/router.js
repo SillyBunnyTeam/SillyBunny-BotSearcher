@@ -42,7 +42,7 @@ import {
     classify,
     REROUTABLE_FAILURES,
 } from './health.js';
-import { validateCardBytes, CardBytesError } from './cardbytes.js';
+import { CardBytesError, embedCardInPng, validateCardBytes } from './cardbytes.js';
 import { cleanCard } from './cardclean.js';
 import { getVocabulary, hasVocabulary } from './vocabulary.js';
 import { AccountError, accountProfileHandle, createBotbooruAccounts, createSaucepanAccounts } from './accounts.js';
@@ -696,9 +696,10 @@ export function createRouter(router, state) {
 
         try {
             let card;
+            let avatarPng = null;
             try {
                 if (adapter.id === 'jannyai') {
-                    card = (await jannyBrowser.fetchCard(rawUrl)).card;
+                    ({ card, avatarPng = null } = await jannyBrowser.fetchCard(rawUrl));
                 } else if (adapter.id === 'saucepan') {
                     const handle = accountProfileHandle(request);
                     const context = saucepanAccounts.context(handle);
@@ -724,15 +725,20 @@ export function createRouter(router, state) {
                 throw error;
             }
 
-            const buffer = Buffer.from(JSON.stringify(card), 'utf8');
-            if (buffer.length > MAX_CARD_BYTES) {
-                fail(response, 422, 'too_large');
-                return;
-            }
-
+            // With a portrait the card travels inside a PNG so the host keeps
+            // the picture; without one it is plain JSON and the host uses its
+            // generic portrait.
+            let buffer;
             let verdict;
             try {
-                verdict = validateCardBytes(buffer, 'json');
+                buffer = Buffer.isBuffer(avatarPng)
+                    ? embedCardInPng(avatarPng, card)
+                    : Buffer.from(JSON.stringify(card), 'utf8');
+                if (buffer.length > MAX_CARD_BYTES) {
+                    fail(response, 422, 'too_large');
+                    return;
+                }
+                verdict = validateCardBytes(buffer, Buffer.isBuffer(avatarPng) ? 'png' : 'json');
             } catch (error) {
                 if (error instanceof CardBytesError) {
                     fail(response, 422, error.code);

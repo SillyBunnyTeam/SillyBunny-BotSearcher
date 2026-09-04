@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 
-import { validateCardBytes, parseCardJson, describeCard, CardBytesError } from '../server/cardbytes.js';
+import { validateCardBytes, parseCardJson, describeCard, embedCardInPng, CardBytesError } from '../server/cardbytes.js';
 
 const SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
@@ -558,4 +558,20 @@ test('a long unbroken string does not make the scan quadratic', () => {
     describeData({ name: 'L', description: 'a.b-c_d'.repeat(200_000) });
 
     assert.ok(Date.now() - started < 1000, 'scanning must be linear in the text length');
+});
+
+test('a plain picture becomes a card with its image bytes untouched', () => {
+    const picture = Buffer.concat([SIGNATURE, IHDR, IDAT, IEND]);
+
+    const card = embedCardInPng(picture, V2_CARD);
+
+    assert.ok(card.subarray(0, picture.length - 12).equals(picture.subarray(0, picture.length - 12)), 'image chunks are copied through');
+    assert.ok(card.subarray(card.length - 12).equals(IEND), 'IEND stays last');
+    const verdict = validateCardBytes(card, 'png');
+    assert.equal(verdict.kind, 'png');
+    assert.equal(verdict.inside.name, 'Test Character');
+    assert.equal(verdict.inside.alternateGreetings, 2);
+
+    assert.throws(() => embedCardInPng(card, V2_CARD), (error) => error instanceof CardBytesError);
+    assert.throws(() => embedCardInPng(Buffer.from('not a png'), V2_CARD), (error) => error instanceof CardBytesError);
 });

@@ -10,6 +10,8 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { detectImageType } from './imagetype.js';
+
 const ORIGIN = 'https://janitorai.com';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROFILE_ENV = 'SBBS_JANNY_PROFILE_DIR';
@@ -215,6 +217,110 @@ async function jsonFromPage(page, url) {
         return JSON.parse(result.body);
     } catch {
         throw new JannyBrowserError('janny_card_unavailable', 502);
+    }
+}
+
+const AVATAR_HOST = 'ella.janitorai.com';
+const AVATAR_FILE = /^[A-Za-z0-9_-]{1,120}\.(?:avif|gif|jfif|jpe?g|png|webp)$/;
+const MAX_AVATAR_SOURCE_BYTES = 20 * 1024 * 1024;
+const MAX_AVATAR_PNG_BYTES = 6 * 1024 * 1024;
+// ponytail: fixed pixel ceiling keeps the PNG under the card cap; make it a
+// setting if users ask for full-resolution portraits.
+const MAX_AVATAR_PIXELS = 2_000_000;
+
+/**
+ * Picks the avatar URL to download, or null. Only the fixed JanitorAI image
+ * host is ever returned, so metadata cannot point the browser at an internal
+ * or attacker-chosen address.
+ *
+ * @param {object} meta character metadata from /hampter/characters/:id
+ * @param {string | null} [renderedSrc] the avatar <img> the page rendered
+ */
+export function resolveAvatarUrl(meta, renderedSrc = null) {
+    if (typeof renderedSrc === 'string') {
+        try {
+            const url = new URL(renderedSrc);
+            if (url.protocol === 'https:' && url.hostname === AVATAR_HOST && url.port === ''
+                && url.username === '' && url.password === ''
+                && /^\/(?:bot-avatars|chats)\/[A-Za-z0-9_./-]{1,200}$/.test(url.pathname)) {
+                url.hash = '';
+                return url.href;
+            }
+        } catch {
+            // Fall through to the metadata fields.
+        }
+    }
+    for (const value of [meta?.avatar, meta?.profile_image]) {
+        if (typeof value === 'string' && AVATAR_FILE.test(value)) {
+            return `https://${AVATAR_HOST}/bot-avatars/${value}?width=1200`;
+        }
+    }
+    return null;
+}
+
+async function renderedAvatarSrc(page) {
+    return page.evaluate((host) => {
+        const img = Array.from(document.querySelectorAll('img'))
+            .find((candidate) => candidate.src.startsWith(`https://${host}/`)
+                && (candidate.src.includes('/bot-avatars/') || candidate.src.includes('/chats/')));
+        return img?.src ?? null;
+    }, AVATAR_HOST).catch(() => null);
+}
+
+/**
+ * Downloads the avatar through the browser's session and re-encodes it as a
+ * static PNG with Chromium's own decoders, so JPEG/WebP/AVIF/GIF sources all
+ * become a picture the card can live inside. Returns null when anything about
+ * the avatar is unusable; the caller then falls back to a JSON card.
+ *
+ * @returns {Promise<Buffer | null>}
+ */
+async function avatarPngFrom(page, url) {
+    try {
+        const response = await page.request.get(url, { timeout: 30000, maxRedirects: 3 });
+        if (!response.ok()) {
+            return null;
+        }
+        const source = await response.body();
+        if (source.length === 0 || source.length > MAX_AVATAR_SOURCE_BYTES || !detectImageType(source)) {
+            return null;
+        }
+        const encoded = await page.evaluate(async ({ dataUrl, maxPixels, maxBytes }) => {
+            const blob = await (await fetch(dataUrl)).blob();
+            const bitmap = await createImageBitmap(blob);
+            if (bitmap.width === 0 || bitmap.height === 0) {
+                return null;
+            }
+            let scale = Math.min(1, Math.sqrt(maxPixels / (bitmap.width * bitmap.height)));
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+                canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+                canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                const png = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+                if (png && png.size <= maxBytes) {
+                    const reader = new FileReader();
+                    return new Promise((resolve) => {
+                        reader.onloadend = () => resolve(String(reader.result).split(',')[1] ?? null);
+                        reader.onerror = () => resolve(null);
+                        reader.readAsDataURL(png);
+                    });
+                }
+                scale /= 2;
+            }
+            return null;
+        }, {
+            dataUrl: `data:${detectImageType(source)};base64,${source.toString('base64')}`,
+            maxPixels: MAX_AVATAR_PIXELS,
+            maxBytes: MAX_AVATAR_PNG_BYTES,
+        });
+        if (typeof encoded !== 'string' || encoded === '') {
+            return null;
+        }
+        const png = Buffer.from(encoded, 'base64');
+        return detectImageType(png) === 'image/png' ? png : null;
+    } catch {
+        return null;
     }
 }
 
@@ -682,11 +788,16 @@ export function createJannyBrowser({ profileDir: configuredProfileDir } = {}) {
                 await page.goto(parsed.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                 const payload = await jsonFromPage(page, `${ORIGIN}/hampter/characters/${encodeURIComponent(parsed.id)}`);
                 const meta = characterOf(payload);
+                // The portrait is fetched first: the private capture below
+                // navigates away from the character page.
+                const avatarUrl = resolveAvatarUrl(meta, await renderedAvatarSrc(page));
+                const avatarPng = avatarUrl ? await avatarPngFrom(page, avatarUrl) : null;
                 return {
                     id: parsed.id,
                     card: meta?.showdefinition && (text(meta?.personality).trim() !== '' || text(meta?.scenario).trim() !== '')
                         ? buildPublicCard(meta)
                         : await capturePrivateCard(page, parsed.id, meta),
+                    avatarPng,
                 };
             });
         },

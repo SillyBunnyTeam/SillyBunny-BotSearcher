@@ -22,8 +22,8 @@ import {
     KNOWN_EXTENSIONS,
     PNG_SIGNATURE,
     PRIVATE_PATTERNS,
-    crc32Range,
     parseCardJson,
+    textChunk,
     validateCardBytes,
 } from './cardbytes.js';
 import { isPlainObject, own } from './validate.js';
@@ -230,19 +230,3 @@ function decodeChunkPayload(chunk, buffer) {
     return Buffer.from(text.replace(/[\r\n]/g, ''), 'base64');
 }
 
-/** Builds a well-formed tEXt chunk: length, type, keyword\0payload, CRC. */
-function textChunk(keyword, payload) {
-    const body = Buffer.concat([
-        Buffer.from(keyword, 'latin1'),
-        Buffer.from([0]),
-        Buffer.from(payload, 'latin1'),
-    ]);
-
-    const chunk = Buffer.alloc(body.length + 12);
-    chunk.writeUInt32BE(body.length, 0);
-    chunk.write('tEXt', 4, 'latin1');
-    body.copy(chunk, 8);
-    // CRC covers the type field and the data, per the PNG specification.
-    chunk.writeUInt32BE(crc32Range(chunk, 4, 8 + body.length), 8 + body.length);
-    return chunk;
-}

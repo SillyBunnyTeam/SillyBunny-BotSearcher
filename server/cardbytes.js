@@ -854,3 +854,41 @@ export function validateCardBytes(buffer, expect) {
     const parsed = parseCardJson(buffer);
     return { kind: 'json', spec: parsed.spec, inside: describeCard(parsed, buffer) };
 }
+
+/** Builds a well-formed tEXt chunk: length, type, keyword\0payload, CRC. */
+export function textChunk(keyword, payload) {
+    const body = Buffer.concat([
+        Buffer.from(keyword, 'latin1'),
+        Buffer.from([0]),
+        Buffer.from(payload, 'latin1'),
+    ]);
+
+    const chunk = Buffer.alloc(body.length + 12);
+    chunk.writeUInt32BE(body.length, 0);
+    chunk.write('tEXt', 4, 'latin1');
+    body.copy(chunk, 8);
+    // CRC covers the type field and the data, per the PNG specification.
+    chunk.writeUInt32BE(crc32Range(chunk, 4, 8 + body.length), 8 + body.length);
+    return chunk;
+}
+
+/**
+ * Turns a plain PNG picture into a character card by inserting the card as a
+ * `chara` tEXt chunk directly before IEND. The image chunks are copied through
+ * byte for byte; only the one chunk is added.
+ *
+ * The picture is fully validated first, so the splice below can trust that the
+ * final twelve bytes are the IEND chunk and that nothing follows it.
+ *
+ * @param {Buffer} png a well-formed PNG with no embedded card
+ * @param {object} card the card object to embed
+ * @returns {Buffer}
+ */
+export function embedCardInPng(png, card) {
+    if (readPngTextChunks(png).size > 0) {
+        throw new CardBytesError('png_malformed', 'picture already carries a card');
+    }
+    const payload = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
+    const iend = png.length - 12;
+    return Buffer.concat([png.subarray(0, iend), textChunk('chara', payload), png.subarray(iend)]);
+}

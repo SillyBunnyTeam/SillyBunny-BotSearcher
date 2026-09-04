@@ -646,6 +646,84 @@ test('a blocked native download falls back to the browser bridge', async () => {
     }
 });
 
+test('a native JSON card has no portrait, so the bridge is still asked and its PNG wins', async () => {
+    // SillyBunny's importer gives every JSON card its generic portrait; only a
+    // PNG keeps the picture. The bridge's PNG is what ends up inspected.
+    const inspected = [];
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response(JSON.stringify({ spec: 'chara_card_v2' }), {
+                headers: { 'X-Custom-Content-Type': 'character', 'Content-Type': 'application/json' },
+            }),
+            '/url-card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': (options) => {
+                inspected.push(options.body.name);
+                return jsonRoute(REPORT)();
+            },
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-json-then-bridge');
+        await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-intake-list'), 'report did not render');
+
+        assert.ok(host.calls.some((call) => call.path.includes('/url-card')), 'the bridge runs after a portrait-less native card');
+        assert.deepEqual(inspected.map((name) => name.split('.').pop()), ['json', 'png'], 'each candidate is inspected once, the PNG last');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('a native JSON card is still imported with the generic portrait when the bridge is down', async () => {
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response(JSON.stringify({ spec: 'chara_card_v2' }), {
+                headers: { 'X-Custom-Content-Type': 'character', 'Content-Type': 'application/json' },
+            }),
+            '/url-card': jsonRoute({ error: 'janny_browser_unavailable' }, 503),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-json-fallback');
+        await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-intake-list'), 'report did not render');
+
+        assert.equal(host.calls.filter((call) => call.path.includes('/inspect')).length, 1, 'the accepted report is not requested twice');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('a native reply that is not a card at all sends the import to the bridge', async () => {
+    // A 200 with a Cloudflare page or a bare image used to be accepted and only
+    // fail at inspection, after the bridge had lost its turn.
+    const host = installHost({
+        routes: {
+            '/api/content/importURL': () => new Response('<html>blocked</html>', { headers: { 'X-Custom-Content-Type': 'character' } }),
+            '/url-card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
+            '/inspect': (options) => (options.body.name.endsWith('.png')
+                ? jsonRoute(REPORT)()
+                : jsonRoute({ error: 'not_json' }, 422)()),
+        },
+    });
+
+    try {
+        const { showIntake } = await import('../client/intake.js?janny-garbage-then-bridge');
+        await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+        await waitFor(() => host.container.querySelector('.sbbs-intake-list'), 'report did not render');
+
+        assert.ok(host.calls.some((call) => call.path.includes('/url-card')), 'the bridge runs when native bytes fail inspection');
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
 test('with no bridge available a blocked JannyAI card keeps the native guidance and a retry', async () => {
     const host = installHost({
         routes: {
