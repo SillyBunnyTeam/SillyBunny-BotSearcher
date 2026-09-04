@@ -277,51 +277,65 @@ async function renderedAvatarSrc(page) {
  */
 async function avatarPngFrom(page, url) {
     try {
-        const response = await page.request.get(url, { timeout: 30000, maxRedirects: 3 });
-        if (!response.ok()) {
-            return null;
-        }
-        const source = await response.body();
-        if (source.length === 0 || source.length > MAX_AVATAR_SOURCE_BYTES || !detectImageType(source)) {
-            return null;
-        }
-        const encoded = await page.evaluate(async ({ dataUrl, maxPixels, maxBytes }) => {
-            const blob = await (await fetch(dataUrl)).blob();
-            const bitmap = await createImageBitmap(blob);
-            if (bitmap.width === 0 || bitmap.height === 0) {
-                return null;
-            }
-            let scale = Math.min(1, Math.sqrt(maxPixels / (bitmap.width * bitmap.height)));
-            for (let attempt = 0; attempt < 2; attempt += 1) {
-                const canvas = document.createElement('canvas');
-                canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-                canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-                canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                const png = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-                if (png && png.size <= maxBytes) {
-                    const reader = new FileReader();
-                    return new Promise((resolve) => {
-                        reader.onloadend = () => resolve(String(reader.result).split(',')[1] ?? null);
-                        reader.onerror = () => resolve(null);
-                        reader.readAsDataURL(png);
-                    });
-                }
-                scale /= 2;
-            }
-            return null;
-        }, {
-            dataUrl: `data:${detectImageType(source)};base64,${source.toString('base64')}`,
-            maxPixels: MAX_AVATAR_PIXELS,
-            maxBytes: MAX_AVATAR_PNG_BYTES,
-        });
-        if (typeof encoded !== 'string' || encoded === '') {
-            return null;
-        }
-        const png = Buffer.from(encoded, 'base64');
-        return detectImageType(png) === 'image/png' ? png : null;
-    } catch {
+        return await transcodeAvatar(page, url);
+    } catch (error) {
+        console.warn(`[BotSearcher] JanitorAI avatar skipped (${error?.message ?? error}); the card imports without its portrait`);
         return null;
     }
+}
+
+async function transcodeAvatar(page, url) {
+    const response = await page.request.get(url, { timeout: 30000, maxRedirects: 3 });
+    if (!response.ok()) {
+        throw new Error(`HTTP ${response.status()} from ${url}`);
+    }
+    const source = await response.body();
+    const type = detectImageType(source);
+    if (source.length === 0 || source.length > MAX_AVATAR_SOURCE_BYTES || !type) {
+        throw new Error(`unusable download: ${source.length} bytes, ${type ?? 'not a known image type'}`);
+    }
+    // The bytes cross into the page as base64 and become a Blob directly:
+    // janitorai.com's Content-Security-Policy has no data: in connect-src, so
+    // fetch('data:...') would be refused there.
+    const encoded = await page.evaluate(async ({ base64, type, maxPixels, maxBytes }) => {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        const bitmap = await createImageBitmap(new Blob([bytes], { type }));
+        if (bitmap.width === 0 || bitmap.height === 0) {
+            throw new Error('decoded picture is empty');
+        }
+        let scale = Math.min(1, Math.sqrt(maxPixels / (bitmap.width * bitmap.height)));
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            const png = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+            if (png && png.size <= maxBytes) {
+                const reader = new FileReader();
+                return new Promise((resolve, reject) => {
+                    reader.onloadend = () => resolve(String(reader.result).split(',')[1] ?? '');
+                    reader.onerror = () => reject(new Error('could not read the PNG back'));
+                    reader.readAsDataURL(png);
+                });
+            }
+            scale /= 2;
+        }
+        throw new Error('PNG stays over the size cap even at reduced scale');
+    }, {
+        base64: source.toString('base64'),
+        type,
+        maxPixels: MAX_AVATAR_PIXELS,
+        maxBytes: MAX_AVATAR_PNG_BYTES,
+    });
+    const png = Buffer.from(typeof encoded === 'string' ? encoded : '', 'base64');
+    if (detectImageType(png) !== 'image/png') {
+        throw new Error('browser returned something other than a PNG');
+    }
+    return png;
 }
 
 async function settingsRequest(page, url, init = {}) {
