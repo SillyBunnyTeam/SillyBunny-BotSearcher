@@ -45,11 +45,14 @@
     position: relative;
     line-height: 1.5;
     /*
-     * Fallback scroller for viewports shorter than the exposed header plus a
-     * usable results floor. It only ever scrolls the whole dialog; the header
-     * itself is never a scroll box (see below).
+     * The dialog's only scroller: the whole page (controls, results, cards)
+     * scrolls here as one, with .sbbs-bar-sticky staying put at the top.
+     * Nothing else in this view is a scroll box. Header and body clip
+     * sideways overflow before it can reach this scroller, so focusing a
+     * control can never shift the page sideways with no way back.
      */
     overflow-y: auto;
+    overflow-x: hidden;
     overscroll-behavior: contain;
 }
 
@@ -79,11 +82,15 @@
 
 .sbbs-root > header:has(.sbbs-bar) {
     /* The search controls stay fully exposed above the results. They are
-       never their own scroll box; .sbbs-body is the only column that scrolls. */
+       never their own scroll box; .sbbs-root is the page scroller and only
+       .sbbs-bar-sticky stays put. Horizontal overflow is clipped (not
+       hidden) so this never becomes a scroll container that could trap the
+       sticky rows or feed sideways overflow to the page. */
     flex: 0 0 auto;
     min-height: 0;
     max-height: none;
-    overflow: visible;
+    overflow-y: visible;
+    overflow-x: clip;
 }
 
 .sbbs-bar {
@@ -93,6 +100,22 @@
     flex: 0 0 auto;
 }
 
+/*
+ * The only sticky part of the dialog: query, source, sort, Filters and the
+ * selection row stay put while the rest of the page scrolls. Opaque theme
+ * background, so results sliding underneath never show through the row gap.
+ */
+.sbbs-bar-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm, 8px);
+    overflow-x: clip;
+    background: var(--sb-shell-surface, var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.72)));
+}
+
 .sbbs-bar-row {
     display: flex;
     flex-wrap: wrap;
@@ -100,7 +123,7 @@
     gap: var(--spacing-sm, 8px);
 }
 
-.sbbs-bar,
+.sbbs-bar-sticky,
 .sbbs-bar details,
 .sbbs-bar-row > * {
     min-width: 0;
@@ -383,16 +406,15 @@
 /* ---- body ---- */
 
 .sbbs-body {
-    flex: 1 1 auto;
     /*
-     * The header is fully exposed and takes whatever height it needs, so the
-     * results keep a viewport-relative floor instead of collapsing to nothing
-     * on short screens. Past that floor this column is the scroller; anything
-     * still too tall falls back to the root scroller above, never the header.
+     * In normal flow with the page: .sbbs-root is the scroller, so this
+     * column needs neither its own scroll box nor a reserved floor. `clip`
+     * (not `hidden`) keeps wide children inside without becoming a scroll
+     * container, which would trap the page scroll again.
      */
-    min-height: 25dvh;
-    overflow-y: auto;
-    overflow-x: hidden;
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: clip;
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md, 12px);
@@ -734,14 +756,11 @@
 /* ---- selecting cards ---- */
 
 /*
- * One row above the grid: the mode toggle alone when off, the count and the
- * actions beside it when on. Sticky inside the scrolling body, so a selection
- * made at the bottom of a long grid can be imported without scrolling back up.
+ * One row under source and sort, inside the sticky header: the mode toggle
+ * alone when off, the count and the actions beside it when on. The sticky
+ * wrapper keeps it in reach, so it needs no positioning of its own.
  */
 .sbbs-selection {
-    position: sticky;
-    top: 0;
-    z-index: 3;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -1343,9 +1362,8 @@
         opacity: 1;
     }
 
-    /* The bar sits above the scrolling results, so it needs no sticky
-       positioning of its own. Sticky here only painted a floating strip over
-       the controls while the header scrolled beneath it. */
+    /* Sticky behaviour itself lives on .sbbs-bar-sticky in the base rules;
+       nothing mobile-specific is needed for it. */
 
     /* .text_pole's own 5px block margins add ~20px across two rows. */
     .sbbs-source,

@@ -253,7 +253,7 @@ test('isolated browser layouts, live detail states, keyboard focus and intake pr
     }
     async function fit() {
         const overflow = await page.evaluate(() => [...document.querySelectorAll(
-            '.sbbs-root, .sbbs-bar, .sbbs-bar-row, .sbbs-detail-body, .sbbs-detail-actions, .sbbs-intake-body, .sbbs-bulk-list, .sbbs-intake-choice',
+            '.sbbs-root, .sbbs-bar, .sbbs-bar-sticky, .sbbs-bar-row, .sbbs-detail-body, .sbbs-detail-actions, .sbbs-intake-body, .sbbs-bulk-list, .sbbs-intake-choice',
         )].filter((node) => node.getClientRects().length && node.scrollWidth > node.clientWidth + 1)
             .map((node) => `${node.className}: ${node.scrollWidth} > ${node.clientWidth}`));
         assert.deepEqual(overflow, [], 'no horizontal clipping or overflow');
@@ -501,8 +501,41 @@ test('isolated browser layouts, live detail states, keyboard focus and intake pr
                 assert.ok(queryBox && headerBox && queryBox.y >= headerBox.y - 1
                     && queryBox.y + queryBox.height <= headerBox.y + headerBox.height + 1,
                 'search field is fully visible inside the header');
-                const resultsHeight = await page.locator('.sbbs-body').evaluate((node) => node.clientHeight);
-                assert.ok(resultsHeight > 50, `toolbar leaves space for results: ${resultsHeight}px`);
+                const bodyScroll = await page.locator('.sbbs-body').evaluate((node) => getComputedStyle(node).overflowY);
+                assert.ok(bodyScroll === 'visible' || bodyScroll === 'clip',
+                    `results are not their own scroll box: ${bodyScroll}`);
+                const sticky = await page.locator('.sbbs-bar-sticky').evaluate((node) => {
+                    const style = getComputedStyle(node);
+                    return { position: style.position, top: style.top };
+                });
+                assert.equal(sticky.position, 'sticky', 'search rows stay put while the page scrolls');
+                assert.equal(sticky.top, '0px', 'search rows stick to the top of the dialog');
+                const stuck = await page.locator('.sbbs-root').evaluate((node) => {
+                    if (node.scrollHeight <= node.clientHeight + 1) { return 'noscroll'; }
+                    node.scrollTo({ top: node.scrollHeight, behavior: 'instant' });
+                    const root = node.getBoundingClientRect();
+                    const query = node.querySelector('#sbbs_query').getBoundingClientRect();
+                    return query.top >= root.top - 1 && query.bottom <= root.bottom + 1
+                        ? 'stuck' : `query at ${query.top}, root at ${root.top}`;
+                });
+                assert.ok(stuck === 'stuck' || stuck === 'noscroll',
+                    `search field stays visible after scrolling the page: ${stuck}`);
+                const sideways = await page.locator('.sbbs-root').evaluate((node) => {
+                    const clip = (boxed) => {
+                        const style = getComputedStyle(boxed);
+                        return style.overflowX === 'clip';
+                    };
+                    return {
+                        // Header and body clip sideways overflow before it can
+                        // reach the page scroller, so focusing a control can
+                        // never shift the page sideways with no way back.
+                        clipped: ['.sbbs-root > header', '.sbbs-bar-sticky', '.sbbs-body']
+                            .every((selector) => clip(node.querySelector(selector))),
+                        left: node.scrollLeft,
+                    };
+                });
+                assert.equal(sideways.clipped, true, 'header and results clip sideways overflow');
+                assert.equal(sideways.left, 0, 'focusing the search field did not shift the page sideways');
                 await tabTo('#sbbs_inspect_file');
                 await tabTo('#sbbs_file_actions > summary');
                 await page.keyboard.press('Enter');
