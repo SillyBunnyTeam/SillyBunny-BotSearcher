@@ -350,8 +350,11 @@ function renderChips(field, onChange) {
         remove.setAttribute('aria-label', `Remove tag ${tag}`);
         setText(remove, '×');
         remove.addEventListener('click', () => {
+            const index = [...field.tags].indexOf(tag);
             field.tags.delete(tag);
             renderChips(field, onChange);
+            const neighbours = field.chips.querySelectorAll('button');
+            (neighbours[index] ?? neighbours[index - 1] ?? field.input).focus();
             onChange();
         });
 

@@ -297,7 +297,7 @@ test('a merged cursor cannot be replayed as a single-source one', async (t) => {
     assert.equal(asMulti.body.error, 'bad_cursor');
 
     // And a merged cursor offered to a single-source search.
-    const multi = mintToken('cursor:multi', { s: { chub: { p: 2 } } });
+    const multi = mintToken('cursor:multi', { s: { chub: [12, { p: 2 }] } });
     const asSingle = await app.post('/search', { source: 'chub', cursor: multi });
     assert.equal(asSingle.status, 400);
     assert.equal(asSingle.body.error, 'bad_cursor');
@@ -315,7 +315,7 @@ test('an active merged cursor is not re-parsed as a single-source cursor', async
     // this multi cursor through buildSearchArgs(), which tried to verify it under
     // cursor:chub and returned an internal error before checking source health.
     block('chub');
-    const cursor = mintToken('cursor:multi', { s: { chub: { p: 2 } } });
+    const cursor = mintToken('cursor:multi', { s: { chub: [12, { p: 2 }] } });
     const { status, body } = await app.post('/search', {
         sources: ['chub'],
         cursor,
@@ -333,7 +333,7 @@ test('a signed merged cursor still rejects malformed carried dedupe state', asyn
     t.after(() => app.close());
 
     const cursor = mintToken('cursor:multi', {
-        s: { chub: { p: 2 } },
+        s: { chub: [12, { p: 2 }] },
         d: ['not-a-16-character-fingerprint'],
     });
     const { status, body } = await app.post('/search', { sources: ['chub'], cursor });
@@ -352,7 +352,7 @@ test('an exhausted merged search stops rather than restarting its sources', asyn
 
     // The cursor names only chub, so botbooru is finished. Asking it again would
     // hand back its first page a second time.
-    const cursor = mintToken('cursor:multi', { s: { chub: { p: 2 } } });
+    const cursor = mintToken('cursor:multi', { s: { chub: [12, { p: 2 }] } });
     const { body } = await app.post('/search', { sources: ['botbooru'], cursor, limit: 12 });
 
     assert.deepEqual(body.items, []);

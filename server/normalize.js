@@ -100,7 +100,10 @@ function build(candidate, allowedKeys) {
     };
 
     put('source', str(get('source'), 64));
-    put('id', str(get('id'), FIELD_LIMITS.id));
+    // Adapters validate opaque identifiers; display-text normalisation changes
+    // valid Unicode paths and makes subsequent exact lookups fail.
+    const id = get('id');
+    put('id', typeof id === 'string' && id.length <= FIELD_LIMITS.id ? id : '');
     put('name', str(get('name'), FIELD_LIMITS.shortText));
     put('tagline', str(get('tagline'), FIELD_LIMITS.shortText));
     put('creator', str(get('creator'), FIELD_LIMITS.shortText));

@@ -45,6 +45,7 @@ const REPORT = {
     kind: 'png',
     spec: 'chara_card_v2',
     inside: {
+        scan: { complete: true, reasons: [] },
         name: 'Seraphina',
         creator: 'realauthor',
         characterVersion: '1.2',
@@ -95,9 +96,10 @@ const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
  * Installs a DOM plus a host stub.
  * `routes` maps a path fragment to a handler returning a Response.
  */
-function installHost({ characters = [], routes = {}, getCharacters } = {}) {
+function installHost({ characters = [], routes = {}, getCharacters, getOneCharacter } = {}) {
     const dom = new JSDOM('<!doctype html><html><body><section id="intake"></section></body></html>', {
         url: 'https://sillybunny.test/',
+        pretendToBeVisual: true,
     });
     const previous = {
         document: globalThis.document,
@@ -106,18 +108,53 @@ function installHost({ characters = [], routes = {}, getCharacters } = {}) {
         SillyTavern: globalThis.SillyTavern,
         File: globalThis.File,
         toastr: globalThis.toastr,
+        requestAnimationFrame: globalThis.requestAnimationFrame,
     };
 
     const calls = [];
+    const stored = structuredClone(characters);
+    const loaded = [];
     globalThis.document = dom.window.document;
     globalThis.window = dom.window;
+    globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
     globalThis.toastr = { success() {}, error() {} };
     globalThis.fetch = async (url, options = {}) => {
         const path = String(url);
         calls.push({ path, options });
         for (const [fragment, handler] of Object.entries(routes)) {
             if (path.includes(fragment)) {
-                return handler(options);
+                return handler(options, stored);
+            }
+        }
+        if (path === '/api/characters/all') {
+            return jsonRoute(stored)();
+        }
+        if (path.startsWith('/characters/')) {
+            const avatar = decodeURIComponent(path.slice('/characters/'.length));
+            const entry = stored.find((record) => record.avatar === avatar);
+            return entry ? new Response(new Uint8Array([...PNG_BYTES, ...new TextEncoder().encode(JSON.stringify(entry))])) : new Response('', { status: 404 });
+        }
+        if (path === '/api/characters/import') {
+            let avatar = options.body.get('preserved_name');
+            if (!avatar) {
+                avatar = 'sera.png';
+                for (let n = 1; stored.some((entry) => entry.avatar === avatar); n++) {
+                    avatar = `sera${n}.png`;
+                }
+            }
+            const record = { avatar, name: 'Seraphina', data: { description: 'A knight.' } };
+            const index = stored.findIndex((entry) => entry.avatar === avatar);
+            if (index < 0) {
+                stored.push(record);
+            } else {
+                stored[index] = record;
+            }
+            return jsonRoute({ file_name: avatar.slice(0, -4) })();
+        }
+        if (path === '/api/characters/delete') {
+            const index = stored.findIndex((entry) => entry.avatar === JSON.parse(options.body).avatar_url);
+            if (index >= 0) {
+                stored.splice(index, 1);
             }
         }
         return new Response('{}', { status: 200 });
@@ -125,14 +162,14 @@ function installHost({ characters = [], routes = {}, getCharacters } = {}) {
     // The real host leaves `characters` empty until getCharacters() has run, so
     // the stub does the same — a stub that pre-populates it would hide exactly
     // the bug this models.
-    const loaded = [];
     globalThis.SillyTavern = {
         getContext: () => ({
             characters: loaded,
             getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
             getCharacters: getCharacters ?? (async () => {
-                loaded.splice(0, loaded.length, ...characters);
+                loaded.splice(0, loaded.length, ...structuredClone(stored));
             }),
+            getOneCharacter,
             getTokenCountAsync: async (text) => text.length,
             selectCharacterById: async () => {},
         }),
@@ -140,8 +177,12 @@ function installHost({ characters = [], routes = {}, getCharacters } = {}) {
 
     return {
         calls,
+        stored,
+        loaded,
+        dom,
         container: dom.window.document.querySelector('#intake'),
         restore() {
+            dom.window.close();
             Object.assign(globalThis, previous);
         },
     };
@@ -332,7 +373,7 @@ test('clean import states what it removes and what it keeps, and routes through 
 
         const note = host.container.querySelector('.sbbs-intake-clean-note').textContent;
         assert.match(note, /removes 2 regex scripts/);
-        assert.match(note, /1 unrecognized extension block \(risu_ext\)/);
+        assert.match(note, /1 unrecognised extension block \(risu_ext\)/);
         assert.match(note, /1 personal detail/);
         assert.match(note, /keeps 34 lorebook entries/, 'the character must be kept, and said to be');
         assert.match(note, /the system prompt/);
@@ -486,7 +527,7 @@ test('a local file is inspected without contacting any source', async () => {
 
         assert.match(host.container.textContent, /Local file \(downloaded card\.png\)/);
         assert.deepEqual(
-            host.calls.map((call) => call.path).filter((path) => !path.includes('/inspect')),
+            host.calls.map((call) => call.path).filter((path) => !path.includes('/inspect') && path !== '/api/characters/all'),
             [],
             'a local card must not cause a source request',
         );
@@ -502,10 +543,9 @@ test('an unreadable collection is reported as unknown, never as "not installed"'
     // reported as absent — a false all-clear on the one question the user came
     // here to ask.
     const host = installHost({
-        getCharacters: async () => {
-            throw new Error('offline');
-        },
+        getCharacters: async () => {},
         routes: {
+            '/api/characters/all': jsonRoute({ error: true }, 500),
             '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
             '/inspect': jsonRoute(REPORT),
         },
@@ -528,7 +568,6 @@ test('an unreadable collection is reported as unknown, never as "not installed"'
 });
 
 test('the collection is refreshed before comparing, not read stale', async () => {
-    let refreshed = 0;
     const host = installHost({
         characters: [{ avatar: 'Seraphina.png', name: 'Seraphina', data: { description: 'A knight.' } }],
         routes: {
@@ -536,20 +575,12 @@ test('the collection is refreshed before comparing, not read stale', async () =>
             '/inspect': jsonRoute(REPORT),
         },
     });
-    const context = globalThis.SillyTavern.getContext;
-    globalThis.SillyTavern = {
-        getContext: () => {
-            const ctx = context();
-            return { ...ctx, getCharacters: async () => { refreshed++; return ctx.getCharacters(); } };
-        },
-    };
-
     try {
         const { showIntake } = await import('../client/intake.js?collection-refresh');
         await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
         await waitFor(() => host.container.querySelector('.sbbs-intake-duplicate'), 'duplicate line did not render');
 
-        assert.ok(refreshed > 0, 'the character list must be refreshed before it is trusted');
+        assert.ok(host.calls.some((call) => call.path === '/api/characters/all'), 'the character list read must have an explicit success response');
         assert.match(
             host.container.querySelector('.sbbs-intake-duplicate').textContent,
             /Already in your collection as "Seraphina"/,
@@ -747,24 +778,12 @@ test('with no bridge available a blocked JannyAI card keeps the native guidance 
     }
 });
 
-/** A collection that is empty until an import lands, as the real one is. */
-function collectionThatFillsAfter(refreshesBeforeAdded, entry) {
-    let refreshes = 0;
-    return async () => {
-        const list = globalThis.SillyTavern.getContext().characters;
-        if (++refreshes > refreshesBeforeAdded) {
-            list.splice(0, list.length, entry);
-        }
-    };
-}
-
 test('with the review off, a card not yet installed is imported at once and can be undone', async () => {
     const host = installHost({
         routes: {
             '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
             '/inspect': jsonRoute(REPORT),
         },
-        getCharacters: collectionThatFillsAfter(1, { name: 'Seraphina', avatar: 'sera.png' }),
     });
 
     try {
@@ -817,7 +836,6 @@ test('an ordinary import offers Undo, and undoing it reopens the choice', async 
             '/card': () => new Response(PNG_BYTES, { headers: { 'X-SBBS-Card-Kind': 'png' } }),
             '/inspect': jsonRoute(REPORT),
         },
-        getCharacters: collectionThatFillsAfter(1, { name: 'Seraphina', avatar: 'sera.png' }),
     });
 
     try {
@@ -853,9 +871,6 @@ test('a batch imports each card, skips installed ones, obeys the download limit,
             },
             '/inspect': jsonRoute(REPORT),
         },
-        // Empty until the first import lands, so the second card of the same
-        // name is found installed and skipped rather than duplicated.
-        getCharacters: collectionThatFillsAfter(1, { name: 'Seraphina', avatar: 'sera.png' }),
     });
 
     try {
@@ -868,7 +883,7 @@ test('a batch imports each card, skips installed ones, obeys the download limit,
         await waitFor(() => host.container.querySelector('.sbbs-undo-import'), 'the batch did not finish');
 
         const outcomes = [...host.container.querySelectorAll('.sbbs-bulk-outcome')].map((node) => node.textContent);
-        assert.equal(outcomes[0], 'Imported');
+        assert.equal(outcomes[0], 'Imported.');
         assert.match(outcomes[1], /Already in your collection as "Seraphina".*Not imported\./);
         assert.equal(cardCalls, 3, 'the first card was fetched again after the wait; the second once');
         assert.equal(host.calls.filter((call) => call.path.includes('/api/characters/import')).length, 1);
@@ -880,6 +895,493 @@ test('a batch imports each card, skips installed ones, obeys the download limit,
         assert.equal(host.calls.filter((call) => call.path.includes('/api/characters/delete')).length, 1);
         assert.equal(host.container.querySelectorAll('.sbbs-bulk-outcome')[0].textContent, 'Removed again');
     } finally {
+        host.restore();
+    }
+});
+
+test('incomplete or unreported inspection coverage always opens review and disables cleaning', async () => {
+    for (const scan of [{ complete: false, reasons: ['text_budget'] }, undefined]) {
+        const report = structuredClone(REPORT);
+        report.inside.scan = scan;
+        const host = installHost({
+            routes: {
+                '/card': () => new Response(PNG_BYTES),
+                '/inspect': jsonRoute(report),
+            },
+        });
+        try {
+            const { showIntake } = await import('../client/intake.js?coverage-review');
+            await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, { direct: true });
+            assert.ok(host.container.querySelector('.sbbs-intake-scan-warning'));
+            assert.equal(host.container.querySelector('.sbbs-import-clean').disabled, true);
+            assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+            assert.doesNotMatch(host.container.textContent, /A knight\.|Be a knight\.|ABCDEFGHIJ/);
+        } finally {
+            await settle(host.container);
+            host.restore();
+        }
+    }
+});
+
+test('unknown collection reads cannot trigger review-disabled or batch imports', async () => {
+    const host = installHost({
+        getCharacters: async () => {},
+        routes: {
+            '/card': () => new Response(PNG_BYTES),
+            '/inspect': jsonRoute(REPORT),
+            '/api/characters/all': jsonRoute({ error: true }, 500),
+        },
+    });
+    try {
+        const { showIntake, showBulkImport } = await import('../client/intake.js?unknown-collection-policy');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, { direct: true });
+        assert.match(host.container.querySelector('.sbbs-intake-duplicate').textContent, /could not read your collection/);
+        await settle(host.container);
+        await showBulkImport(host.container, [{ item: CARD, source: BYTE_SOURCE }], () => {});
+        assert.match(host.container.querySelector('.sbbs-state').textContent, /1 collection check unavailable/);
+        assert.doesNotMatch(host.container.querySelector('.sbbs-state').textContent, /already in your collection/);
+        assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+        assert.equal(host.container.querySelector('.sbbs-bulk-review-card').hidden, false);
+    } finally {
+        host.restore();
+    }
+});
+
+test('lazy installed cards are loaded with the host helper, with failed comparisons reported as unknown', async () => {
+    for (const succeeds of [true, false]) {
+        let fullLoads = 0;
+        const host = installHost({
+            characters: [{ avatar: 'sera.png', name: 'Seraphina', shallow: true, data: {} }],
+            getOneCharacter: async avatar => {
+                fullLoads++;
+                if (succeeds) {
+                    const ctx = globalThis.SillyTavern.getContext();
+                    const index = ctx.characters.findIndex(entry => entry.avatar === avatar);
+                    ctx.characters[index] = {
+                        avatar, name: 'Seraphina', data: {
+                            description: 'A knight.', first_mes: 'Hello.', system_prompt: 'Be a knight.',
+                            character_book: { entries: new Array(34) }, alternate_greetings: new Array(4),
+                        },
+                    };
+                }
+            },
+            routes: {
+                '/card': () => new Response(PNG_BYTES),
+                '/inspect': jsonRoute(REPORT),
+            },
+        });
+        try {
+            const { showIntake } = await import('../client/intake.js?lazy-comparison');
+            await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+            assert.equal(fullLoads, 1);
+            const text = host.container.querySelector('.sbbs-intake-duplicate').textContent;
+            assert.match(text, succeeds ? /compared fields and counts match/ : /could not be compared/);
+            assert.doesNotMatch(text, /different description/);
+        } finally {
+            await settle(host.container);
+            host.restore();
+        }
+    }
+});
+
+test('same-name copy selection precedes actions and fixes the replacement target before cleaning', async () => {
+    let releaseClean;
+    const host = installHost({
+        characters: [
+            { avatar: 'first.png', name: 'Seraphina', data: { description: 'first hidden text' } },
+            { avatar: '{{user}}.png', name: 'Seraphina', data: { description: 'second hidden text' } },
+        ],
+        routes: {
+            '/card': () => new Response(PNG_BYTES),
+            '/inspect': jsonRoute(REPORT),
+            '/clean': () => new Promise(resolve => { releaseClean = () => resolve(new Response(PNG_BYTES)); }),
+        },
+    });
+    try {
+        const { showIntake } = await import('../client/intake.js?copy-choice');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+        await settle(host.container);
+        const select = host.container.querySelector('.sbbs-intake-match');
+        assert.deepEqual([...select.options].map(option => option.value), ['first.png', '{{user}}.png']);
+        assert.match(select.textContent, /\{\{user\}\}\.png/);
+        select.value = '{{user}}.png';
+        select.dispatchEvent(new host.dom.window.Event('change'));
+        const replace = host.container.querySelector('.sbbs-intake-replace input');
+        await waitFor(() => !replace.disabled, 'chosen installed copy did not load');
+        replace.click();
+        const exact = host.container.querySelector('.sbbs-import');
+        const clean = host.container.querySelector('.sbbs-import-clean');
+        assert.equal(exact.textContent, 'Replace exactly');
+        assert.equal(clean.textContent, 'Clean and replace');
+        assert.equal(host.container.querySelector('.sbbs-intake-replace-note').hidden, false);
+        assert.match(host.container.querySelector('.sbbs-intake-replace-note').textContent, /no Undo/);
+        assert.ok(host.container.querySelector('.sbbs-intake-choice').compareDocumentPosition(exact) & host.dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
+        clean.click();
+        await waitFor(() => releaseClean, 'cleaning did not start');
+        assert.equal(select.disabled, true);
+        assert.equal(replace.disabled, true);
+        assert.equal(host.container.querySelector('.sbbs-intake-add-copy input').disabled, true);
+        replace.checked = false;
+        select.value = 'first.png';
+        releaseClean();
+        await waitFor(() => /Replaced\./.test(host.container.querySelector('.sbbs-import-status').textContent), 'replacement did not settle');
+        const write = host.calls.find(call => call.path === '/api/characters/import');
+        assert.equal(write.options.body.get('preserved_name'), '{{user}}.png');
+        assert.equal(host.container.querySelector('.sbbs-undo-import'), null);
+        assert.doesNotMatch(host.container.textContent, /first hidden text|second hidden text|A knight\./);
+    } finally {
+        host.restore();
+    }
+});
+
+test('Back during collection lookup or cleaning prevents a later import', async () => {
+    for (const phase of ['collection', 'clean']) {
+        let release;
+        const controller = new AbortController();
+        const host = installHost({
+            routes: {
+                '/card': () => new Response(PNG_BYTES),
+                '/inspect': jsonRoute(REPORT),
+                ...(phase === 'collection' ? {
+                    '/api/characters/all': () => new Promise(resolve => { release = () => resolve(jsonRoute([])()); }),
+                } : {
+                    '/clean': () => new Promise(resolve => { release = () => resolve(new Response(PNG_BYTES)); }),
+                }),
+            },
+        });
+        try {
+            const { showIntake } = await import('../client/intake.js?cancel-preparation');
+            const opened = showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {
+                controller.abort();
+                host.container.replaceChildren();
+            }, { signal: controller.signal, direct: phase === 'collection' });
+            if (phase === 'clean') {
+                await opened;
+                await settle(host.container);
+                host.container.querySelector('.sbbs-import-clean').click();
+            }
+            await waitFor(() => release, `${phase} did not start`);
+            host.container.querySelector('.sbbs-back').click();
+            release();
+            await opened;
+            await tick();
+            assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+            assert.equal(host.container.childElementCount, 0);
+        } finally {
+            host.restore();
+        }
+    }
+});
+
+test('batch disposal during an ignored collection cancellation cannot start a write', async () => {
+    let release;
+    const controller = new AbortController();
+    const host = installHost({ routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute(REPORT),
+        '/api/characters/all': () => new Promise(resolve => { release = () => resolve(jsonRoute([])()); }),
+    } });
+    try {
+        const { showBulkImport } = await import('../client/intake.js?batch-cancel');
+        const running = showBulkImport(host.container, [{ item: CARD, source: BYTE_SOURCE }], () => {}, { signal: controller.signal });
+        await waitFor(() => release, 'collection check did not start');
+        controller.abort();
+        release();
+        await running;
+        assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+    } finally {
+        host.restore();
+    }
+});
+
+test('a completed old direct import reports its receipt without appending into a newer intake', async () => {
+    let releaseImport;
+    const receipts = [];
+    const host = installHost({ routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute(REPORT),
+        '/api/characters/import': (_options, stored) => new Promise(resolve => {
+            releaseImport = () => {
+                stored.push({ avatar: 'saved.png', name: 'Seraphina', data: {} });
+                resolve(jsonRoute({ file_name: 'saved' })());
+            };
+        }),
+    } });
+    try {
+        const { showIntake } = await import('../client/intake.js?late-receipt');
+        const first = showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, {
+            direct: true,
+            onImported: receipt => receipts.push(receipt),
+        });
+        await waitFor(() => releaseImport, 'import did not start');
+        assert.equal(host.container.querySelector('.sbbs-back').disabled, true);
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+        await settle(host.container);
+        releaseImport();
+        await first;
+        assert.equal(receipts.length, 1);
+        assert.equal(receipts[0].committed, true);
+        assert.equal(host.container.querySelector('.sbbs-undo-import'), null);
+        assert.equal(host.container.querySelectorAll('.sbbs-intake-title').length, 1);
+        assert.equal(host.container.querySelectorAll('.sbbs-import').length, 1);
+    } finally {
+        host.restore();
+    }
+});
+
+test('Stop after current card retains completed rows and Undo without starting the next card', async () => {
+    let releaseImport;
+    let backs = 0;
+    const host = installHost({ routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute(REPORT),
+        '/api/characters/import': (_options, stored) => new Promise(resolve => {
+            releaseImport = () => {
+                stored.push({ avatar: 'saved.png', name: 'Seraphina', data: {} });
+                resolve(jsonRoute({ file_name: 'saved' })());
+            };
+        }),
+    } });
+    try {
+        const { showBulkImport } = await import('../client/intake.js?stop-batch');
+        const running = showBulkImport(host.container, [
+            { item: CARD, source: BYTE_SOURCE },
+            { item: { id: 'two', name: 'Second' }, source: BYTE_SOURCE },
+        ], () => { backs++; });
+        await waitFor(() => releaseImport, 'first import did not start');
+        const stop = host.container.querySelector('.sbbs-back');
+        assert.match(stop.textContent, /Stop after current card/);
+        stop.click();
+        assert.equal(backs, 0);
+        releaseImport();
+        await running;
+        assert.match(host.container.querySelector('.sbbs-state').textContent, /Stopped\. Imported 1 card\. 1 not started/);
+        assert.equal(host.calls.filter(call => call.path.endsWith('/card')).length, 1);
+        const undo = host.container.querySelector('.sbbs-undo-import');
+        assert.equal(undo.hidden, false);
+        assert.equal(undo.disabled, false);
+        assert.equal(host.dom.window.document.activeElement, stop);
+        undo.click();
+        await waitFor(() => /Removed 1 of 1 imported card/.test(host.container.querySelector('.sbbs-state').textContent), 'stopped batch did not undo');
+        assert.equal(host.stored.length, 0);
+    } finally {
+        host.restore();
+    }
+});
+
+test('failed-only retry does not reimport successful rows and a supplied start policy waits', async () => {
+    let failSecond = true;
+    let secondDownloads = 0;
+    const host = installHost({ routes: {
+        '/card': options => {
+            const { id } = JSON.parse(options.body);
+            if (id === 'two') {
+                secondDownloads++;
+                if (failSecond) {
+                    failSecond = false;
+                    return jsonRoute({ error: 'source_busy' }, 503)();
+                }
+            }
+            return new Response(PNG_BYTES);
+        },
+        '/inspect': options => {
+            const report = structuredClone(REPORT);
+            report.inside.name = options.body.name.includes('two') ? 'Second' : 'First';
+            return jsonRoute(report)();
+        },
+        '/api/characters/import': (options, stored) => {
+            const name = options.body.get('avatar').name.includes('two') ? 'Second' : 'First';
+            stored.push({ name, avatar: `${name}.png`, data: {} });
+            return jsonRoute({ file_name: name })();
+        },
+    } });
+    try {
+        const { showBulkImport } = await import('../client/intake.js?retry-batch');
+        await showBulkImport(host.container, [
+            { item: { id: 'one', name: 'First' }, source: BYTE_SOURCE },
+            { item: { id: 'two', name: 'Second' }, source: BYTE_SOURCE },
+        ], () => {}, { autoStart: false });
+        assert.equal(host.calls.length, 0);
+        host.container.querySelector('.sbbs-bulk-start').click();
+        const retry = host.container.querySelector('.sbbs-bulk-retry');
+        await waitFor(() => !retry.hidden && !retry.disabled, 'failed row did not become retryable');
+        assert.equal(host.calls.filter(call => call.path === '/api/characters/import').length, 1);
+        retry.click();
+        await waitFor(() => /Imported 2 cards\./.test(host.container.querySelector('.sbbs-state').textContent), 'failed-only retry did not finish');
+        assert.equal(secondDownloads, 2);
+        assert.equal(host.calls.filter(call => call.path === '/api/characters/import').length, 2);
+        assert.deepEqual(host.stored.map(entry => entry.name), ['First', 'Second']);
+    } finally {
+        host.restore();
+    }
+});
+
+test('reviewing a skipped batch card preserves other results and restores focus on return', async () => {
+    const host = installHost({
+        characters: [{ name: 'Seraphina', avatar: 'old.png', data: {} }],
+        routes: {
+            '/card': () => new Response(PNG_BYTES),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+    try {
+        const { showBulkImport } = await import('../client/intake.js?batch-review');
+        await showBulkImport(host.container, [{ item: CARD, source: BYTE_SOURCE }], () => {});
+        const row = host.container.querySelector('.sbbs-bulk-row');
+        const reviewButton = row.querySelector('.sbbs-bulk-review-card');
+        reviewButton.click();
+        const review = host.container.querySelector('.sbbs-bulk-review');
+        await waitFor(() => review.querySelector('.sbbs-intake-choice'), 'batch review did not render');
+        await settle(review);
+        assert.equal(host.container.querySelector('.sbbs-bulk').hidden, true);
+        assert.equal(host.container.querySelector('.sbbs-back'), review.querySelector('.sbbs-back'), 'Esc must find the review Back first');
+        review.querySelector('.sbbs-back').click();
+        assert.equal(host.container.querySelector('.sbbs-bulk').hidden, false);
+        assert.equal(host.container.querySelector('.sbbs-bulk-row'), row, 'the batch DOM and its results survive');
+        assert.equal(host.dom.window.document.activeElement, reviewButton);
+        assert.equal(host.calls.filter(call => call.path.endsWith('/card')).length, 1, 'review reuses already-downloaded bytes');
+    } finally {
+        host.restore();
+    }
+});
+
+test('incomplete batch inspections wait for review even under a clean policy', async () => {
+    const report = structuredClone(REPORT);
+    report.inside.scan = { complete: false, reasons: ['nodes'] };
+    const host = installHost({ routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute(report),
+    } });
+    try {
+        const { showBulkImport } = await import('../client/intake.js?batch-incomplete');
+        await showBulkImport(host.container, [{ item: CARD, source: BYTE_SOURCE }], () => {}, { mode: 'clean' });
+        assert.match(host.container.querySelector('.sbbs-state').textContent, /1 card needs inspection review/);
+        assert.equal(host.calls.some(call => call.path.endsWith('/clean') || call.path === '/api/characters/import'), false);
+        assert.equal(host.container.querySelector('.sbbs-bulk-review-card').disabled, false);
+    } finally {
+        host.restore();
+    }
+});
+
+test('BotBooru intake errors offer the uniquely named inline account control', async () => {
+    const host = installHost({ routes: {
+        '/card': jsonRoute({ error: 'botbooru_login_required' }, 401),
+        '/account/status': jsonRoute({ loggedIn: false }),
+    } });
+    try {
+        const { showIntake } = await import('../client/intake.js?inline-botbooru');
+        await showIntake(host.container, { card: CARD, source: { id: 'botbooru', label: 'BotBooru' } }, () => {});
+        assert.match(host.container.querySelector('.sbbs-state').textContent, /Log in to BotBooru below/);
+        assert.ok(host.container.querySelector('[id^="sbbs_intake_botbooru_"]'));
+        await tick();
+    } finally {
+        host.restore();
+    }
+});
+
+test('Janny action and restoration failures keep their actionable error rather than the native failure', async () => {
+    for (const code of ['janny_admin_required', 'janny_browser_request_failed', 'janny_restore_failed']) {
+        const host = installHost({ routes: {
+            '/api/content/importURL': () => new Response('', { status: 502 }),
+            '/url-card': jsonRoute({ error: code }, 503),
+        } });
+        try {
+            const { showIntake } = await import('../client/intake.js?janny-action-errors');
+            const { intakeErrorMessage } = await import('../client/copy.js');
+            await showIntake(host.container, { card: JANNY_CARD, source: JANNY_SOURCE }, () => {});
+            assert.equal(host.container.querySelector('.sbbs-state').textContent, intakeErrorMessage({ code }, 'jannyai'));
+            assert.doesNotMatch(host.container.querySelector('.sbbs-state').textContent, /Cloudflare may be blocking/);
+        } finally {
+            host.restore();
+        }
+    }
+});
+
+test('a duplicate appearing just before automatic commit opens review rather than importing', async () => {
+    let checks = 0;
+    const installed = { name: 'Seraphina', avatar: 'newly-added.png', data: {} };
+    const host = installHost({ characters: [installed], routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute(REPORT),
+        '/api/characters/all': () => jsonRoute(++checks === 1 ? [] : [installed])(),
+    } });
+    try {
+        const { showIntake } = await import('../client/intake.js?late-duplicate-review');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, { direct: true });
+        assert.ok(host.container.querySelector('.sbbs-intake-choice'));
+        assert.match(host.container.querySelector('.sbbs-intake-duplicate').textContent, /Already in your collection/);
+        assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+        assert.equal(host.calls.filter(call => call.path.endsWith('/card')).length, 1);
+    } finally {
+        await settle(host.container);
+        host.restore();
+    }
+});
+
+test('an import added from batch review remains in the batch Undo list', async () => {
+    const host = installHost({
+        characters: [{ name: 'Seraphina', avatar: 'original.png', data: {} }],
+        routes: {
+            '/card': () => new Response(PNG_BYTES),
+            '/inspect': jsonRoute(REPORT),
+        },
+    });
+    try {
+        const { showBulkImport } = await import('../client/intake.js?batch-review-import');
+        await showBulkImport(host.container, [{ item: CARD, source: BYTE_SOURCE }], () => {});
+        host.container.querySelector('.sbbs-bulk-review-card').click();
+        const review = host.container.querySelector('.sbbs-bulk-review');
+        await waitFor(() => review.querySelector('.sbbs-import'), 'review actions did not render');
+        await settle(review);
+        review.querySelector('.sbbs-import').click();
+        await waitFor(() => review.querySelector('.sbbs-undo-import'), 'review import did not settle');
+        review.querySelector('.sbbs-back').click();
+        const undo = host.container.querySelector('.sbbs-bulk .sbbs-undo-import');
+        assert.equal(undo.hidden, false);
+        assert.equal(undo.disabled, false);
+        assert.match(host.container.querySelector('.sbbs-bulk .sbbs-state').textContent, /Imported 1 card\./);
+        undo.click();
+        await waitFor(() => host.stored.length === 1 && undo.hidden, 'review import was not undone from the batch');
+        assert.equal(host.stored[0].avatar, 'original.png', 'the pre-existing copy must remain untouched');
+    } finally {
+        host.restore();
+    }
+});
+
+test('cleaning refusal is visible, disables further cleaning and never imports', async () => {
+    const host = installHost({ routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute(REPORT),
+        '/clean': jsonRoute({ error: 'clean_incomplete' }, 422),
+    } });
+    try {
+        const { showIntake } = await import('../client/intake.js?clean-incomplete');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {});
+        await settle(host.container);
+        const clean = host.container.querySelector('.sbbs-import-clean');
+        clean.click();
+        await waitFor(() => /not all contents could be checked/.test(host.container.querySelector('.sbbs-import-status').textContent), 'cleaning refusal was not reported');
+        assert.equal(clean.disabled, true);
+        assert.equal(host.container.querySelector('.sbbs-import').disabled, false);
+        assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+    } finally {
+        host.restore();
+    }
+});
+
+test('an empty incomplete report never claims that contents are absent or nothing needs cleaning', async () => {
+    const host = installHost({ routes: {
+        '/card': () => new Response(PNG_BYTES),
+        '/inspect': jsonRoute({ inside: { name: 'Unknown card', scan: { complete: false, reasons: ['nodes'] } } }),
+    } });
+    try {
+        const { showIntake } = await import('../client/intake.js?empty-incomplete');
+        await showIntake(host.container, { card: CARD, source: BYTE_SOURCE }, () => {}, { direct: true });
+        assert.match(host.container.querySelector('.sbbs-intake-scan-warning').textContent, /Not fully inspected/);
+        assert.doesNotMatch(host.container.textContent, /No lorebook, scripts|nothing to remove/);
+        assert.equal(host.calls.some(call => call.path === '/api/characters/import'), false);
+    } finally {
+        await settle(host.container);
         host.restore();
     }
 });

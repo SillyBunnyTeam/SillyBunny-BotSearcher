@@ -159,6 +159,21 @@ test('the image is spliced, not re-encoded', () => {
     assert.ok(cleaned.subarray(0, 8).equals(SIGNATURE));
 });
 
+test('indexed avatars keep their palette, transparency and pixels through cleaning', () => {
+    const header = chunk('IHDR', Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 0, 0, 0]));
+    const palette = chunk('PLTE', Buffer.from([255, 0, 0, 0, 0, 255]));
+    const transparency = chunk('tRNS', Buffer.from([0, 255]));
+    const image = chunk('IDAT', zlib.deflateSync(Buffer.from([0, 0x40])));
+    const card = cardChunk('chara', dirtyCard());
+    const original = Buffer.concat([SIGNATURE, header, palette, transparency, card, image, IEND]);
+    const cleaned = cleanCard(original).buffer;
+    for (const piece of [header, palette, transparency, image, IEND]) {
+        assert.ok(cleaned.includes(piece));
+    }
+    assert.deepEqual(cardInside(cleaned).privateInfo, []);
+    assert.throws(() => cleanCard(Buffer.concat([SIGNATURE, header, card, image, IEND])), { code: 'png_malformed' });
+});
+
 // ---- the trap ----
 
 test('both card chunks are rewritten so no stale copy survives', () => {
@@ -214,4 +229,78 @@ test('bytes that are not a card are refused rather than cleaned', () => {
     for (const bytes of [Buffer.from('not a card'), Buffer.alloc(0), pngWith(textChunk('Comment', 'no card here'))]) {
         assert.throws(() => cleanCard(bytes), CardBytesError);
     }
+});
+
+test('the small lorebook that previously retained an inspected email now refuses partial cleaning', () => {
+    const entries = Array.from({ length: 10_000 }, () => ({}));
+    entries[0].content = 'private@example.test';
+    const card = { spec: 'chara_card_v2', data: { name: 'Budget', character_book: { entries } } };
+    const json = Buffer.from(JSON.stringify(card));
+    assert.ok(json.length < 31_000, 'the regression does not depend on a large file');
+
+    for (const bytes of [json, pngWith(cardChunk('chara', card))]) {
+        const original = Buffer.from(bytes);
+        assert.ok(cardInside(bytes).privateInfo.some((hit) => hit.kind === 'email'));
+        assert.throws(() => cleanCard(bytes), { name: 'CardBytesError', code: 'clean_incomplete', detail: 'node_limit' });
+        assert.ok(bytes.equals(original), 'refusal leaves the original file untouched');
+    }
+});
+
+test('cleaning refuses over-wide retained objects rather than skipping properties', () => {
+    for (const count of [255, 256, 257]) {
+        const fields = Object.fromEntries(Array.from({ length: count }, (_, index) => [`field${index}`, '']));
+        fields[`field${count - 1}`] = 'private@example.test';
+        for (const card of [
+            { name: '', description: '', character_book: { entries: [{ nested: fields }] } },
+            { spec: 'chara_card_v2', data: { name: '', extensions: { depth_prompt: fields } } },
+            { spec: 'chara_card_v3', data: { name: '' }, extra: fields },
+        ]) {
+            const bytes = Buffer.from(JSON.stringify(card));
+            if (count > 256) {
+                assert.throws(() => cleanCard(bytes), { code: 'clean_incomplete', detail: 'child_limit' });
+            } else {
+                const cleaned = cleanCard(bytes);
+                assert.ok(!cleaned.buffer.includes(Buffer.from('private@example.test')));
+                assert.ok(cleaned.buffer.includes(Buffer.from('[removed]')));
+            }
+        }
+    }
+});
+
+test('cleaning counts the exact object-node boundary without rejecting a finished traversal', () => {
+    for (const total of [9999, 10_000, 10_001]) {
+        const leaves = total - 42; // Root, one outer array and 40 inner arrays.
+        const groups = Array.from({ length: 40 }, (_, index) =>
+            Array.from({ length: Math.floor(leaves / 40) + (index < leaves % 40 ? 1 : 0) }, () => ({})));
+        groups[0][0].content = 'private@example.test';
+        const bytes = Buffer.from(JSON.stringify({ name: '', description: '', groups }));
+        if (total > 10_000) {
+            assert.throws(() => cleanCard(bytes), { code: 'clean_incomplete', detail: 'node_limit' });
+        } else {
+            const cleaned = cleanCard(bytes);
+            assert.ok(!cleaned.buffer.includes(Buffer.from('private@example.test')));
+            assert.equal(JSON.parse(cleaned.buffer).groups[0][0].content, '[removed]');
+        }
+    }
+});
+
+test('cleaning still scans every array element and the text beyond inspection prefixes', () => {
+    const card = {
+        name: '',
+        description: ' '.repeat(1024 * 1024) + 'private@example.test',
+        alternate_greetings: [...Array(300).fill(''), 'private@example.test'],
+    };
+    const bytes = Buffer.from(JSON.stringify(card));
+    assert.equal(cardInside(bytes).scan.complete, false);
+    const cleaned = JSON.parse(cleanCard(bytes).buffer);
+    assert.equal(cleaned.description, ' '.repeat(1024 * 1024) + '[removed]');
+    assert.equal(cleaned.alternate_greetings.length, 301);
+    assert.equal(cleaned.alternate_greetings[300], '[removed]');
+});
+
+test('oversized blocks removed by the profile do not prevent a complete clean', () => {
+    const block = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`field${index}`, 'private@example.test']));
+    const card = { spec: 'chara_card_v2', data: { name: 'Kept', extra: block, extensions: { unknown: block } } };
+    const cleaned = cleanCard(Buffer.from(JSON.stringify(card)));
+    assert.deepEqual(JSON.parse(cleaned.buffer), { spec: 'chara_card_v2', data: { name: 'Kept', extensions: {} } });
 });

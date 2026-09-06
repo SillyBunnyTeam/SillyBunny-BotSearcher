@@ -296,9 +296,19 @@ export function searchErrorMessage(error, sourceLabel) {
         case 'botbooru_auth_unavailable':
             return 'BotBooru account access is unavailable. Try again shortly.';
         case 'account_profile_required':
-            return 'Select a SillyBunny profile before using a BotBooru account.';
+            return 'Select a SillyBunny profile before using source accounts.';
         case 'botbooru_account_changed':
             return 'The BotBooru account changed during this request. Try again.';
+        case 'saucepan_login_required':
+        case 'saucepan_session_expired':
+        case 'saucepan_account_changed':
+        case 'saucepan_auth_unavailable':
+        case 'janny_admin_required':
+        case 'janny_browser_unavailable':
+        case 'janny_login_required':
+        case 'janny_browser_request_failed':
+        case 'janny_restore_failed':
+            return accountErrorMessage(error, sourceLabel);
         case 'timeout':
             return `${sourceLabel} did not respond in time. Try again.`;
         case 'rate_limited':
@@ -339,6 +349,17 @@ export function detailErrorMessage(error, sourceLabel) {
             return 'NSFW is disabled for this BotBooru account. Search again in SFW mode.';
         case 'botbooru_account_changed':
             return 'The BotBooru account changed after this result loaded. Search again.';
+        case 'account_profile_required':
+        case 'saucepan_login_required':
+        case 'saucepan_session_expired':
+        case 'saucepan_account_changed':
+        case 'saucepan_auth_unavailable':
+        case 'janny_admin_required':
+        case 'janny_browser_unavailable':
+        case 'janny_login_required':
+        case 'janny_browser_request_failed':
+        case 'janny_restore_failed':
+            return accountErrorMessage(error, sourceLabel);
         case 'timeout':
             return `${sourceLabel} did not respond in time.`;
         case 'rate_limited':
@@ -350,8 +371,8 @@ export function detailErrorMessage(error, sourceLabel) {
     }
 }
 
-export function accountErrorMessage(error) {
-    switch (error?.code) {
+export function accountErrorMessage(error, sourceLabel = '') {
+    switch (error?.code ?? error?.message) {
         case 'botbooru_invalid_credentials':
             return 'BotBooru did not accept that username and password.';
         case 'botbooru_login_required':
@@ -363,7 +384,7 @@ export function accountErrorMessage(error) {
         case 'botbooru_auth_unavailable':
             return 'BotBooru account access is unavailable. Try again shortly.';
         case 'account_profile_required':
-            return 'Select a SillyBunny profile before logging in to BotBooru.';
+            return 'Select a SillyBunny profile before using source accounts.';
         case 'botbooru_account_changed':
             return 'The BotBooru account changed during this request. Try again.';
         case 'bad_account_request':
@@ -384,15 +405,44 @@ export function accountErrorMessage(error) {
             return 'The JannyAI browser bridge is unavailable. Install Playwright and Chromium on the SillyBunny host.';
         case 'janny_login_required':
             return 'Finish the JannyAI login and Cloudflare check in the browser window first.';
+        case 'janny_admin_required':
+            return 'Only a SillyBunny administrator can use the JannyAI browser session. Sign in as an administrator or ask the server owner to import the card.';
+        case 'janny_browser_request_failed':
+            return 'The JannyAI browser request failed. Check the browser window on the SillyBunny server for a login or Cloudflare check, then refresh status before trying again.';
+        case 'janny_restore_failed':
+            return 'JannyAI account settings could not be restored after the import attempt. Check the API and generation settings in the browser window on the SillyBunny server before importing again.';
+        case 'timeout':
+            return sourceLabel === 'JannyAI'
+                ? 'The JannyAI browser request timed out. Check the browser window on the SillyBunny server, then refresh status before trying again.'
+                : 'The account request did not finish in time. Try again shortly.';
         case 'rate_limited':
             return 'Too many login attempts. Wait before trying again.';
         default:
-            return 'Could not update the BotBooru account. Try again.';
+            return sourceLabel === 'JannyAI'
+                ? 'Could not update the JannyAI browser session. Refresh status before trying again.'
+                : `Could not update the ${sourceLabel ? `${sourceLabel} account` : 'account'}. Try again.`;
     }
 }
 
 export function importErrorMessage(error) {
-    switch (error?.message) {
+    if (error?.name === 'TimeoutError') {
+        return 'The request took too long. Try again.';
+    }
+    switch (error?.code ?? error?.message) {
+        case 'generation_active':
+            return 'Stop the current reply before importing or replacing a character.';
+        case 'collection_unavailable':
+            return 'Your collection could not be checked. Try again before importing.';
+        case 'duplicate_detected':
+            return 'A copy with this name appeared while preparing the import. Review it before adding another.';
+        case 'character_changed':
+            return 'The installed copy changed after this review. Reopen the review before replacing it.';
+        case 'character_missing':
+            return 'The selected installed copy no longer exists. Reopen the review.';
+        case 'character_unverified':
+            return 'The installed copy could not be verified. Nothing was replaced.';
+        case 'clean_incomplete':
+            return 'Clean import stopped because not all contents could be checked. Nothing was imported.';
         case 'import_url_rejected':
             return 'BotSearcher rejected the download link.';
         case 'import_unsupported':
@@ -417,9 +467,17 @@ export function importErrorMessage(error) {
 
 /** Removing a character that an import just added. */
 export function undoErrorMessage(error) {
-    switch (error?.message) {
+    switch (error?.code ?? error?.message) {
         case 'character_missing':
             return 'The character is no longer in your collection.';
+        case 'character_changed':
+            return 'This character changed after import. Undo will not delete your modified copy.';
+        case 'character_unverified':
+            return 'The imported file could not be verified. Undo will not delete an unverified copy.';
+        case 'generation_active':
+            return 'Stop the current reply before undoing an import.';
+        case 'chat_close_failed':
+            return 'The active chat could not be closed safely. Save or stop the chat, then try Undo again.';
         default:
             return 'The character could not be removed. Delete it from the character list.';
     }
@@ -429,7 +487,7 @@ export function undoErrorMessage(error) {
  * The closing line of a bulk import: what was added, what was skipped because
  * it was already installed, and what failed. Zero counts are left out.
  */
-export function bulkImportSummary({ imported, installed, failed }) {
+export function bulkImportSummary({ imported, installed, failed, unknown = 0, review = 0, pending = 0, uncertain = 0, replaced = 0, stopped = false }) {
     const parts = [];
     if (installed > 0) {
         parts.push(`${installed} already in your collection`);
@@ -437,7 +495,22 @@ export function bulkImportSummary({ imported, installed, failed }) {
     if (failed > 0) {
         parts.push(`${failed} failed`);
     }
-    const head = `Imported ${formatCount(imported, 'card')}.`;
+    if (unknown > 0) {
+        parts.push(`${unknown} collection ${unknown === 1 ? 'check' : 'checks'} unavailable`);
+    }
+    if (review > 0) {
+        parts.push(`${review} ${review === 1 ? 'card needs' : 'cards need'} inspection review`);
+    }
+    if (uncertain > 0) {
+        parts.push(`${uncertain} ${uncertain === 1 ? 'import outcome' : 'import outcomes'} unconfirmed`);
+    }
+    if (replaced > 0) {
+        parts.push(`${replaced} replaced`);
+    }
+    if (pending > 0) {
+        parts.push(`${pending} not started`);
+    }
+    const head = `${stopped ? 'Stopped. ' : ''}Imported ${formatCount(imported, 'card')}.`;
     return parts.length === 0 ? head : `${head} ${list(parts)}.`;
 }
 
@@ -600,6 +673,14 @@ export function intakeSections(inside) {
     };
     const row = (label, value, tone) => ({ label, value, tone });
 
+    if (inside.scan?.complete !== true) {
+        section('Inspection', [row(
+            'Contents check',
+            'Not fully inspected. Counts and findings may be incomplete. Token counts are measured separately.',
+            'warn',
+        )]);
+    }
+
     // Things that change model input or message processing on their own.
     const automation = [];
     if (inside.regexScripts > 0) {
@@ -624,12 +705,12 @@ export function intakeSections(inside) {
     }
     if (inside.extensions?.unknown?.length > 0) {
         automation.push(row(
-            'Unrecognized extension data',
+            'Unrecognised extension data',
             inside.extensions.unknown.join(', '),
             'warn',
         ));
     }
-    section('Behavior', automation);
+    section('Behaviour', automation);
 
     // Things that are simply the character.
     const content = [];
@@ -666,9 +747,11 @@ export function intakeSections(inside) {
 }
 
 function macroSummary(macros) {
-    const names = (macros.names ?? []).slice(0, 6).map((name) => `{{${name}}}`);
+    const identifiers = (Array.isArray(macros.names) ? macros.names : [])
+        .filter((name) => typeof name === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name));
+    const names = identifiers.slice(0, 6).map((name) => `{{${name}}}`);
     const count = formatCount(macros.count, 'use');
-    return names.length === 0 ? count : `${count}: ${names.join(', ')}${macros.names.length > names.length ? '...' : ''}`;
+    return names.length === 0 ? count : `${count}: ${names.join(', ')}${identifiers.length > names.length ? '...' : ''}`;
 }
 
 function htmlSummary(html) {
@@ -763,8 +846,16 @@ export function duplicateMessage(match) {
     if (match.unknown === true) {
         return 'BotSearcher could not read your collection, so it cannot say whether this card is already in it.';
     }
+    if (Array.isArray(match.matches)) {
+        return match.matches.length === 1
+            ? duplicateMessage(match.matches[0])
+            : `${formatCount(match.matches.length, 'installed copy', 'installed copies')} have this name. Choose a copy below to compare or replace.`;
+    }
+    if (!Array.isArray(match.differences)) {
+        return `Already in your collection as "${match.name}". Its contents could not be compared.`;
+    }
     if (match.differences.length === 0) {
-        return `Already in your collection as "${match.name}". The contents compared here are identical.`;
+        return `Already in your collection as "${match.name}". The compared fields and counts match.`;
     }
     return `Already in your collection as "${match.name}", with a different ${list(match.differences)}.`;
 }
@@ -774,6 +865,9 @@ export function cleanPlan(inside) {
     if (!inside || typeof inside !== 'object') {
         return [];
     }
+    if (inside.scan?.complete !== true) {
+        return ['regex scripts, unrecognised extension blocks, fields outside the card format and matching personal details where present'];
+    }
 
     const items = [];
     if (inside.regexScripts > 0) {
@@ -781,7 +875,7 @@ export function cleanPlan(inside) {
     }
     const unknown = inside.extensions?.unknown ?? [];
     if (unknown.length > 0) {
-        items.push(`${formatCount(unknown.length, 'unrecognized extension block')} (${unknown.slice(0, 3).join(', ')})`);
+        items.push(`${formatCount(unknown.length, 'unrecognised extension block')} (${unknown.slice(0, 3).join(', ')})`);
     }
     const unrecognized = (inside.malformed ?? []).filter((problem) => problem.problem === 'is not a field in this card format');
     if (unrecognized.length > 0) {
@@ -805,11 +899,19 @@ export function cleanKeeps(inside) {
     if (inside?.hasSystemPrompt) {
         keeps.push('the system prompt');
     }
+    if (inside?.hasPostHistoryInstructions) {
+        keeps.push('post-history instructions');
+    }
     if (inside?.hasDepthPrompt) {
         keeps.push('the depth prompt');
     }
-    if (inside?.html?.count > 0 && !inside.html.hasScriptOrIframe) {
-        keeps.push('HTML formatting');
+    if (inside?.macros?.count > 0) {
+        keeps.push('macros in retained fields');
+    }
+    if (inside?.html?.hasScriptOrIframe) {
+        keeps.push('embedded scripts or iframes in retained fields');
+    } else if (inside?.html?.count > 0) {
+        keeps.push('HTML formatting in retained fields');
     }
     return keeps;
 }
@@ -873,7 +975,24 @@ export function tokenFootprint(counts) {
 }
 
 export function intakeErrorMessage(error, sourceId) {
-    switch (error?.message ?? error?.code) {
+    if (error?.name === 'TimeoutError') {
+        return 'The card request took too long. Try again.';
+    }
+    switch (error?.code ?? error?.message) {
+        case 'botbooru_login_required':
+            return 'Log in to BotBooru below, then retry this card.';
+        case 'botbooru_session_expired':
+            return 'Your BotBooru login expired. Log in below, then retry this card.';
+        case 'botbooru_nsfw_disabled':
+            return 'Enable NSFW for the BotBooru account below, then retry this card.';
+        case 'janny_admin_required':
+            return 'JannyAI browser import requires a SillyBunny administrator. Ask an administrator or inspect a downloaded card file.';
+        case 'janny_browser_request_failed':
+            return 'The JannyAI browser request failed. Check the browser session, then retry this card.';
+        case 'janny_restore_failed':
+            return 'JannyAI could not restore its account settings after capture. Check those settings before retrying.';
+        case 'clean_incomplete':
+            return 'The card was not fully inspected, so clean import is unavailable.';
         case 'native_download_failed':
             if (sourceId === 'jannyai') {
                 return 'SillyBunny could not download this JannyAI card. Cloudflare may be blocking the native import.';
@@ -912,3 +1031,73 @@ export function intakeErrorMessage(error, sourceId) {
             return 'The card could not be inspected.';
     }
 }
+
+/** Intake-only controls shared by single-card and batch review. */
+export const INTAKE_COPY = Object.freeze({
+    cleanUnavailable: 'Clean import is unavailable until all contents can be inspected.',
+    replaced: 'Replaced',
+    openFailed: 'The character could not be opened. Refresh your collection and try again.',
+    importTarget: 'Import destination',
+    addCopy: 'Add a new copy',
+    replaceCopy: 'Replace an installed copy',
+    installedCopy: 'Installed copy',
+    replaceWarning: 'Replacement overwrites this copy. There is no Undo for a replacement. Chats are kept.',
+    revisionUnknown: 'This installed file could not be verified. Replacement is unavailable; you can still add a new copy.',
+    comparing: 'Comparing the installed copy...',
+    importCopyExactly: 'Import a copy exactly',
+    replaceExactly: 'Replace exactly',
+    replaceClean: 'Clean and replace',
+    undoUnavailable: 'Undo is unavailable because this imported file could not be verified.',
+    undone: 'Import undone.',
+    nativeFinished: 'Check collection',
+    batchStart: 'Start import',
+    batchContinue: 'Continue remaining',
+    batchStop: 'Stop after current card',
+    batchStopping: 'Stopping after current card...',
+    batchRetry: 'Retry failed cards',
+    batchReview: 'Review card',
+    batchNotStarted: 'Not started',
+    batchInspectionUnknown: 'Not fully inspected. Review this card before importing.',
+    batchExactPolicy: 'Imports exactly as downloaded. Existing copies, unavailable collection checks and incomplete inspections wait for review.',
+    batchCleanPolicy: 'Uses clean import. Existing copies, unavailable collection checks and incomplete inspections wait for review.',
+});
+
+export function intakeScanWarning(inside) {
+    if (inside?.scan?.complete === true) {
+        return '';
+    }
+    return inside?.scan?.complete === false
+        ? 'Not fully inspected. Some contents were not checked. Review the reported findings before importing exactly; clean import is unavailable.'
+        : 'Inspection coverage was not reported. Unreported contents are unknown, not absent. Review is required and clean import is unavailable.';
+}
+
+export function intakeCompletionMessage(receipt) {
+    if (receipt?.committed !== true) {
+        return 'The host did not confirm this import. Check your collection before trying again. Undo is unavailable.';
+    }
+    const parts = [receipt.replaced ? 'Replaced. There is no Undo for this replacement.' : 'Imported.'];
+    if (!receipt.refreshed) {
+        parts.push('The character list could not refresh. Reopen it to see the result.');
+    }
+    if (!receipt.replaced && !receipt.canUndo) {
+        parts.push(INTAKE_COPY.undoUnavailable);
+    }
+    return parts.join(' ');
+}
+
+export const NAMED_SEARCH_COPY = Object.freeze({
+    title: 'Named searches',
+    optIn: 'Save named searches in SillyBunny profile settings',
+    privacy: 'Separate from search history. Names, search terms and filter values may be included in profile backups. Do not include private details in them. Card URLs, login fields and card contents are not saved. Turning this off clears all named searches.',
+    name: 'Search name',
+    save: 'Save search',
+    load: 'Load search',
+    remove: 'Delete search',
+    clear: 'Clear all named searches',
+    empty: 'No named searches',
+    disabled: 'Turn on named searches under Extensions > BotSearcher to save a search.',
+    invalid: 'Enter a name and a search without URLs or login details.',
+    full: 'You can save up to 20 named searches. Delete one or replace an existing name.',
+    saved: 'Search saved.',
+    removed: 'Named search deleted.',
+});

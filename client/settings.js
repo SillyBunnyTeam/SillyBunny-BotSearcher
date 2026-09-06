@@ -14,7 +14,7 @@
  */
 
 import { SETTINGS_KEY, DOM_IDS, EXTENSION_NAME } from './constants.js';
-import { IMAGE_MODES, REPOSITORY_URL, VERSION } from '../shared/schema.js';
+import { FILTER_LIMITS, IMAGE_MODES, REPOSITORY_URL, VERSION } from '../shared/schema.js';
 import { el, setText } from './render.js';
 import {
     AVAILABILITY,
@@ -26,19 +26,26 @@ import {
 } from './api.js';
 import {
     getBotbooruAccount,
+    getSaucepanAccount,
     loginBotbooruAccount,
+    loginSaucepanAccount,
     logoutBotbooruAccount,
+    logoutSaucepanAccount,
     refreshBotbooruAccount,
+    refreshSaucepanAccount,
     setBotbooruNsfw,
+    setSaucepanToken,
     subscribeBotbooruAccount,
+    subscribeSaucepanAccount,
 } from './account.js';
-import { accountErrorMessage, compareReleaseVersions, serverPluginUpdateErrorMessage } from './copy.js';
+import { accountErrorMessage, compareReleaseVersions, NAMED_SEARCH_COPY, serverPluginUpdateErrorMessage } from './copy.js';
 
 const PAGE_SIZES = [12, 24, 48];
 
 const MAX_ENABLED_SOURCES = 64;
 const MAX_SORTS = 64;
 const MAX_SOURCE_OPTIONS = 64;
+const settingsListeners = new Set();
 
 const AVAILABLE_IMAGE_MODES = IMAGE_MODES;
 
@@ -71,6 +78,9 @@ const DEFAULTS = Object.freeze({
     saveQueryHistory: false,
     /** Most recent first. Search terms only — never a card name or a filter. */
     queryHistory: Object.freeze([]),
+    /** Named searches require their own opt-in, independent of query history. */
+    saveNamedSearches: false,
+    namedSearches: Object.freeze([]),
     _v: 4,
 });
 
@@ -79,6 +89,112 @@ export const MAX_QUERY_HISTORY = 20;
 
 /** Search terms are user text, so they are capped like any other stored string. */
 const MAX_QUERY_LENGTH = 128;
+export const MAX_NAMED_SEARCHES = 20;
+export const MAX_NAMED_SEARCH_NAME = 64;
+
+// Keep persistence allowlists explicit: server-only adapter modules must not
+// be imported by the browser. Regression tests check their declared choices.
+const NAMED_SEARCH_SORTS = {
+    botbooru: ['latest', 'curated', 'downloads', 'favorites', 'views', 'random'],
+    chub: ['default', 'download_count', 'star_count', 'n_favorites', 'rating', 'trending', 'trending_downloads',
+        'created_at', 'last_activity_at', 'newcomer', 'n_tokens', 'name', 'random'],
+    pygmalion: ['approved_at', 'trending', 'stars', 'downloads', 'views', 'chatCount', 'createdAt',
+        'updatedAt', 'token_count', 'display_name', 'random'],
+    risurealm: ['recommended', 'download', 'newest', 'trending'],
+    quillgen: ['default'],
+    wyvern: ['default'],
+    charactertavern: ['default'],
+    jannyai: ['relevant', 'newest', 'oldest', 'tokens_desc', 'tokens_asc'],
+    saucepan: ['default'],
+};
+const NAMED_SEARCH_FILTERS = {
+    botbooru: {
+        tags: 'tags', excludeTags: 'tags', writer: 'text', character: 'text', franchise: 'text',
+        minTokens: 'number', maxTokens: 'number', uploadedAfter: 'date', uploadedBefore: 'date', ocOnly: 'boolean',
+    },
+    chub: { tags: 'tags', excludeTags: 'tags', creator: 'text', minTokens: 'number', maxTokens: 'number' },
+};
+
+function namedSearchText(value, limit) {
+    if (typeof value !== 'string'
+        || /[\x00-\x1f\x7f]|[a-z][a-z\d+.-]*:\s*[/\\]|\/\/|www\.|\b(?:https?|ftps?|file|data|javascript|mailto):|\bbearer\s+\S+/i.test(value)) {
+        return null;
+    }
+    return value.trim().slice(0, limit);
+}
+
+function normalizeNamedSearch(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        return null;
+    }
+    const read = (key) => Object.hasOwn(entry, key) ? entry[key] : undefined;
+    const name = namedSearchText(read('name'), MAX_NAMED_SEARCH_NAME);
+    const query = namedSearchText(read('query') ?? '', MAX_QUERY_LENGTH);
+    const source = read('source');
+    if (!name || query === null || typeof source !== 'string'
+        || (source !== '__all__' && !Object.hasOwn(NAMED_SEARCH_SORTS, source))) {
+        return null;
+    }
+
+    const filters = {};
+    const declared = Object.hasOwn(NAMED_SEARCH_FILTERS, source) ? NAMED_SEARCH_FILTERS[source] : {};
+    for (const [key, type] of Object.entries(declared)) {
+        if (!read('filters') || !Object.hasOwn(entry.filters, key)) {
+            continue;
+        }
+        const value = entry.filters[key];
+        if (type === 'tags' && Array.isArray(value)) {
+            const tags = value.slice(0, FILTER_LIMITS.tagCount)
+                .map((tag) => namedSearchText(tag, FILTER_LIMITS.tagLength)).filter(Boolean);
+            if (tags.length > 0) {
+                filters[key] = [...new Set(tags)];
+            }
+        } else if (type === 'text') {
+            const text = namedSearchText(value, FILTER_LIMITS.textLength);
+            if (text) {
+                filters[key] = text;
+            }
+        } else if (type === 'number' && typeof value === 'number' && Number.isFinite(value)) {
+            filters[key] = Math.min(FILTER_LIMITS.numberMax, Math.max(FILTER_LIMITS.numberMin, Math.floor(value)));
+        } else if (type === 'boolean' && typeof value === 'boolean') {
+            filters[key] = value;
+        } else if (type === 'date' && typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            const date = new Date(`${value}T00:00:00.000Z`);
+            if (Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value) {
+                filters[key] = value;
+            }
+        }
+    }
+
+    const sorts = {};
+    if (read('sorts') && typeof entry.sorts === 'object' && !Array.isArray(entry.sorts)) {
+        for (const sourceId of Object.keys(NAMED_SEARCH_SORTS)) {
+            if (Object.hasOwn(entry.sorts, sourceId) && NAMED_SEARCH_SORTS[sourceId].includes(entry.sorts[sourceId])) {
+                sorts[sourceId] = entry.sorts[sourceId];
+            }
+        }
+    }
+    return {
+        name, query, source, filters,
+        sort: source !== '__all__' && NAMED_SEARCH_SORTS[source].includes(read('sort')) ? entry.sort : '',
+        sorts,
+        sfwOnly: read('sfwOnly') !== false,
+        hideAi: read('hideAi') === true,
+    };
+}
+
+function normalizeNamedSearches(entries) {
+    const result = [];
+    const names = new Set();
+    for (const raw of Array.isArray(entries) ? entries.slice(0, MAX_NAMED_SEARCHES) : []) {
+        const entry = normalizeNamedSearch(raw);
+        if (entry && !names.has(entry.name.toLowerCase())) {
+            names.add(entry.name.toLowerCase());
+            result.push(entry);
+        }
+    }
+    return result;
+}
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -93,19 +209,31 @@ export function getSettings() {
     const raw = store && typeof store === 'object' && Object.prototype.hasOwnProperty.call(store, SETTINGS_KEY)
         ? store[SETTINGS_KEY]
         : null;
-    let source = raw && typeof raw === 'object' ? raw : {};
-    const read = (key) => (Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
+    const settings = normalizeSettings(raw);
 
-    // Versions before opt-in history stored terms automatically. Remove those
-    // terms as soon as the upgraded extension reads the profile, rather than
-    // merely hiding them behind the new default.
-    if (read('saveQueryHistory') !== true && Object.prototype.hasOwnProperty.call(source, 'queryHistory')) {
-        source = { ...source, saveQueryHistory: false, queryHistory: [], _v: DEFAULTS._v };
-        store[SETTINGS_KEY] = source;
-        if (typeof ctx.saveSettingsDebounced === 'function') {
-            ctx.saveSettingsDebounced();
+    // Purge legacy history and unsafe named-search records from the profile,
+    // not just the returned view. Already-clean reads never schedule a save.
+    let repair = false;
+    for (const [flag, records] of [['saveQueryHistory', 'queryHistory'], ['saveNamedSearches', 'namedSearches']]) {
+        if (raw && Object.hasOwn(raw, records)) {
+            try {
+                repair ||= raw[flag] !== settings[flag]
+                    || JSON.stringify(raw[records]) !== JSON.stringify(settings[records]);
+            } catch {
+                repair = true;
+            }
         }
     }
+    if (repair) {
+        store[SETTINGS_KEY] = settings;
+        ctx.saveSettingsDebounced?.();
+    }
+    return settings;
+}
+
+function normalizeSettings(raw) {
+    const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const read = (key) => (Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
 
     const enabled = read('enabledSources');
     const rawSorts = read('sortBySource');
@@ -152,6 +280,8 @@ export function getSettings() {
                 .filter((entry) => typeof entry === 'string' && entry.trim() !== '')
                 .map((entry) => entry.slice(0, MAX_QUERY_LENGTH))
             : [],
+        saveNamedSearches: read('saveNamedSearches') === true,
+        namedSearches: read('saveNamedSearches') === true ? normalizeNamedSearches(read('namedSearches')) : [],
         _v: DEFAULTS._v,
     };
 }
@@ -166,7 +296,8 @@ export function getSettings() {
  * @param {string} query
  */
 export function rememberQuery(query) {
-    if (!getSettings().saveQueryHistory) {
+    const settings = getSettings();
+    if (!settings.saveQueryHistory) {
         return;
     }
     const trimmed = typeof query === 'string' ? query.trim().slice(0, MAX_QUERY_LENGTH) : '';
@@ -174,7 +305,7 @@ export function rememberQuery(query) {
         return;
     }
 
-    const previous = getSettings().queryHistory;
+    const previous = settings.queryHistory;
     // Case-insensitive dedupe, but the newest spelling is what gets kept.
     const rest = previous.filter((entry) => entry.toLowerCase() !== trimmed.toLowerCase());
     updateSettings({ queryHistory: [trimmed, ...rest].slice(0, MAX_QUERY_HISTORY) });
@@ -182,6 +313,49 @@ export function rememberQuery(query) {
 
 export function clearQueryHistory() {
     updateSettings({ queryHistory: [] });
+}
+
+/**
+ * Saves newest first, replacing a case-insensitive name without evicting others.
+ * Names are capped at 64 characters, queries at 128; an empty query is valid.
+ * Source must be a bundled source id or '__all__'. Filters and sorts retain
+ * only declared choices. Read the normalised record from getSettings().
+ * @returns {boolean} False for opt-out, invalid input, or a full list with no matching name.
+ */
+export function saveNamedSearch(raw) {
+    const settings = getSettings();
+    const entry = normalizeNamedSearch(raw);
+    if (!settings.saveNamedSearches || !entry) {
+        return false;
+    }
+    const rest = settings.namedSearches.filter((saved) => saved.name.toLowerCase() !== entry.name.toLowerCase());
+    if (rest.length >= MAX_NAMED_SEARCHES) {
+        return false;
+    }
+    updateSettings({ namedSearches: [entry, ...rest] });
+    return true;
+}
+
+/** Returns true only when an existing name was removed. */
+export function removeNamedSearch(name) {
+    const key = namedSearchText(name, MAX_NAMED_SEARCH_NAME)?.toLowerCase();
+    const previous = getSettings().namedSearches;
+    const namedSearches = previous.filter((entry) => entry.name.toLowerCase() !== key);
+    if (namedSearches.length === previous.length) {
+        return false;
+    }
+    updateSettings({ namedSearches });
+    return true;
+}
+
+/** Immediately supplies current settings; the caller owns the unsubscribe. */
+export function subscribeSettings(listener) {
+    if (typeof listener !== 'function') {
+        return () => {};
+    }
+    settingsListeners.add(listener);
+    listener(getSettings());
+    return () => settingsListeners.delete(listener);
 }
 
 /**
@@ -206,10 +380,12 @@ export function isSourceEnabled(source, enabledSources) {
  */
 export function updateSettings(patch) {
     const ctx = context();
-    ctx.extensionSettings[SETTINGS_KEY] = { ...getSettings(), ...patch };
-    const normalized = getSettings();
+    const normalized = normalizeSettings({ ...normalizeSettings(ctx.extensionSettings[SETTINGS_KEY]), ...patch });
     ctx.extensionSettings[SETTINGS_KEY] = normalized;
     ctx.saveSettingsDebounced();
+    for (const listener of settingsListeners) {
+        listener(normalized);
+    }
     return normalized;
 }
 
@@ -245,10 +421,9 @@ export async function mountSettings() {
     const content = el('div', 'inline-drawer-content sbbs-settings');
     content.id = 'sbbs_settings_content';
     const settings = getSettings();
+    let sources = [];
 
     content.append(
-        // The sections above this (sources, accounts, plugin) all carry their
-        // own headings; the everyday toggles get one too so the drawer chunks.
         el('label', undefined, 'Preferences'),
         checkbox('sbbs_set_sfw', 'Request SFW results by default', settings.sfwOnlyDefault, (v) => updateSettings({ sfwOnlyDefault: v })),
         checkbox('sbbs_set_hide_ai', 'Hide AI-generated cards when the source supports it', settings.hideAiDefault, (v) => updateSettings({ hideAiDefault: v })),
@@ -272,8 +447,15 @@ export async function mountSettings() {
             'sbbs_set_history',
             'Save search history in SillyBunny profile settings',
             settings.saveQueryHistory,
-            (v) => updateSettings({ saveQueryHistory: v, ...(v ? {} : { queryHistory: [] }) }),
-            'Search terms can be sensitive. With this off, terms are not retained after the current dialog.',
+            (v) => updateSettings({ saveQueryHistory: v }),
+            'Search terms can be sensitive. With this off, submitted terms are not added to history. Named searches have a separate opt-in.',
+        ),
+        checkbox(
+            'sbbs_set_named_searches',
+            NAMED_SEARCH_COPY.optIn,
+            settings.saveNamedSearches,
+            (v) => updateSettings({ saveNamedSearches: v }),
+            NAMED_SEARCH_COPY.privacy,
         ),
         select(
             'sbbs_set_images',
@@ -290,52 +472,117 @@ export async function mountSettings() {
             (v) => updateSettings({ resultsPerPage: Number(v) }),
         ),
         historyControl(),
+        namedSearchesControl(),
     );
 
     drawer.append(header, content);
     container.append(drawer);
     host.append(container);
 
-    const syncExpanded = () => header.setAttribute('aria-expanded', String(content.getClientRects().length > 0));
-    header.addEventListener('click', () => requestAnimationFrame(syncExpanded));
-    requestAnimationFrame(syncExpanded);
+    const refreshControls = (value) => {
+        for (const [id, key] of [
+            ['sbbs_set_sfw', 'sfwOnlyDefault'], ['sbbs_set_hide_ai', 'hideAiDefault'],
+            ['sbbs_set_blur', 'blurNsfw'], ['sbbs_set_trust', 'showTrustPanel'],
+            ['sbbs_set_skip_review', 'skipReview'], ['sbbs_set_direct', 'allowDirectRequests'],
+            ['sbbs_set_history', 'saveQueryHistory'], ['sbbs_set_named_searches', 'saveNamedSearches'],
+        ]) {
+            content.querySelector(`#${id}`).checked = value[key];
+        }
+        content.querySelector('#sbbs_set_images').value = value.imageMode;
+        content.querySelector('#sbbs_set_perpage').value = String(value.resultsPerPage);
+        for (const input of content.querySelectorAll('[data-source-id]')) {
+            const source = sources.find((entry) => entry.id === input.dataset.sourceId);
+            input.checked = isSourceEnabled(source, value.enabledSources);
+        }
+        const history = content.querySelector('#sbbs_clear_history');
+        history.disabled = value.queryHistory.length === 0;
+        setText(history, history.disabled ? 'No saved history' : `Clear search history (${value.queryHistory.length})`);
+        const named = content.querySelector('#sbbs_clear_named_searches');
+        named.disabled = value.namedSearches.length === 0;
+        setText(named, named.disabled ? NAMED_SEARCH_COPY.empty : `${NAMED_SEARCH_COPY.clear} (${value.namedSearches.length})`);
+    };
+    const unsubscribeSettings = subscribeSettings(refreshControls);
+    const refreshOnOpen = () => requestAnimationFrame(() => {
+        if (container.isConnected) {
+            header.setAttribute('aria-expanded', String(content.getClientRects().length > 0));
+            refreshControls(getSettings());
+        }
+    });
+    header.addEventListener('click', refreshOnOpen);
+    refreshOnOpen();
+    cleanupOnDetach(container, () => {
+        unsubscribeSettings();
+        header.removeEventListener('click', refreshOnOpen);
+    });
 
     // Source list comes from the server, so it stays correct as adapters are
     // added. Appended after mounting so a missing plugin does not block the
     // rest of the panel.
-    //
-    // Reading order: the everyday Sources list first, then the account
-    // sections, preferences, and the diagnostic server-plugin status last —
-    // successive prepends stack, so the last prepend lands on top.
     try {
         const availability = await getAvailability();
-        const { health } = availability;
-        const sources = Array.isArray(health?.sources) ? health.sources : [];
-        const janny = sources.find((source) => source?.id === 'jannyai');
-        if (availability.status === AVAILABILITY.OK && janny?.capabilities?.browserImport === true) {
-            content.prepend(jannyBrowserControl());
+        if (!container.isConnected) {
+            return;
         }
-        const saucepan = sources.find((source) => source?.id === 'saucepan');
-        if (availability.status === AVAILABILITY.OK && saucepan?.capabilities?.accountLogin === true) {
-            content.prepend(saucepanAccountControl());
+        const { health } = availability;
+        sources = Array.isArray(health?.sources) ? health.sources.filter((source) => source && typeof source === 'object') : [];
+        if (sources.length > 0) {
+            content.append(sourceList(sources));
         }
         const botbooru = sources.find((source) => source?.id === 'botbooru');
         if (availability.status === AVAILABILITY.OK && botbooru?.capabilities?.accountLogin === true) {
-            content.prepend(botbooruAccountControl());
+            content.append(collapsedAccount(botbooruAccountControl()));
         }
-        if (sources.length > 0) {
-            content.prepend(sourceList(sources));
+        const saucepan = sources.find((source) => source?.id === 'saucepan');
+        if (availability.status === AVAILABILITY.OK && saucepan?.capabilities?.accountLogin === true) {
+            content.append(collapsedAccount(saucepanAccountControl()));
+        }
+        const janny = sources.find((source) => source?.id === 'jannyai');
+        if (availability.status === AVAILABILITY.OK && janny?.capabilities?.browserImport === true) {
+            content.append(collapsedAccount(jannyBrowserControl()));
         }
         content.append(serverPluginControl(availability));
+        refreshControls(getSettings());
     } catch {
         // Plugin not installed yet; the rest of the panel still works.
     }
 }
 
-function botbooruAccountControl() {
+function collapsedAccount(control) {
+    const details = el('details', 'sbbs-account-details');
+    const heading = control.firstElementChild;
+    details.append(el('summary', undefined, heading.textContent), control);
+    heading.hidden = true;
+    return details;
+}
+
+// Only observe removal, never render from a DOM observer: rendering would
+// trigger the observer again. Capture the owning document for late teardown.
+function cleanupOnDetach(node, cleanup) {
+    const ownerDocument = node.ownerDocument;
+    requestAnimationFrame(() => {
+        if (!node.isConnected) {
+            cleanup();
+            return;
+        }
+        const Observer = ownerDocument.defaultView?.MutationObserver ?? globalThis.MutationObserver;
+        if (typeof Observer !== 'function') {
+            return;
+        }
+        const observer = new Observer(() => {
+            if (!node.isConnected) {
+                observer.disconnect();
+                cleanup();
+            }
+        });
+        observer.observe(ownerDocument.documentElement, { childList: true, subtree: true });
+    });
+}
+
+/** The drawer and inline recovery share retained account state, not input ids. */
+export function botbooruAccountControl(idPrefix = 'sbbs_botbooru') {
     const wrapper = el('section', 'sbbs-setting sbbs-setting-account');
     const heading = el('strong', undefined, 'BotBooru account');
-    heading.id = 'sbbs_botbooru_account_heading';
+    heading.id = `${idPrefix}_account_heading`;
     wrapper.setAttribute('aria-labelledby', heading.id);
 
     const status = el('span', 'sbbs-account-status');
@@ -344,8 +591,8 @@ function botbooruAccountControl() {
 
     const loginForm = el('form', 'sbbs-account-login');
     const fields = el('div', 'sbbs-account-fields');
-    const usernameField = accountField('sbbs_botbooru_username', 'Username', 'text', 'username');
-    const passwordField = accountField('sbbs_botbooru_password', 'Password', 'password', 'current-password');
+    const usernameField = accountField(`${idPrefix}_username`, 'Username', 'text', 'username');
+    const passwordField = accountField(`${idPrefix}_password`, 'Password', 'password', 'current-password');
     fields.append(usernameField.wrapper, passwordField.wrapper);
 
     const login = el('button', 'menu_button', 'Log in');
@@ -362,7 +609,7 @@ function botbooruAccountControl() {
     const nsfwRow = el('label', 'checkbox_label sbbs-account-nsfw');
     const nsfw = document.createElement('input');
     nsfw.type = 'checkbox';
-    nsfw.id = 'sbbs_botbooru_nsfw';
+    nsfw.id = `${idPrefix}_nsfw`;
     nsfwRow.append(nsfw, el('span', undefined, 'Allow NSFW results'));
 
     const nsfwNote = el(
@@ -370,7 +617,7 @@ function botbooruAccountControl() {
         'sbbs-setting-note',
         'This changes the BotBooru account preference on every device using that account.',
     );
-    nsfwNote.id = 'sbbs_botbooru_nsfw_note';
+    nsfwNote.id = `${idPrefix}_nsfw_note`;
     nsfw.setAttribute('aria-describedby', nsfwNote.id);
 
     const nsflStatus = el('span', 'sbbs-setting-note sbbs-account-nsfl');
@@ -402,6 +649,8 @@ function botbooruAccountControl() {
 
         if (message !== '') {
             setText(status, message);
+        } else if (account.error) {
+            setText(status, accountErrorMessage({ code: account.error }, 'BotBooru'));
         } else if (!account.known) {
             setText(status, 'Checking account...');
         } else if (loggedIn) {
@@ -425,7 +674,7 @@ function botbooruAccountControl() {
 
     let renderedLoggedIn = null;
     const unsubscribeAccount = subscribeBotbooruAccount((account) => {
-        const hadFocus = wrapper.contains(document.activeElement);
+        const hadFocus = wrapper.contains(wrapper.ownerDocument.activeElement);
         const loginStateChanged = renderedLoggedIn !== null && renderedLoggedIn !== account.loggedIn;
         message = '';
         render(account);
@@ -441,24 +690,9 @@ function botbooruAccountControl() {
 
     // The host can rebuild extension settings without a page navigation. Stop
     // retaining detached inputs, and erase an unsent password if that happens.
-    requestAnimationFrame(() => {
-        if (!wrapper.isConnected) {
-            passwordField.input.value = '';
-            unsubscribeAccount();
-            return;
-        }
-        const Observer = document.defaultView?.MutationObserver ?? globalThis.MutationObserver;
-        if (typeof Observer !== 'function') {
-            return;
-        }
-        const observer = new Observer(() => {
-            if (!wrapper.isConnected) {
-                passwordField.input.value = '';
-                unsubscribeAccount();
-                observer.disconnect();
-            }
-        });
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+    cleanupOnDetach(wrapper, () => {
+        passwordField.input.value = '';
+        unsubscribeAccount();
     });
 
     loginForm.addEventListener('submit', async (event) => {
@@ -471,8 +705,9 @@ function botbooruAccountControl() {
         render(getBotbooruAccount());
         try {
             await loginBotbooruAccount(usernameField.input.value, passwordField.input.value);
+            message = '';
         } catch (error) {
-            message = accountErrorMessage(error);
+            message = accountErrorMessage(error, 'BotBooru');
         } finally {
             passwordField.input.value = '';
             pending = false;
@@ -492,8 +727,9 @@ function botbooruAccountControl() {
         render(getBotbooruAccount());
         try {
             await setBotbooruNsfw(enabled);
+            message = '';
         } catch (error) {
-            message = accountErrorMessage(error);
+            message = accountErrorMessage(error, 'BotBooru');
         } finally {
             pending = false;
             if (wrapper.isConnected) {
@@ -511,8 +747,9 @@ function botbooruAccountControl() {
         render(getBotbooruAccount());
         try {
             await logoutBotbooruAccount();
+            message = '';
         } catch (error) {
-            message = accountErrorMessage(error);
+            message = accountErrorMessage(error, 'BotBooru');
         } finally {
             pending = false;
             if (wrapper.isConnected) {
@@ -522,7 +759,7 @@ function botbooruAccountControl() {
     });
 
     void refreshBotbooruAccount().catch((error) => {
-        message = accountErrorMessage(error);
+        message = accountErrorMessage(error, 'BotBooru');
         if (wrapper.isConnected) {
             render(getBotbooruAccount());
         }
@@ -584,13 +821,13 @@ export function saucepanAccountControl(idPrefix = 'sbbs_saucepan') {
 
     let pending = false;
     let message = '';
-    let loggedIn = false;
 
-    const render = (value = {}) => {
-        loggedIn = value.loggedIn === true;
-        setText(status, message || (loggedIn
-            ? 'Saucepan.ai is ready for URL imports.'
-            : 'Not logged in. Saucepan.ai card URLs require an account token.'));
+    const render = (account) => {
+        const loggedIn = account.loggedIn === true;
+        setText(status, message || (account.error ? accountErrorMessage({ code: account.error }, 'Saucepan.ai')
+            : !account.known ? 'Checking the Saucepan.ai account...'
+                : loggedIn ? 'Saucepan.ai is ready for URL imports.'
+                    : 'Not logged in. Saucepan.ai card URLs require an account token.'));
         login.disabled = pending;
         setToken.disabled = pending;
         logout.disabled = pending || !loggedIn;
@@ -599,12 +836,15 @@ export function saucepanAccountControl(idPrefix = 'sbbs_saucepan') {
         tokenField.input.disabled = pending;
     };
 
-    const refresh = async () => {
-        const result = await post('/account/status', { source: 'saucepan' });
+    const unsubscribeAccount = subscribeSaucepanAccount((account) => {
         message = '';
-        render(result);
-        return result;
-    };
+        render(account);
+    });
+    cleanupOnDetach(wrapper, () => {
+        passwordField.input.value = '';
+        tokenField.input.value = '';
+        unsubscribeAccount();
+    });
 
     const run = async (operation, busyMessage) => {
         if (pending) {
@@ -612,20 +852,18 @@ export function saucepanAccountControl(idPrefix = 'sbbs_saucepan') {
         }
         pending = true;
         message = busyMessage;
-        render({ loggedIn });
+        render(getSaucepanAccount());
         try {
-            const result = await operation();
+            await operation();
             message = '';
-            render(result);
         } catch (error) {
-            message = accountErrorMessage(error);
-            render({ loggedIn });
+            message = accountErrorMessage(error, 'Saucepan.ai');
         } finally {
             passwordField.input.value = '';
             tokenField.input.value = '';
             pending = false;
             if (wrapper.isConnected) {
-                render({ loggedIn });
+                render(getSaucepanAccount());
             }
         }
     };
@@ -633,27 +871,24 @@ export function saucepanAccountControl(idPrefix = 'sbbs_saucepan') {
     loginForm.addEventListener('submit', (event) => {
         event.preventDefault();
         void run(
-            () => post('/account/login', {
-                source: 'saucepan',
-                username: handleField.input.value,
-                password: passwordField.input.value,
-            }),
+            () => loginSaucepanAccount(handleField.input.value, passwordField.input.value),
             'Logging in to Saucepan.ai...',
         );
     });
     setToken.addEventListener('click', () => void run(
-        () => post('/account/token', { source: 'saucepan', token: tokenField.input.value }),
+        () => setSaucepanToken(tokenField.input.value),
         'Saving the Saucepan.ai token in server memory...',
     ));
     logout.addEventListener('click', () => void run(
-        () => post('/account/logout', { source: 'saucepan' }),
+        () => logoutSaucepanAccount(),
         'Removing the Saucepan.ai login...',
     ));
 
-    render();
-    void refresh().catch((error) => {
-        message = accountErrorMessage(error);
-        render({ loggedIn: false });
+    void refreshSaucepanAccount().catch((error) => {
+        message = accountErrorMessage(error, 'Saucepan.ai');
+        if (wrapper.isConnected) {
+            render(getSaucepanAccount());
+        }
     });
     return wrapper;
 }
@@ -679,42 +914,64 @@ export function jannyBrowserControl(idPrefix = 'sbbs_janny') {
     const note = el(
         'span',
         'sbbs-setting-note',
-        'This opens a persistent, visible Playwright browser on the SillyBunny host. Complete JannyAI login and Cloudflare verification there; cookies stay on that host.',
+        'Only SillyBunny administrators can use this shared browser session. It opens a persistent, visible Playwright browser on the SillyBunny host. Complete JanitorAI login and Cloudflare verification there; cookies stay on that host.',
     );
-    wrapper.append(heading, status, login, refresh, logout, note);
+    const recoveryNote = el(
+        'span',
+        'sbbs-setting-note',
+        'Refresh status retries restoring the JanitorAI settings. If the window is closed, reopen it, sign in to the same JanitorAI account, then refresh status. The recovery copy exists only in server memory. Do not restart SillyBunny until recovery succeeds. If a restart is unavoidable, manually restore the API and generation settings in JanitorAI before another private import.',
+    );
+    wrapper.append(heading, status, login, refresh, logout, note, recoveryNote);
 
     let pending = false;
-    const render = (value = {}) => {
-        if (pending) {
-            setText(status, 'Checking the JannyAI browser session...');
+    let forbidden = false;
+    let value = {};
+    let message = '';
+    const render = () => {
+        if (message) {
+            setText(status, message);
+        } else if (value.restorePending) {
+            setText(status, accountErrorMessage({ code: 'janny_restore_failed' }, 'JannyAI'));
         } else if (value.loggedIn === true) {
             setText(status, 'JannyAI browser session is ready.');
         } else if (value.ready === false) {
-            setText(status, 'Browser bridge is not ready. Install Playwright/Chromium on the server host if needed.');
+            setText(status, 'The JannyAI browser window is not open. Open the login window to continue.');
         } else {
             setText(status, 'Not logged in to JannyAI.');
         }
-        login.disabled = pending;
-        refresh.disabled = pending;
-        logout.disabled = pending || value.loggedIn !== true;
+        login.disabled = pending || forbidden;
+        refresh.disabled = pending || forbidden;
+        logout.disabled = pending || forbidden || value.loggedIn !== true;
+        recoveryNote.hidden = !value.restorePending;
     };
 
-    const request = async (path, message) => {
-        if (pending) {
+    const request = async (path, busyMessage) => {
+        if (pending || forbidden) {
             return;
         }
         pending = true;
-        setText(status, message);
-        render({});
+        message = busyMessage;
+        render();
         try {
             const result = await post(path, {});
-            render(result);
+            value = {
+                ready: result?.ready,
+                loggedIn: result?.loggedIn === true,
+                restorePending: result?.restorePending === true || result?.code === 'janny_restore_failed',
+            };
+            forbidden = result?.code === 'janny_admin_required';
+            message = result?.code ? accountErrorMessage({ code: result.code }, 'JannyAI')
+                : path === '/janny/logout' && !value.loggedIn && !value.restorePending ? 'Not logged in to JannyAI.' : '';
         } catch (error) {
-            setText(status, accountErrorMessage(error));
+            if (error?.code === 'janny_restore_failed') {
+                value.restorePending = true;
+            }
+            forbidden = error?.code === 'janny_admin_required' || error?.status === 403;
+            message = accountErrorMessage(forbidden ? { code: 'janny_admin_required' } : error, 'JannyAI');
         } finally {
             pending = false;
             if (wrapper.isConnected) {
-                void post('/janny/status', {}).then(render).catch(() => render({}));
+                render();
             }
         }
     };
@@ -972,20 +1229,14 @@ function sourceList(sources) {
  */
 function historyControl() {
     const wrapper = el('div', 'sbbs-setting sbbs-setting-select');
-    const count = getSettings().queryHistory.length;
 
     const caption = el('label', undefined, 'Search history');
     wrapper.append(caption);
 
     const button = el('button', 'menu_button');
+    button.id = 'sbbs_clear_history';
     button.type = 'button';
-    button.disabled = count === 0;
-    setText(button, count === 0 ? 'No saved searches' : `Clear ${count} saved ${count === 1 ? 'search' : 'searches'}`);
-    button.addEventListener('click', () => {
-        clearQueryHistory();
-        button.disabled = true;
-        setText(button, 'No saved searches');
-    });
+    button.addEventListener('click', clearQueryHistory);
 
     wrapper.append(button);
     wrapper.append(el(
@@ -993,6 +1244,16 @@ function historyControl() {
         'sbbs-setting-note',
         'Saved terms are stored in your SillyBunny profile settings and may be included in server backups. Card names are not saved.',
     ));
+    return wrapper;
+}
+
+function namedSearchesControl() {
+    const wrapper = el('div', 'sbbs-setting sbbs-setting-select');
+    const button = el('button', 'menu_button');
+    button.id = 'sbbs_clear_named_searches';
+    button.type = 'button';
+    button.addEventListener('click', () => updateSettings({ namedSearches: [] }));
+    wrapper.append(el('label', undefined, NAMED_SEARCH_COPY.title), button);
     return wrapper;
 }
 

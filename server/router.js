@@ -85,13 +85,16 @@ export function createRouter(router, state) {
     const saucepanAccounts = state.saucepan ?? createSaucepanAccounts();
     const jannyBrowser = state.jannyBrowser ?? createJannyBrowser();
 
-    router.get('/healthz', wrap(async (_request, response) => {
+    router.get('/healthz', wrap(async (request, response) => {
+        response.set('Cache-Control', 'no-store');
         response.json({
             ok: true,
             protocol: PROTOCOL_VERSION,
             version: VERSION,
             uptimeMs: Date.now() - state.startedAt,
-            sources: describeSources(stateOf, reasonOf),
+            sources: describeSources(stateOf, reasonOf).map((source) => source.id === 'jannyai'
+                ? { ...source, bridgeAllowed: request.user?.profile?.admin === true }
+                : source),
         });
     }));
 
@@ -138,6 +141,7 @@ export function createRouter(router, state) {
         }
 
         const store = accountStoreFor(resolved.adapter, accounts, saucepanAccounts);
+        request.sbbsSignal.throwIfAborted();
         await respondWithAccount(response, () => store.login(
             handle,
             own(request.body, 'username'),
@@ -165,6 +169,7 @@ export function createRouter(router, state) {
             fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
             return;
         }
+        request.sbbsSignal.throwIfAborted();
         await respondWithAccount(response, () => saucepanAccounts.setToken(handle, own(request.body, 'token')));
     }));
 
@@ -188,6 +193,7 @@ export function createRouter(router, state) {
             fail(response, 429, 'rate_limited', { retryAfter: limited.retryAfterSeconds });
             return;
         }
+        request.sbbsSignal.throwIfAborted();
         await respondWithAccount(response, () => accounts.setNsfw(handle, own(request.body, 'enabled')));
     }));
 
@@ -205,18 +211,27 @@ export function createRouter(router, state) {
         await respondWithAccount(response, () => store.logout(handle));
     }));
 
-    router.post('/janny/status', jsonGuard, wrap(async (_request, response) => {
+    router.post('/janny/status', jsonGuard, wrap(async (request, response) => {
         response.set('Cache-Control', 'no-store');
+        if (!requireJannyAdmin(request, response)) {
+            return;
+        }
         await respondWithJanny(response, () => jannyBrowser.status());
     }));
 
-    router.post('/janny/login', jsonGuard, wrap(async (_request, response) => {
+    router.post('/janny/login', jsonGuard, wrap(async (request, response) => {
         response.set('Cache-Control', 'no-store');
+        if (!requireJannyAdmin(request, response)) {
+            return;
+        }
         await respondWithJanny(response, () => jannyBrowser.login());
     }));
 
-    router.post('/janny/logout', jsonGuard, wrap(async (_request, response) => {
+    router.post('/janny/logout', jsonGuard, wrap(async (request, response) => {
         response.set('Cache-Control', 'no-store');
+        if (!requireJannyAdmin(request, response)) {
+            return;
+        }
         await respondWithJanny(response, () => jannyBrowser.logout());
     }));
 
@@ -248,7 +263,7 @@ export function createRouter(router, state) {
             return;
         }
 
-        const gate = await gateSource(caller, adapter.id);
+        const gate = await gateSource(caller, adapter.id, request.sbbsSignal);
         if (!gate.ok) {
             fail(response, gate.code === 'source_down' ? 503 : 429, gate.code);
             return;
@@ -417,6 +432,11 @@ export function createRouter(router, state) {
         }
         const { adapter } = resolved;
 
+        if (!supportsSearch(adapter)) {
+            fail(response, 400, 'search_unsupported');
+            return;
+        }
+
         let args;
         try {
             args = buildSearchArgs(adapter, request.body);
@@ -469,7 +489,7 @@ export function createRouter(router, state) {
                 result = await callAdapter(
                     adapter,
                     () => adapter.search(sourceRequest.context, args),
-                    { ignoreAuthenticationFailure: sourceRequest.sessionNonce !== null },
+                    { ignoreAuthenticationFailure: sourceRequest.sessionNonce !== null, signal: request.sbbsSignal },
                 );
             } catch (error) {
                 if (error instanceof BadCursorError || error?.code === 'bad_cursor') {
@@ -613,25 +633,27 @@ export function createRouter(router, state) {
         }
 
         try {
-            const ctx = contextFor(adapter);
+            const ctx = contextFor(adapter, { signal: request.sbbsSignal });
             const target = adapter.getImportTarget(ctx, id);
 
             /** @type {Buffer} */
             let buffer;
 
             if (target?.kind === 'bytes' && typeof target.url === 'string') {
-                const result = await callAdapter(adapter, () => fetchBytes(adapter, target.url, {
+                const result = await callAdapter(adapter, () => ctx.fetchBytes(target.url, {
                     accept: 'image/png,application/json;q=0.9,*/*;q=0.5',
                     maxBytes: MAX_CARD_BYTES,
                     timeoutMs: 20000,
-                }), { trackHealth: false });
+                }), { trackHealth: false, signal: request.sbbsSignal });
                 buffer = result.buffer;
             } else if (target?.kind === 'inline' && typeof adapter.buildCard === 'function') {
                 // Some sources publish full card data but no downloadable file.
                 // The adapter assembles a card from it; the result then goes
                 // through exactly the same validation as a downloaded one, so
                 // this path is not a way to bypass any of the checks.
-                const card = await callAdapter(adapter, () => adapter.buildCard(ctx, id), { trackHealth: false });
+                const card = await callAdapter(adapter, () => adapter.buildCard(ctx, id), {
+                    trackHealth: false, signal: request.sbbsSignal,
+                });
                 buffer = Buffer.from(JSON.stringify(card), 'utf8');
                 if (buffer.length > MAX_CARD_BYTES) {
                     fail(response, 422, 'too_large');
@@ -678,6 +700,9 @@ export function createRouter(router, state) {
             return;
         }
         const { adapter } = resolved;
+        if (adapter.id === 'jannyai' && !requireJannyAdmin(request, response)) {
+            return;
+        }
         const rawUrl = own(request.body, 'url');
         const parsed = adapter.id === 'jannyai'
             ? parseJannyUrl(rawUrl)
@@ -697,13 +722,14 @@ export function createRouter(router, state) {
         try {
             let card;
             let avatarPng = null;
+            let sourceRequest;
             try {
                 if (adapter.id === 'jannyai') {
                     ({ card, avatarPng = null } = await jannyBrowser.fetchCard(rawUrl));
                 } else if (adapter.id === 'saucepan') {
                     const handle = accountProfileHandle(request);
-                    const context = saucepanAccounts.context(handle);
-                    card = await adapter.buildCard(context, parsed.id);
+                    sourceRequest = saucepanAccounts.cardRequest(handle, { signal: request.sbbsSignal });
+                    card = await adapter.buildCard(sourceRequest.context, parsed.id);
                 } else {
                     fail(response, 400, 'url_import_unsupported');
                     return;
@@ -718,7 +744,7 @@ export function createRouter(router, state) {
                 }
                 if (adapter.id === 'saucepan' && error instanceof UpstreamError && error.code === 'http_error'
                     && String(error.detail) === '401') {
-                    saucepanAccounts.invalidate(accountProfileHandle(request));
+                    saucepanAccounts.invalidate(accountProfileHandle(request), sourceRequest.sessionVersion);
                     fail(response, 401, 'saucepan_session_expired');
                     return;
                 }
@@ -872,7 +898,9 @@ export function createRouter(router, state) {
             }
             let detail;
             try {
-                detail = await callAdapter(adapter, () => adapter.getDetail(sourceRequest.context, id), { trackHealth: false });
+                detail = await callAdapter(adapter, () => adapter.getDetail(sourceRequest.context, id), {
+                    trackHealth: false, signal: request.sbbsSignal,
+                });
             } catch (error) {
                 if (canReroute(adapter, error) && typeof adapter.buildDetailUrl === 'function') {
                     respondWithDirectPlan(response, adapter, 'detail', null, id);
@@ -1064,6 +1092,10 @@ function readSourceIds(body) {
 async function searchMany(request, response, ids, accounts) {
     const body = request.body;
     const rawCursor = own(body, 'cursor');
+    const limit = clampInt(own(body, 'limit'), 1, FIELD_LIMITS.itemsPerPage, 24);
+    const partial = ids.filter((id) => !supportsSearch(getSource(id)))
+        .map((source) => ({ source, error: 'search_unsupported' }));
+    ids = ids.filter((id) => supportsSearch(getSource(id)));
     /** @type {Record<string, unknown> | null} */
     let carried = null;
     let carriedDedupe = [];
@@ -1071,7 +1103,11 @@ async function searchMany(request, response, ids, accounts) {
     if (rawCursor !== undefined && rawCursor !== null) {
         const parsed = verifyToken(MULTI_CURSOR_SCOPE, rawCursor);
         const perSource = own(parsed, 's');
-        if (!isPlainObject(perSource)) {
+        // Each entry is [page size, upstream cursor]. Page-number APIs must
+        // retain their original size even after other sources are exhausted.
+        if (!isPlainObject(perSource) || Object.values(perSource).some((entry) => !Array.isArray(entry)
+            || entry.length !== 2 || !Number.isSafeInteger(entry[0]) || entry[0] < 1
+            || entry[0] > limit || (entry[1] !== null && !isPlainObject(entry[1])))) {
             fail(response, 400, 'bad_cursor');
             return;
         }
@@ -1088,15 +1124,16 @@ async function searchMany(request, response, ids, accounts) {
         carried = perSource;
         // Only sources that offered a next page stay in the search. The rest are
         // exhausted, and asking them again would repeat their first page.
-        ids = ids.filter((id) => own(perSource, id) !== undefined);
-        if (ids.length === 0) {
-            response.json({ total: null, nextCursor: null, items: [], partial: [] });
-            return;
-        }
+        ids = Object.keys(perSource).filter((id) => ids.includes(id));
     }
 
-    const limit = clampInt(own(body, 'limit'), 1, FIELD_LIMITS.itemsPerPage, 24);
+    if (ids.length === 0) {
+        response.json({ total: null, nextCursor: null, items: [], partial });
+        return;
+    }
+
     const shares = sharePageBudget(limit, ids.length);
+    const pageSizes = new Map(ids.map((id, index) => [id, carried ? own(carried, id)[0] : shares[index]]));
     const sorts = isPlainObject(own(body, 'sorts')) ? own(body, 'sorts') : {};
     const caller = callerKey(request);
 
@@ -1109,14 +1146,28 @@ async function searchMany(request, response, ids, accounts) {
         return;
     }
 
-    const settled = await Promise.all(ids.map(async (id, index) => {
+    const nextBySource = Object.create(null);
+    let budget = limit;
+    // Deferred sources go first next time. Never fetch and advance a source
+    // whose results would be discarded by the merged page's size limit.
+    const scheduled = ids.filter((id) => {
+        const size = pageSizes.get(id);
+        if (size > budget) {
+            nextBySource[id] = carried ? own(carried, id) : [size, null];
+            return false;
+        }
+        budget -= size;
+        return true;
+    });
+
+    const settled = await Promise.all(scheduled.map(async (id) => {
         const adapter = getSource(id);
         const args = {
             ...buildSearchArgs(adapter, body, { parseCursor: false }),
-            limit: shares[index],
+            limit: pageSizes.get(id),
             // Each source sorts by its own vocabulary; there is no shared one.
             sort: pick(own(sorts, id), adapter.capabilities.sorts, adapter.capabilities.sorts[0]),
-            cursor: carried ? (own(carried, id) ?? null) : null,
+            cursor: carried ? own(carried, id)[1] : null,
         };
 
         if (!isDown(id)) {
@@ -1127,7 +1178,7 @@ async function searchMany(request, response, ids, accounts) {
             }
         }
 
-        const gate = await gateSource(caller, id);
+        const gate = await gateSource(caller, id, request.sbbsSignal);
         if (!gate.ok) {
             return { id, error: gate.code };
         }
@@ -1142,7 +1193,7 @@ async function searchMany(request, response, ids, accounts) {
             const result = await callAdapter(
                 adapter,
                 () => adapter.search(sourceRequest.context, args),
-                { ignoreAuthenticationFailure: sourceRequest.sessionNonce !== null },
+                { ignoreAuthenticationFailure: sourceRequest.sessionNonce !== null, signal: request.sbbsSignal },
             );
             return { id, result, sessionNonce: sourceRequest.sessionNonce };
         } catch (error) {
@@ -1154,10 +1205,8 @@ async function searchMany(request, response, ids, accounts) {
     }));
 
     const groups = [];
-    const partial = [];
-    const nextBySource = Object.create(null);
     let total = 0;
-    let totalKnown = true;
+    let totalKnown = partial.length === 0 && scheduled.length === ids.length;
     let succeeded = false;
 
     for (const outcome of settled) {
@@ -1166,9 +1215,9 @@ async function searchMany(request, response, ids, accounts) {
             // Keep the prior cursor (or a null first-page marker) so a transient
             // failure can rejoin a later page instead of disappearing forever.
             if (!TERMINAL_ACCOUNT_PARTIALS.has(outcome.error)) {
-                nextBySource[outcome.id] = carried && own(carried, outcome.id) !== undefined
+                nextBySource[outcome.id] = carried
                     ? own(carried, outcome.id)
-                    : null;
+                    : [pageSizes.get(outcome.id), null];
             }
             totalKnown = false;
             continue;
@@ -1182,7 +1231,7 @@ async function searchMany(request, response, ids, accounts) {
         groups.push({ source: outcome.id, items });
 
         if (isPlainObject(outcome.result?.next)) {
-            nextBySource[outcome.id] = outcome.result.next;
+            nextBySource[outcome.id] = [pageSizes.get(outcome.id), outcome.result.next];
         }
         // A sum across sources counts mirrored cards more than once, so it is
         // reported as what it is: how many the sources between them claim.
@@ -1211,7 +1260,8 @@ async function searchMany(request, response, ids, accounts) {
 }
 
 /** Per-source gate for a merged search: the same checks, reported not thrown. */
-async function gateSource(caller, sourceId) {
+async function gateSource(caller, sourceId, signal) {
+    signal?.throwIfAborted();
     if (isDown(sourceId)) {
         return { ok: false, code: 'source_down' };
     }
@@ -1221,9 +1271,15 @@ async function gateSource(caller, sourceId) {
         return { ok: false, code: 'source_busy' };
     }
 
-    const release = await acquire('source', sourceId);
+    const release = await acquire('source', sourceId, { signal });
     if (!release) {
+        signal?.throwIfAborted();
         return { ok: false, code: 'source_busy' };
+    }
+    if (signal?.aborted || isDown(sourceId)) {
+        release();
+        signal?.throwIfAborted();
+        return { ok: false, code: 'source_down' };
     }
 
     return { ok: true, release };
@@ -1265,6 +1321,19 @@ async function respondWithJanny(response, operation) {
     }
 }
 
+function requireJannyAdmin(request, response) {
+    if (request.user?.profile?.admin === true) {
+        return true;
+    }
+    response.set('Cache-Control', 'no-store');
+    fail(response, 403, 'janny_admin_required');
+    return false;
+}
+
+function supportsSearch(adapter) {
+    return adapter?.capabilities.search === true && typeof adapter.search === 'function';
+}
+
 function sendAccountError(response, error) {
     if (!(error instanceof AccountError)) {
         return false;
@@ -1299,9 +1368,9 @@ function accountHandle(request, response) {
 
 async function searchRequestFor(accounts, request, adapter, args) {
     if (adapter.id !== 'botbooru' || adapter.capabilities.nsfwRequiresAccount !== true) {
-        return { context: contextFor(adapter), sessionNonce: null };
+        return { context: contextFor(adapter, { signal: request.sbbsSignal }), sessionNonce: null };
     }
-    return accounts.searchRequest(accountProfileHandle(request), args.sfwOnly);
+    return accounts.searchRequest(accountProfileHandle(request), args.sfwOnly, { signal: request.sbbsSignal });
 }
 
 function preflightSearchFor(accounts, request, adapter, args) {
@@ -1313,11 +1382,11 @@ function preflightSearchFor(accounts, request, adapter, args) {
 
 async function detailRequestFor(accounts, request, adapter, id) {
     if (adapter.id !== 'botbooru' || adapter.capabilities.accountLogin !== true) {
-        return { context: contextFor(adapter), sessionNonce: null };
+        return { context: contextFor(adapter, { signal: request.sbbsSignal }), sessionNonce: null };
     }
     const ref = own(request.body, 'accountRef');
     if (ref === undefined) {
-        return accounts.detailRequest(accountProfileHandle(request), null);
+        return accounts.detailRequest(accountProfileHandle(request), null, { signal: request.sbbsSignal });
     }
     const payload = verifyToken(BOTBOORU_ACCOUNT_SCOPE, ref);
     const protectedId = own(payload, 'i');
@@ -1325,7 +1394,7 @@ async function detailRequestFor(accounts, request, adapter, id) {
     if (protectedId !== id || typeof sessionNonce !== 'string') {
         throw new AccountError('botbooru_account_changed', 409);
     }
-    return accounts.detailRequest(accountProfileHandle(request), sessionNonce);
+    return accounts.detailRequest(accountProfileHandle(request), sessionNonce, { signal: request.sbbsSignal });
 }
 
 function authenticatedFailure(accounts, request, sourceRequest, error) {
@@ -1390,15 +1459,18 @@ function cardFileName(sourceId, id, kind) {
  * Runs an adapter call and records the outcome with the circuit breaker, so a
  * source that has gone away stops being retried on every keystroke.
  */
-async function callAdapter(adapter, fn, { trackHealth = true, ignoreAuthenticationFailure = false } = {}) {
+async function callAdapter(adapter, fn, { trackHealth = true, ignoreAuthenticationFailure = false, signal } = {}) {
     try {
+        signal?.throwIfAborted();
         const result = await fn();
+        signal?.throwIfAborted();
         if (trackHealth) {
             markSuccess(adapter.id);
         }
         return result;
     } catch (error) {
-        if (error instanceof AccountError || error instanceof BadCursorError || error?.code === 'bad_cursor') {
+        if (signal?.aborted || error?.code === 'aborted' || error?.name === 'AbortError'
+            || error instanceof AccountError || error instanceof BadCursorError || error?.code === 'bad_cursor') {
             throw error;
         }
         const authenticationFailure = ignoreAuthenticationFailure
@@ -1418,6 +1490,7 @@ async function callAdapter(adapter, fn, { trackHealth = true, ignoreAuthenticati
  * @returns {Promise<{ release: () => void } | null>}
  */
 async function gateRequest(request, response, sourceId, limiterName, { allowDown = false } = {}) {
+    request.sbbsSignal?.throwIfAborted();
     // While a source is in cooldown, answer immediately and make no outbound
     // request at all.
     if (!allowDown && isDown(sourceId)) {
@@ -1441,9 +1514,16 @@ async function gateRequest(request, response, sourceId, limiterName, { allowDown
         return null;
     }
 
-    const release = await acquire('source', sourceId);
+    const release = await acquire('source', sourceId, { signal: request.sbbsSignal });
     if (!release) {
+        request.sbbsSignal?.throwIfAborted();
         fail(response, 503, 'source_busy');
+        return null;
+    }
+    if (request.sbbsSignal?.aborted || (!allowDown && isDown(sourceId))) {
+        release();
+        request.sbbsSignal?.throwIfAborted();
+        fail(response, 503, 'source_down');
         return null;
     }
 

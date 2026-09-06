@@ -23,7 +23,10 @@ import {
     updateServerPlugin,
 } from './api.js';
 import { el, setText, setImgSafe } from './render.js';
-import { getSettings, updateSettings, isSourceEnabled, rememberQuery } from './settings.js';
+import {
+    getSettings, updateSettings, isSourceEnabled, rememberQuery,
+    saveNamedSearch, removeNamedSearch, subscribeSettings, MAX_NAMED_SEARCH_NAME,
+} from './settings.js';
 import { createResultCache } from './cache.js';
 import { showDetail } from './detail.js';
 import { showBulkImport, showIntake } from './intake.js';
@@ -34,6 +37,7 @@ import {
     emptyResultMessage,
     formatCount,
     formatResultCount,
+    NAMED_SEARCH_COPY,
     searchErrorMessage,
     searchUnavailableMessage,
     sortLabel,
@@ -99,6 +103,7 @@ function mergedSourceEntry(usable) {
 }
 
 let openingPromise = null;
+let nextCardDescriptionId = 0;
 
 function context() {
     return globalThis.SillyTavern.getContext();
@@ -234,6 +239,21 @@ function wireBrowser(popup, health, options) {
         intake: root.querySelector('#sbbs_intake'),
         inspectFile: root.querySelector('#sbbs_inspect_file'),
         cardFile: root.querySelector('#sbbs_card_file'),
+        refresh: root.querySelector('#sbbs_refresh'),
+        recovered: root.querySelector('#sbbs_recovered'),
+        shortlistCount: root.querySelector('#sbbs_shortlist_count'),
+        shortlistItems: root.querySelector('#sbbs_shortlist_items'),
+        shortlistImport: root.querySelector('#sbbs_shortlist_import'),
+        shortlistClear: root.querySelector('#sbbs_shortlist_clear'),
+        named: root.querySelector('#sbbs_named_searches'),
+        namedConsent: root.querySelector('#sbbs_named_consent'),
+        namedControls: root.querySelector('#sbbs_named_controls'),
+        namedName: root.querySelector('#sbbs_named_name'),
+        namedList: root.querySelector('#sbbs_named_list'),
+        namedSave: root.querySelector('#sbbs_named_save'),
+        namedLoad: root.querySelector('#sbbs_named_load'),
+        namedRemove: root.querySelector('#sbbs_named_remove'),
+        namedStatus: root.querySelector('#sbbs_named_status'),
     };
 
     const settings = getSettings();
@@ -281,6 +301,12 @@ function wireBrowser(popup, health, options) {
         vocabulary: createVocabularyLoader(),
         /** Public status only. The bearer remains in the server process. */
         account: getBotbooruAccount(),
+        shortlist: new Map(),
+        streams: new Map(),
+        lastBody: null,
+        detailSource: null,
+        intakeSources: [],
+        mergedSorts: null,
     };
 
     const urlSourceLabels = urlSources.map((entry) => entry.label ?? entry.id);
@@ -334,6 +360,12 @@ function wireBrowser(popup, health, options) {
      */
     function handleUrlIntent(raw, { open }) {
         const intent = findUrlImport(raw);
+        const action = intent ? (getSettings().skipReview ? 'Import card URL' : 'Review card URL') : 'Search';
+        dom.go.setAttribute('aria-label', action);
+        dom.go.title = action;
+        dom.go.disabled = Boolean(intent && (!intent.source || !intent.enabled));
+        dom.query.setAttribute('enterkeyhint', intent ? 'go' : 'search');
+        dom.go.querySelector('i')?.setAttribute('class', intent ? 'fa-solid fa-file-import' : 'fa-solid fa-magnifying-glass');
         if (!intent) {
             return false;
         }
@@ -402,7 +434,8 @@ function wireBrowser(popup, health, options) {
             row.hidden = urlSources.length === 0 || !row.contains(dom.query);
         }
         dom.filtersToggle.hidden = true;
-        dom.filters.hidden = false;
+        dom.filters.hidden = true;
+        dom.named.hidden = true;
         // Nothing behind them can filter or search in this mode.
         dom.sfw.disabled = true;
         setText(dom.state, !serverHasSearchOrUrlSource
@@ -418,7 +451,11 @@ function wireBrowser(popup, health, options) {
             dom.query.addEventListener('input', () => {
                 handleUrlIntent(dom.query.value.trim(), { open: false });
             });
-            requestAnimationFrame(() => dom.query.focus());
+            requestAnimationFrame(() => {
+                if (!state.disposed) {
+                    dom.query.focus();
+                }
+            });
         }
         return () => {
             state.disposed = true;
@@ -454,7 +491,7 @@ function wireBrowser(popup, health, options) {
     applySourceCapabilities();
 
     if (typeof options.query === 'string' && options.query !== '') {
-        dom.query.value = options.query.slice(0, 128);
+        dom.query.value = options.query.slice(0, 512);
     }
 
     // ---- events ----
@@ -467,6 +504,7 @@ function wireBrowser(popup, health, options) {
             return;
         }
         state.source = next;
+        state.mergedSorts = null;
         state.detailController?.abort();
         applySourceCapabilities();
         updateSettings({ defaultSource: next.id });
@@ -505,14 +543,7 @@ function wireBrowser(popup, health, options) {
     dom.form.addEventListener('submit', (event) => {
         event.preventDefault();
         clearTimeout(state.typingTimer);
-        // A pasted card URL is an import, not a query, and is never recorded
-        // in the search history.
-        if (handleUrlIntent(dom.query.value, { open: true })) {
-            return;
-        }
-        rememberQuery(dom.query.value);
-        refreshQueryHistory();
-        void runSearch({ append: false });
+        void runSearch({ append: false, openUrl: true, remember: true });
     });
 
     /**
@@ -528,11 +559,7 @@ function wireBrowser(popup, health, options) {
         // Invalidate immediately, not after the debounce: a fetch implementation
         // can ignore abort, and its completed old response must never render for
         // the text now visible in the box.
-        state.searchController?.abort();
-        state.requestGeneration++;
-        state.loading = false;
-        dom.body?.setAttribute('aria-busy', 'false');
-        dom.more.disabled = false;
+        resetSearch();
         const value = dom.query.value.trim();
         // A pasted card URL is an import: say what Enter will do, search nothing.
         if (handleUrlIntent(value, { open: false })) {
@@ -541,19 +568,13 @@ function wireBrowser(popup, health, options) {
         // Below this a search is mostly noise, but clearing the box back to the
         // catalogue view is a real intent.
         if (value !== '' && value.length < MIN_TYPEAHEAD_LENGTH) {
-            state.nextCursor = null;
-            state.items = [];
-            state.itemKeys.clear();
-            records.clear();
-            dom.grid.replaceChildren();
-            dom.more.hidden = true;
-            setText(dom.count, '');
             setText(dom.state, 'Keep typing to search.');
             return;
         }
         state.typingTimer = setTimeout(() => void runSearch({ append: false }), TYPEAHEAD_DELAY_MS);
     });
     dom.more.addEventListener('click', () => void runSearch({ append: true }));
+    dom.refresh.addEventListener('click', () => void runSearch({ append: false, refresh: true }));
 
     dom.selectToggle.addEventListener('click', () => setSelecting(dom.root.dataset.selecting !== 'true'));
     dom.selectAll.addEventListener('click', () => {
@@ -571,7 +592,102 @@ function wireBrowser(popup, health, options) {
             // The batch is done with; the grid comes back in its ordinary mode.
             setSelecting(false);
             onBack();
-        }, { signal }));
+        }, { signal, autoStart: false }), entries.map((entry) => entry.source.id));
+    });
+
+    dom.shortlistClear.addEventListener('click', () => {
+        state.shortlist.clear();
+        updateShortlist();
+    });
+    dom.shortlistImport.addEventListener('click', () => {
+        const entries = [...state.shortlist.values()];
+        if (entries.length === 0) {
+            return;
+        }
+        openSubview('grid', (container, onBack, signal) => showBulkImport(container, entries, onBack,
+            { signal, autoStart: false }), entries.map((entry) => entry.source.id));
+    });
+
+    dom.namedName.maxLength = MAX_NAMED_SEARCH_NAME;
+    dom.namedName.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            dom.namedSave.click();
+        }
+    });
+    setText(root.querySelector('#sbbs_named_consent_label'), NAMED_SEARCH_COPY.optIn);
+    setText(root.querySelector('#sbbs_named_privacy'), NAMED_SEARCH_COPY.privacy);
+    dom.namedConsent.addEventListener('change', () => updateSettings({ saveNamedSearches: dom.namedConsent.checked }));
+    dom.namedSave.addEventListener('click', () => {
+        const saved = saveNamedSearch({
+            name: dom.namedName.value, query: dom.query.value.trim(), source: state.source.id,
+            filters: state.filters?.read() ?? {}, sort: dom.sort.value,
+            sorts: Object.fromEntries(mergedSources().map((source) => [source.id,
+                (state.mergedSorts ?? getSettings().sortBySource)[source.id] ?? source.capabilities?.sorts?.[0]])),
+            sfwOnly: dom.sfw.checked, hideAi: dom.hideAi.checked,
+        });
+        setText(dom.namedStatus, saved ? NAMED_SEARCH_COPY.saved : `${NAMED_SEARCH_COPY.invalid} ${NAMED_SEARCH_COPY.full}`);
+    });
+    dom.namedRemove.addEventListener('click', () => {
+        if (removeNamedSearch(dom.namedList.value)) {
+            setText(dom.namedStatus, NAMED_SEARCH_COPY.removed);
+        }
+    });
+    dom.namedLoad.addEventListener('click', () => {
+        const latest = getSettings();
+        const saved = latest.namedSearches.find((entry) => entry.name === dom.namedList.value);
+        if (!saved) {
+            return;
+        }
+        const enabled = usable.filter((entry) => isSourceEnabled(entry, latest.enabledSources));
+        const source = saved.source === ALL_SOURCES && enabled.length > 1
+            ? mergedSourceEntry(enabled) : enabled.find((entry) => entry.id === saved.source);
+        if (!source) {
+            setText(dom.namedStatus, 'Enable this search source under Extensions > BotSearcher, then reopen the browser.');
+            return;
+        }
+        state.source = source;
+        state.mergedSorts = saved.sorts;
+        dom.source.value = source.id;
+        dom.query.value = saved.query;
+        dom.sfw.checked = saved.sfwOnly;
+        dom.hideAi.checked = saved.hideAi;
+        applySourceCapabilities();
+        if (source.capabilities?.sorts?.includes(saved.sort)) {
+            dom.sort.value = saved.sort;
+        }
+        for (const [key, value] of Object.entries(saved.filters)) {
+            state.filters?.set(key, value);
+        }
+        updateFilterBadge();
+        void runSearch({ append: false });
+        dom.query.focus();
+    });
+    const unsubscribeSettings = subscribeSettings((value) => {
+        if (state.disposed) {
+            return;
+        }
+        refreshQueryHistory();
+        dom.namedConsent.checked = value.saveNamedSearches;
+        dom.namedControls.hidden = !value.saveNamedSearches;
+        if (!value.saveNamedSearches) {
+            dom.namedName.value = '';
+            setText(dom.namedStatus, NAMED_SEARCH_COPY.disabled);
+        } else if (dom.namedStatus.textContent === NAMED_SEARCH_COPY.disabled) {
+            setText(dom.namedStatus, '');
+        }
+        const selected = dom.namedList.value;
+        dom.namedList.replaceChildren();
+        for (const entry of value.namedSearches) {
+            const option = el('option', undefined, entry.name);
+            option.value = entry.name;
+            dom.namedList.append(option);
+        }
+        if (value.namedSearches.some((entry) => entry.name === selected)) {
+            dom.namedList.value = selected;
+        }
+        dom.namedLoad.disabled = dom.namedRemove.disabled = value.namedSearches.length === 0;
+        handleUrlIntent(dom.query.value, { open: false });
     });
 
     // Arrow keys move between cards; Home and End jump to the ends. Down off
@@ -621,17 +737,38 @@ function wireBrowser(popup, health, options) {
         const previousRevision = state.account.revision;
         state.account = account;
         updateContentControlNote();
-        if (account.revision === previousRevision) {
+        if (state.disposed || account.revision === previousRevision) {
             return;
         }
         // A protected response can have been cached while another source is now
         // selected. Clear on every account revision, not only while BotBooru is
         // visible, so it cannot cross a logout or replacement login.
         state.cache.clear();
+        for (const [key, record] of state.shortlist) {
+            if (record.source.id === 'botbooru') {
+                state.shortlist.delete(key);
+            }
+        }
+        updateShortlist();
+        if (state.detailSource === 'botbooru') {
+            state.detailController?.abort();
+            state.detailController = null;
+            state.detailSource = null;
+            dom.detail.replaceChildren();
+            if (dom.root.dataset.view === 'detail') {
+                dom.root.dataset.view = 'grid';
+                dom.query.focus();
+            }
+        }
+        if (state.intakeSources.includes('botbooru') && !preserveIntake()) {
+            closeIntake();
+            dom.root.dataset.view = 'grid';
+            dom.query.focus();
+        }
         if (!selectionUsesBotbooru()) {
             return;
         }
-        if (account.error && mergedSources().length > 0) {
+        if (mergedSources().length > 0) {
             removeMergedBotbooruResults(account);
             return;
         }
@@ -643,7 +780,11 @@ function wireBrowser(popup, health, options) {
     // Browsing is useful without a query. Start immediately, then leave the
     // search field focused so the user can replace the catalogue view.
     void runSearch({ append: false });
-    requestAnimationFrame(() => dom.query.focus());
+    requestAnimationFrame(() => {
+        if (!state.disposed) {
+            dom.query.focus();
+        }
+    });
 
     /** Rebuilds sort options and the SFW toggle for the active source. */
     function applySourceCapabilities() {
@@ -679,9 +820,7 @@ function wireBrowser(popup, health, options) {
             ? buildFilters(dom.filterFields, declared, onFilterChange)
             : null;
         void loadVocabulary(state.source, state.filters);
-        // The panel itself always stays reachable: it also holds the content
-        // controls, which apply to every source. Only the per-source fields go,
-        // and "Clear filters" with them, since it would have nothing to clear.
+        // Content restrictions stay outside this source-specific panel.
         if (declared.length === 0) {
             dom.filterFields.replaceChildren();
         }
@@ -752,7 +891,8 @@ function wireBrowser(popup, health, options) {
         // A file chosen for inspection is inspected whatever the preference says;
         // the preference is about imports the user has already decided on.
         const direct = !request.file && getSettings().skipReview;
-        openSubview(returnTo, (container, onBack, signal) => showIntake(container, request, onBack, { signal, direct }));
+        openSubview(returnTo, (container, onBack, signal) => showIntake(container, request, onBack, { signal, direct }),
+            [request.source?.id]);
     }
 
     /**
@@ -760,21 +900,73 @@ function wireBrowser(popup, health, options) {
      * @param {'grid' | 'detail'} returnTo
      * @param {(container: HTMLElement, onBack: () => void, signal: AbortSignal) => Promise<void>} render
      */
-    function openSubview(returnTo, render) {
+    function openSubview(returnTo, render, sources = []) {
+        if (state.disposed || dom.intake.matches('[data-committing="true"]')
+            || dom.intake.querySelector('[data-committing="true"]')) {
+            return;
+        }
+        const returnFocus = document.activeElement;
         state.intakeController?.abort();
         const controller = new AbortController();
         state.intakeController = controller;
+        state.intakeSources = sources;
         dom.root.dataset.view = 'intake';
 
         void render(dom.intake, () => {
+            if (state.disposed || controller.signal.aborted || state.intakeController !== controller) {
+                return;
+            }
             controller.abort();
             state.intakeController = null;
+            state.intakeSources = [];
             dom.intake.replaceChildren();
-            dom.root.dataset.view = returnTo;
-            if (returnTo === 'grid') {
-                dom.query?.focus();
+            if (returnTo === 'detail' && !state.detailController) {
+                returnTo = 'grid';
             }
+            dom.root.dataset.view = returnTo;
+            const pane = returnTo === 'detail' ? dom.detail : dom.bar;
+            const target = returnFocus?.isConnected && pane?.contains(returnFocus) && !returnFocus.disabled
+                ? returnFocus : returnTo === 'detail' ? dom.detail.querySelector('.sbbs-back') : dom.query;
+            target?.focus();
         }, controller.signal);
+    }
+
+    function updateShortlist() {
+        setText(dom.shortlistCount, `Shortlist (${state.shortlist.size})`);
+        dom.shortlistImport.disabled = dom.shortlistClear.disabled = state.shortlist.size === 0;
+        const focusedKey = document.activeElement?.closest('[data-shortlist-key]')?.dataset.shortlistKey;
+        dom.shortlistItems.replaceChildren();
+        for (const [key, record] of state.shortlist) {
+            const row = el('li', 'sbbs-shortlist-item');
+            row.dataset.shortlistKey = key;
+            row.append(el('span', undefined, `${record.item.name || 'Untitled'} (${record.source.label})`));
+            const review = el('button', 'menu_button sbbs-shortlist-review', 'Review');
+            review.type = 'button';
+            review.setAttribute('aria-label', `Review ${record.item.name || 'Untitled'}`);
+            review.addEventListener('click', () => openIntake({ card: record.item, source: record.source }, 'grid'));
+            const remove = el('button', 'menu_button sbbs-shortlist-remove', 'Remove');
+            remove.type = 'button';
+            remove.setAttribute('aria-label', `Remove ${record.item.name || 'Untitled'} from shortlist`);
+            remove.addEventListener('click', () => {
+                state.shortlist.delete(key);
+                updateShortlist();
+                (dom.shortlistItems.querySelector('button') ?? dom.shortlistCount).focus();
+            });
+            row.append(review, remove);
+            dom.shortlistItems.append(row);
+            if (key === focusedKey) {
+                review.focus();
+            }
+        }
+        for (const [open, record] of records) {
+            const button = open.parentElement?.querySelector('.sbbs-shortlist-toggle');
+            if (!button) {
+                continue;
+            }
+            const saved = state.shortlist.has(`${record.source.id}:${record.item.id}`);
+            button.setAttribute('aria-pressed', String(saved));
+            setText(button, saved ? 'Shortlisted' : 'Shortlist');
+        }
     }
 
     // ---- selecting cards for one import ----
@@ -818,34 +1010,18 @@ function wireBrowser(popup, health, options) {
     function closeIntake() {
         state.intakeController?.abort();
         state.intakeController = null;
+        state.intakeSources = [];
         dom.intake.replaceChildren();
+    }
+
+    function preserveIntake() {
+        return dom.root.dataset.view === 'intake' && (dom.intake.dataset.committing === 'true'
+            || dom.intake.querySelector('[data-committing="true"], .sbbs-intake-account-recovery[data-source="botbooru"]'));
     }
 
     function resetForAccountChange(account) {
         const wasDetail = dom.root.dataset.view === 'detail';
-        clearTimeout(state.typingTimer);
-        state.searchController?.abort();
-        state.detailController?.abort();
-        state.searchController = null;
-        state.detailController = null;
-        closeIntake();
-        state.requestGeneration++;
-        state.loading = false;
-        state.nextCursor = null;
-        state.items = [];
-        state.itemKeys.clear();
-        state.cache.clear();
-        records.clear();
-        dom.body?.setAttribute('aria-busy', 'false');
-        dom.grid.replaceChildren();
-        updateSelectionBar();
-        dom.detail.replaceChildren();
-        dom.root.dataset.view = 'grid';
-        dom.more.hidden = true;
-        dom.more.disabled = false;
-        dom.partial.hidden = true;
-        dom.partial.replaceChildren();
-        setText(dom.count, '');
+        resetSearch();
 
         if (!account.error && (!account.loggedIn || !account.nsfwEnabled) && !dom.sfw.checked) {
             // This is deliberately dialog-local. The saved default still reflects
@@ -866,13 +1042,6 @@ function wireBrowser(popup, health, options) {
 
     /** Keeps valid merged results while removing cards tied to an expired account. */
     function removeMergedBotbooruResults(account) {
-        const wasDetail = dom.root.dataset.view === 'detail';
-        state.detailController?.abort();
-        state.detailController = null;
-        dom.detail.replaceChildren();
-        closeIntake();
-        dom.root.dataset.view = 'grid';
-
         for (const [open, record] of records) {
             if (record.source.id === 'botbooru') {
                 open.closest('li')?.remove();
@@ -882,17 +1051,16 @@ function wireBrowser(popup, health, options) {
         updateSelectionBar();
         state.items = state.items.filter((item) => item?.source !== 'botbooru');
         state.itemKeys = new Set(state.items.map((item) => `${item.source}:${item.id}`));
-        dom.more.hidden = state.nextCursor === null;
-        dom.more.disabled = false;
-
-        if (!account.error && (!account.loggedIn || !account.nsfwEnabled) && !dom.sfw.checked) {
-            dom.sfw.checked = true;
-            updateContentControlNote();
+        const source = mergedSources().find((entry) => entry.id === 'botbooru');
+        if (source && state.lastBody) {
+            state.streams.get(source.id)?.controller?.abort();
+            state.streams.set(source.id, {
+                source, body: { ...state.lastBody, sources: [source.id], cursor: null }, cursor: null,
+                error: account.error ?? 'account_changed', busy: false,
+            });
+            renderSourceStreams();
         }
         setText(dom.count, formatResultCount(state.items.length, null));
-        if (wasDetail && dom.query.isConnected) {
-            dom.query.focus();
-        }
     }
 
     /** Resolves a result's own source, which in a merged search is not the selection. */
@@ -917,15 +1085,57 @@ function wireBrowser(popup, health, options) {
         dom.filtersToggle.setAttribute('aria-label', active === 0 ? 'Filters' : `Filters, ${active} active`);
     }
 
-    async function runSearch({ append }) {
-        if (state.disposed || (append && (state.loading || !state.nextCursor))) {
+    function resetSearch() {
+        clearTimeout(state.typingTimer);
+        state.searchController?.abort();
+        state.requestGeneration++;
+        state.loading = false;
+        state.nextCursor = null;
+        state.lastBody = null;
+        for (const stream of state.streams.values()) {
+            stream.controller?.abort();
+        }
+        state.streams.clear();
+        renderSourceStreams();
+        state.items = [];
+        state.itemKeys.clear();
+        records.clear();
+        dom.grid.replaceChildren();
+        setSelecting(false);
+        dom.body?.setAttribute('aria-busy', 'false');
+        dom.more.disabled = false;
+        dom.more.hidden = true;
+        hideSourceFailure();
+        setText(dom.count, '');
+    }
+
+    async function runSearch({ append, openUrl = false, remember = false, refresh = false }) {
+        if (state.disposed) {
             return;
+        }
+        if (!append) {
+            resetSearch();
+        }
+        if (handleUrlIntent(dom.query.value, { open: openUrl })) {
+            return;
+        }
+        if (state.disposed || (append && (state.loading || !state.nextCursor
+            || [...state.streams.values()].some((stream) => stream.busy)))) {
+            return;
+        }
+        if (remember) {
+            rememberQuery(dom.query.value);
+            refreshQueryHistory();
+        }
+        if (refresh) {
+            state.cache.clear();
         }
 
         state.searchController?.abort();
         const controller = new AbortController();
         state.searchController = controller;
         const generation = ++state.requestGeneration;
+        const accountRevision = state.account.revision;
         const source = state.source;
         const query = dom.query.value.trim();
         const sort = dom.sort.value;
@@ -935,6 +1145,7 @@ function wireBrowser(popup, health, options) {
         const filters = state.filters?.read() ?? {};
 
         state.loading = true;
+        renderSourceStreams();
         dom.body?.setAttribute('aria-busy', 'true');
         dom.more.disabled = true;
         setText(dom.more, 'Load more');
@@ -942,12 +1153,6 @@ function wireBrowser(popup, health, options) {
         setText(dom.state, append ? `Loading more from ${source.label}...` : `Searching ${source.label}...`);
 
         if (!append) {
-            state.nextCursor = null;
-            state.items = [];
-            state.itemKeys.clear();
-            records.clear();
-            dom.grid.replaceChildren();
-            updateSelectionBar();
             showSkeletons();
         }
         dom.more.hidden = true;
@@ -962,16 +1167,21 @@ function wireBrowser(popup, health, options) {
         }
         const body = {
             query,
-            limit: getSettings().resultsPerPage,
+            limit: append ? state.lastBody.limit : getSettings().resultsPerPage,
             cursor,
             filters: requestFilters,
         };
 
         if (members.length > 0) {
-            body.sources = members.map((entry) => entry.id);
+            body.sources = members.filter((entry) => !state.streams.has(entry.id)).map((entry) => entry.id);
+            if (body.sources.length === 0) {
+                state.loading = false;
+                dom.body?.setAttribute('aria-busy', 'false');
+                return;
+            }
             // Each source keeps its own saved sort; there is no vocabulary they
             // share, so there is nothing sensible for one control to set.
-            const saved = getSettings().sortBySource;
+            const saved = (append ? state.lastBody.sorts : state.mergedSorts) ?? getSettings().sortBySource;
             body.sorts = Object.fromEntries(members.map((entry) => [
                 entry.id,
                 saved[entry.id] ?? entry.capabilities?.sorts?.[0],
@@ -980,24 +1190,34 @@ function wireBrowser(popup, health, options) {
             body.source = source.id;
             body.sort = sort;
         }
+        state.lastBody = body;
 
         try {
             // A control that was just toggled asks a question already answered.
-            const cached = state.cache.get(body);
+            const cached = refresh ? null : state.cache.get(body);
             const result = cached ?? await postRouted('/search', body, source, {
                 signal: controller.signal,
                 // A merged search has no single source to reroute, and the
                 // per-source failures it reports are handled below instead.
                 allowDirect: members.length === 0 && getSettings().allowDirectRequests,
-                onDirect: (reason) => useDirectRouting(source, reason),
+                onDirect: (reason) => {
+                    if (!state.disposed && generation === state.requestGeneration) {
+                        useDirectRouting(source, reason);
+                    }
+                },
             });
 
             if (state.disposed || generation !== state.requestGeneration) {
                 return;
             }
 
-            const partial = Array.isArray(result.partial) ? result.partial : [];
-            if (!cached && partial.length === 0) {
+            const accountChanged = accountRevision !== state.account.revision;
+            if (accountChanged && source.id === 'botbooru') {
+                return;
+            }
+            const partial = (Array.isArray(result.partial) ? result.partial : [])
+                .filter((entry) => !accountChanged || entry?.source !== 'botbooru');
+            if (!cached && partial.length === 0 && !accountChanged) {
                 state.cache.set(body, result);
             }
 
@@ -1008,7 +1228,8 @@ function wireBrowser(popup, health, options) {
                 const itemSource = sourceOf(item);
                 // Keyed by the item's OWN source, which in a merged search is
                 // not the selection.
-                if (!itemSource || typeof item?.id !== 'string' || item.id === '') {
+                if (!itemSource || typeof item?.id !== 'string' || item.id === ''
+                    || (accountChanged && itemSource.id === 'botbooru') || state.streams.has(itemSource.id)) {
                     return false;
                 }
                 const key = `${itemSource.id}:${item.id}`;
@@ -1034,10 +1255,11 @@ function wireBrowser(popup, health, options) {
             // Which sources in a merged search did not answer. Stated rather
             // than hidden: a short list of results has a reason, and silently
             // dropping a site would look like it simply had nothing.
-            showPartialFailures(partial);
+            showPartialFailures(partial, body, result.nextCursor, accountRevision);
 
-            setText(dom.count, formatResultCount(state.items.length, result.total));
-            dom.more.hidden = state.nextCursor === null;
+            setText(dom.count, formatResultCount(state.items.length, state.streams.size ? null : result.total));
+            dom.more.hidden = state.nextCursor === null || (members.length > 0
+                && members.every((entry) => state.streams.has(entry.id)));
         } catch (error) {
             if (error?.name === 'AbortError' || generation !== state.requestGeneration || state.disposed) {
                 return;
@@ -1047,10 +1269,13 @@ function wireBrowser(popup, health, options) {
             // The server is in cooldown for this source, so re-searching would
             // be answered without it trying. Offer the reload that clears it.
             if (error?.code === 'source_down') {
-                showSourceFailure(source, source.reason);
+                showSourceFailure(source, source.reason, append);
                 return;
             }
 
+            if (source.id === 'botbooru' && accountRevision !== state.account.revision) {
+                return;
+            }
             if (source.id === 'botbooru' && noteBotbooruAccountError(error)) {
                 return;
             }
@@ -1067,6 +1292,7 @@ function wireBrowser(popup, health, options) {
                 state.loading = false;
                 dom.body?.setAttribute('aria-busy', 'false');
                 dom.more.disabled = false;
+                renderSourceStreams();
             }
         }
     }
@@ -1084,23 +1310,130 @@ function wireBrowser(popup, health, options) {
     }
 
     /** Names the sources a merged search could not reach, or clears the notice. */
-    function showPartialFailures(partial) {
-        dom.partial.replaceChildren();
-        if (partial.length === 0) {
-            dom.partial.hidden = true;
-            return;
-        }
-
-        dom.partial.hidden = false;
+    function showPartialFailures(partial, body, nextCursor, accountRevision) {
         for (const entry of partial) {
-            const label = usable.find((item) => item.id === entry?.source)?.label ?? entry?.source;
-            if (entry?.source === 'botbooru') {
+            const source = mergedSources().find((item) => item.id === entry?.source);
+            if (!source || !body.sources?.includes(source.id)) {
+                continue;
+            }
+            if (entry?.source === 'botbooru' && accountRevision === state.account.revision) {
                 noteBotbooruAccountError({ code: entry?.error });
             }
-            setText(
-                dom.partial.appendChild(el('div', 'sbbs-partial-line')),
-                searchErrorMessage({ code: entry?.error }, label),
-            );
+            const accountFailure = source.id === 'botbooru' && [
+                'botbooru_login_required', 'botbooru_session_expired', 'botbooru_nsfw_disabled',
+            ].includes(entry.error);
+            state.streams.set(source.id, {
+                source, body: { ...body, sources: [source.id] },
+                // A merged cursor can be narrowed to one source without decoding
+                // it. Account failures have no retained cursor and restart safely.
+                cursor: accountFailure ? null : (nextCursor || body.cursor || null),
+                error: entry.error, busy: false,
+            });
+        }
+        renderSourceStreams();
+    }
+
+    function renderSourceStreams() {
+        dom.more.disabled = state.loading || [...state.streams.values()].some((stream) => stream.busy);
+        dom.partial.replaceChildren();
+        dom.recovered.replaceChildren();
+        for (const stream of state.streams.values()) {
+            const row = el('div', 'sbbs-partial-line sbbs-source-recovery');
+            if (stream.error) {
+                row.append(el('span', undefined, stream.error === 'account_changed'
+                    ? 'BotBooru account changed. Retry to load results for the current account.'
+                    : searchErrorMessage({ code: stream.error }, stream.source.label)));
+            }
+            if (stream.error || stream.cursor) {
+                const button = el('button', 'menu_button sbbs-retry-source', stream.busy
+                    ? `Loading ${stream.source.label}...`
+                    : `${stream.error ? 'Retry' : 'Load more from'} ${stream.source.label}`);
+                button.type = 'button';
+                button.dataset.source = stream.source.id;
+                button.disabled = stream.busy || state.loading;
+                button.addEventListener('click', () => void retrySource(stream));
+                row.append(button);
+                (stream.error ? dom.partial : dom.recovered).append(row);
+            }
+        }
+        dom.partial.hidden = dom.partial.childElementCount === 0;
+        dom.recovered.hidden = dom.recovered.childElementCount === 0;
+    }
+
+    async function retrySource(stream) {
+        if (state.disposed || state.loading || stream.busy || state.streams.get(stream.source.id) !== stream) {
+            return;
+        }
+        const generation = state.requestGeneration;
+        const accountRevision = state.account.revision;
+        const controller = new AbortController();
+        stream.controller = controller;
+        const current = () => !state.disposed && !controller.signal.aborted
+            && generation === state.requestGeneration && state.streams.get(stream.source.id) === stream
+            && (stream.source.id !== 'botbooru' || accountRevision === state.account.revision);
+        stream.busy = true;
+        dom.more.disabled = true;
+        renderSourceStreams();
+        try {
+            if (stream.error) {
+                await post('/retry', { source: stream.source.id }, { signal: controller.signal });
+                if (!current()) {
+                    return;
+                }
+                invalidateAvailability();
+            }
+            const body = { ...stream.body, cursor: stream.cursor };
+            if (stream.source.id === 'botbooru' && !state.account.error
+                && (!state.account.loggedIn || !state.account.nsfwEnabled)) {
+                body.filters = { ...body.filters, sfwOnly: true };
+            }
+            const result = await post('/search', body, { signal: controller.signal });
+            if (!current()) {
+                return;
+            }
+            const failure = (Array.isArray(result.partial) ? result.partial : [])
+                .find((entry) => entry?.source === stream.source.id);
+            if (failure) {
+                stream.error = failure.error;
+                if (stream.source.id === 'botbooru') {
+                    noteBotbooruAccountError({ code: failure.error });
+                }
+                return;
+            }
+            const fresh = (Array.isArray(result.items) ? result.items : []).filter((item) => {
+                if (item?.source !== stream.source.id || typeof item.id !== 'string' || !item.id) {
+                    return false;
+                }
+                const key = `${item.source}:${item.id}`;
+                if (state.itemKeys.has(key)) {
+                    return false;
+                }
+                state.itemKeys.add(key);
+                return true;
+            });
+            state.items.push(...fresh);
+            appendCards(fresh, state.source);
+            stream.body = body;
+            stream.cursor = typeof result.nextCursor === 'string' && result.nextCursor ? result.nextCursor : null;
+            stream.error = null;
+            setText(dom.count, formatResultCount(state.items.length, null));
+            if (state.items.length) {
+                setText(dom.state, '');
+            }
+        } catch (error) {
+            if (!current() || error?.name === 'AbortError') {
+                return;
+            }
+            stream.error = error?.code ?? 'request_failed';
+            if (stream.source.id === 'botbooru') {
+                noteBotbooruAccountError(error);
+            }
+        } finally {
+            if (current()) {
+                stream.busy = false;
+                dom.more.disabled = [...state.streams.values()].some((entry) => entry.busy);
+                renderSourceStreams();
+            }
         }
     }
 
@@ -1162,15 +1495,8 @@ function wireBrowser(popup, health, options) {
      * while a source is in cooldown the server answers immediately without
      * trying. Reload clears that first, then searches again.
      */
-    function showSourceFailure(dead, reason) {
-        dom.grid.replaceChildren();
-        records.clear();
-        updateSelectionBar();
-        state.items = [];
-        state.itemKeys.clear();
-        state.nextCursor = null;
+    function showSourceFailure(dead, reason, append = false) {
         dom.more.hidden = true;
-        setText(dom.count, '');
         setText(dom.state, `${unreachableReason(dead.label, reason)} It is still in the list.`);
 
         // Rebuilt each time rather than accumulating one per failed attempt.
@@ -1181,6 +1507,7 @@ function wireBrowser(popup, health, options) {
         reload.type = 'button';
         setText(reload, `Reload ${dead.label}`);
         reload.addEventListener('click', async () => {
+            const generation = state.requestGeneration;
             reload.disabled = true;
             setText(reload, `Reloading ${dead.label}...`);
             try {
@@ -1190,12 +1517,12 @@ function wireBrowser(popup, health, options) {
                 // The cooldown could not be cleared, but the search below still
                 // reports what happened, so there is nothing extra to say here.
             }
-            if (state.disposed) {
+            if (state.disposed || generation !== state.requestGeneration || state.source !== dead) {
                 return;
             }
             dom.reload.hidden = true;
             dom.reload.replaceChildren();
-            void runSearch({ append: false });
+            void runSearch({ append, refresh: true });
         });
 
         dom.reload.append(reload);
@@ -1227,6 +1554,22 @@ function wireBrowser(popup, health, options) {
                 state.directSources.has(source.id),
             );
             records.set(open, { item, source });
+            const shortlist = el('button', 'menu_button sbbs-shortlist-toggle', 'Shortlist');
+            shortlist.type = 'button';
+            shortlist.setAttribute('aria-label', `Shortlist ${item.name || 'Untitled'}`);
+            shortlist.addEventListener('click', () => {
+                if (!records.has(open) || state.disposed) {
+                    return;
+                }
+                const key = `${source.id}:${item.id}`;
+                if (state.shortlist.has(key)) {
+                    state.shortlist.delete(key);
+                } else {
+                    state.shortlist.set(key, { item, source });
+                }
+                updateShortlist();
+            });
+            card.append(shortlist);
 
             // Clicking a tag narrows the search instead of opening the card.
             // Only offered when the source declares a tag filter, so it never
@@ -1237,6 +1580,7 @@ function wireBrowser(popup, health, options) {
                         dom.filters.hidden = false;
                         dom.filtersToggle.setAttribute('aria-expanded', 'true');
                         onFilterChange();
+                        dom.filterFields.querySelector('#sbbs_filter_tags')?.focus();
                     }
                 });
             }
@@ -1254,10 +1598,17 @@ function wireBrowser(popup, health, options) {
                 state.detailController?.abort();
                 const detailController = new AbortController();
                 state.detailController = detailController;
+                state.detailSource = record.source.id;
+                const current = () => !state.disposed && !detailController.signal.aborted
+                    && state.detailController === detailController;
                 dom.root.dataset.view = 'detail';
                 void showDetail(dom.detail, record.item, record.source, () => {
+                    if (!current()) {
+                        return;
+                    }
                     detailController.abort();
                     state.detailController = null;
+                    state.detailSource = null;
                     dom.root.dataset.view = 'grid';
                     dom.detail.replaceChildren();
                     // Return focus where it was, so keyboard and screen-reader
@@ -1270,23 +1621,33 @@ function wireBrowser(popup, health, options) {
                     // Filtering from the detail pane only makes sense back in
                     // the grid, so it returns there rather than leaving the user
                     // on a card while the results behind it change.
-                    onTag: (tag) => {
-                        if (!state.filters?.set('tags', tag)) {
+                    onTag: merged ? undefined : (tag) => {
+                        if (!current() || !state.filters?.set('tags', tag)) {
                             return;
                         }
                         detailController.abort();
                         state.detailController = null;
+                        state.detailSource = null;
                         dom.root.dataset.view = 'grid';
                         dom.detail.replaceChildren();
                         dom.filters.hidden = false;
                         dom.filtersToggle.setAttribute('aria-expanded', 'true');
                         onFilterChange();
+                        dom.filterFields.querySelector('#sbbs_filter_tags')?.focus();
                     },
-                    onDirect: (reason) => useDirectRouting(record.source, reason),
+                    onDirect: (reason) => {
+                        if (current()) {
+                            useDirectRouting(record.source, reason);
+                        }
+                    },
                     isSourceDirect: (sourceId) => state.directSources.has(sourceId),
                     // The detail pane stays mounted behind the intake screen, so
                     // Back returns to the card the user was already reading.
-                    onIntake: (request) => openIntake(request, 'detail'),
+                    onIntake: (request) => {
+                        if (current()) {
+                            openIntake(request, 'detail');
+                        }
+                    },
                 });
             });
             if (dom.root.dataset.selecting === 'true') {
@@ -1297,6 +1658,7 @@ function wireBrowser(popup, health, options) {
             dom.grid.append(li);
         }
         updateSelectionBar();
+        updateShortlist();
     }
 
     function showSkeletons() {
@@ -1328,7 +1690,13 @@ function wireBrowser(popup, health, options) {
         // as the dialog and no longer.
         state.cache.clear();
         state.vocabulary.clear();
+        state.shortlist.clear();
+        for (const stream of state.streams.values()) {
+            stream.controller?.abort();
+        }
+        state.streams.clear();
         unsubscribeAccount();
+        unsubscribeSettings();
     };
 }
 
@@ -1407,12 +1775,21 @@ function buildCard(item, source, settings, showSource = false, sourceDirect = fa
     if (item.creator) {
         sub.push(item.creator);
     }
-    meta.append(el('div', 'sbbs-card-sub', sub.join(' · ')));
+    const descriptionIds = [];
+    const subline = el('div', 'sbbs-card-sub', sub.join(' · '));
+    subline.id = `sbbs_card_description_${++nextCardDescriptionId}`;
+    meta.append(subline);
+    if (item.stats?.tokens) {
+        descriptionIds.push(subline.id);
+    }
 
     // The source's own one-line summary. Already fetched and normalized, and the
     // single most useful thing for telling two similarly-named cards apart.
     if (typeof item.tagline === 'string' && item.tagline.trim() !== '') {
-        meta.append(el('div', 'sbbs-card-tagline', item.tagline.trim()));
+        const tagline = el('div', 'sbbs-card-tagline', item.tagline.trim());
+        tagline.id = `sbbs_card_description_${++nextCardDescriptionId}`;
+        meta.append(tagline);
+        descriptionIds.push(tagline.id);
     }
 
     // Source, popularity and content rating share the card's last line. On a
@@ -1448,6 +1825,9 @@ function buildCard(item, source, settings, showSource = false, sourceDirect = fa
     }
     parts.push(rating.accessible);
     open.setAttribute('aria-label', parts.join(', '));
+    if (descriptionIds.length) {
+        open.setAttribute('aria-describedby', descriptionIds.join(' '));
+    }
 
     card.append(open);
 

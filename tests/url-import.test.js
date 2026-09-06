@@ -103,9 +103,9 @@ test('Saucepan bearers stay profile-scoped and out of public status', async () =
 
     await store.login('profile-a', 'alice', 'password');
     assert.deepEqual(await store.status('profile-a'), { source: 'saucepan', loggedIn: true });
-    assert.deepEqual(store.context('profile-a'), { bearerToken: 'saucepan-test-token' });
+    assert.deepEqual(store.cardRequest('profile-a').context, { bearerToken: 'saucepan-test-token' });
     assert.deepEqual(await store.status('profile-b'), { source: 'saucepan', loggedIn: false });
-    assert.throws(() => store.context('profile-b'), (error) => error.code === 'saucepan_login_required');
+    assert.throws(() => store.cardRequest('profile-b'), (error) => error.code === 'saucepan_login_required');
 });
 
 test('the Janny browser mapper reconstructs a private card from a captured prompt', () => {
@@ -143,6 +143,10 @@ test('the URL-card bridge accepts only the two explicit source URL forms', async
     };
     const app = express();
     app.use(express.json());
+    app.use((request, _response, next) => {
+        request.user = { profile: { handle: 'url-import-admin', admin: true } };
+        next();
+    });
     const router = express.Router();
     createRouter(router, {
         startedAt: Date.now(),

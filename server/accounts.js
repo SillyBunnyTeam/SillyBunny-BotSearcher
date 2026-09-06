@@ -128,7 +128,7 @@ export function createBotbooruAccounts({
         }
     };
 
-    const authenticatedContext = (token) => makeContext(adapter, { bearerToken: token });
+    const authenticatedContext = (token, options) => makeContext(adapter, { ...options, bearerToken: token });
 
     async function performRefresh(handle, session) {
         const expectedGeneration = generation(handle);
@@ -257,12 +257,17 @@ export function createBotbooruAccounts({
             if (typeof enabled !== 'boolean') {
                 throw new AccountError('bad_account_request', 400);
             }
-            const current = await requireSession(handle);
             const operation = beginExclusiveMutation(handle);
             try {
+                const current = await requireSession(handle);
+                if (generation(handle) !== operation) {
+                    throw new AccountError('botbooru_account_changed', 409);
+                }
                 let patched = false;
                 let account;
                 try {
+                    // Finish the bounded write/verification even if the browser
+                    // disconnects, so local state reflects the upstream outcome.
                     const ctx = authenticatedContext(current.token);
                     await adapter.updateNsfw(ctx, enabled);
                     patched = true;
@@ -318,25 +323,25 @@ export function createBotbooruAccounts({
             }
         },
 
-        async searchRequest(handle, sfwOnly) {
+        async searchRequest(handle, sfwOnly, options) {
             // Only an explicit false opts into account-visible content. Missing
             // or malformed input must fail closed to the anonymous SFW catalog.
             if (sfwOnly !== false) {
-                return { context: makeContext(adapter), sessionNonce: null };
+                return { context: makeContext(adapter, options), sessionNonce: null };
             }
             const session = await requireSession(handle, { requireNsfw: true });
-            return { context: authenticatedContext(session.token), sessionNonce: session.nonce };
+            return { context: authenticatedContext(session.token, options), sessionNonce: session.nonce };
         },
 
-        async detailRequest(handle, nonce) {
+        async detailRequest(handle, nonce, options) {
             if (typeof nonce !== 'string') {
-                return { context: makeContext(adapter), sessionNonce: null };
+                return { context: makeContext(adapter, options), sessionNonce: null };
             }
             const session = await requireSession(handle, { requireNsfw: true });
             if (session.nonce !== nonce) {
                 throw new AccountError('botbooru_account_changed', 409);
             }
-            return { context: authenticatedContext(session.token), sessionNonce: session.nonce };
+            return { context: authenticatedContext(session.token, options), sessionNonce: session.nonce };
         },
 
         async thumbnailRequest(handle, nonce) {
@@ -399,7 +404,7 @@ export function createSaucepanAccounts({
         && token.length > 0
         && token.length <= FIELD_LIMITS.accountToken
         && /^[\x21-\x7e]+$/.test(token);
-    const tokenContext = (token) => makeContext(adapter, { bearerToken: token });
+    const tokenContext = (token, options) => makeContext(adapter, { ...options, bearerToken: token });
 
     return Object.freeze({
         status(handle) {
@@ -446,13 +451,13 @@ export function createSaucepanAccounts({
             return signedIn();
         },
 
-        context(handle) {
+        cardRequest(handle, options) {
             requireHandle(handle);
             const token = sessions.get(handle);
             if (!token) {
                 throw new AccountError('saucepan_login_required', 401);
             }
-            return tokenContext(token);
+            return { context: tokenContext(token, options), sessionVersion: generation(handle) };
         },
 
         logout(handle) {
@@ -462,8 +467,8 @@ export function createSaucepanAccounts({
             return signedOut();
         },
 
-        invalidate(handle) {
-            if (typeof handle === 'string') {
+        invalidate(handle, sessionVersion) {
+            if (typeof handle === 'string' && generation(handle) === sessionVersion) {
                 beginMutation(handle);
                 sessions.delete(handle);
             }

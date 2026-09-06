@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 
-import { fetchBytes, fetchJson } from '../server/http.js';
+import { contextFor, fetchBytes, fetchJson } from '../server/http.js';
 import { mintRef, verifyRef } from '../server/refs.js';
 import { detectImageType } from '../server/imagetype.js';
 import { markFailure, markSuccess, isDown, stateOf, clearAll, classify } from '../server/health.js';
@@ -239,6 +239,24 @@ test('caller cancellation is distinct from a deadline and network detail never i
             && !String(error.detail).includes('must-not-reach-logs')
             && /^[A-Za-z0-9_.-]{1,64}$/.test(String(error.detail)),
     );
+});
+
+test('bound contexts preserve both request-wide and per-fetch cancellation', async () => {
+    const server = await upstream(() => {});
+    try {
+        for (const abortBound of [true, false]) {
+            const bound = new AbortController();
+            const local = new AbortController();
+            const context = contextFor(testAdapter(['127.0.0.1']), { signal: bound.signal });
+            const pending = context.fetchJson(`http://127.0.0.1:${server.port}/cancel`, {
+                signal: local.signal, timeoutMs: 1000,
+            });
+            (abortBound ? bound : local).abort();
+            await assert.rejects(pending, (error) => error.code === 'aborted');
+        }
+    } finally {
+        await server.close();
+    }
 });
 
 test('outbound requests carry no cookie, authorization or referer', async () => {

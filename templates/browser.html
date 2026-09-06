@@ -20,57 +20,56 @@
             <select id="sbbs_source" class="text_pole sbbs-source" aria-label="Source"></select>
             <label class="sbbs-visually-hidden" for="sbbs_sort">Sort results</label>
             <select id="sbbs_sort" class="text_pole sbbs-sort" aria-label="Sort"></select>
-            <!--
-                Always present. It holds the content controls below, which apply to
-                every source, so hiding it when a source declares no filters of its
-                own would put "SFW only" out of reach.
-            -->
             <button id="sbbs_filters_toggle" class="menu_button sbbs-filters-toggle" type="button" aria-expanded="false" aria-controls="sbbs_filters">
                 <i class="fa-solid fa-sliders" aria-hidden="true"></i>
                 <span>Filters</span>
                 <span id="sbbs_filters_badge" class="sbbs-filters-badge" hidden></span>
             </button>
+            <button id="sbbs_refresh" class="menu_button sbbs-refresh" type="button">Refresh results</button>
+        </div>
+        <div class="sbbs-filter-group sbbs-content-controls" role="group" aria-label="Content restrictions">
+            <label class="checkbox_label sbbs-sfw">
+                <input id="sbbs_sfw" type="checkbox">
+                <span>SFW only</span>
+            </label>
+            <label id="sbbs_hide_ai_control" class="checkbox_label sbbs-hide-ai" hidden>
+                <input id="sbbs_hide_ai" type="checkbox">
+                <span>Hide AI-generated</span>
+            </label>
         </div>
         <div id="sbbs_filters" class="sbbs-filters" hidden>
-            <!--
-                Content controls first: they apply to every source and keep their
-                value across a source change, unlike the per-source fields below.
-            -->
-            <div class="sbbs-filter-group">
-                <label class="checkbox_label sbbs-sfw">
-                    <input id="sbbs_sfw" type="checkbox">
-                    <span>SFW only</span>
-                </label>
-                <label id="sbbs_hide_ai_control" class="checkbox_label sbbs-hide-ai" hidden>
-                    <input id="sbbs_hide_ai" type="checkbox">
-                    <span>Hide AI-generated</span>
-                </label>
-            </div>
             <!--
                 Populated per source from capabilities.filters, so a control only
                 appears when the selected source can actually apply it.
             -->
             <div id="sbbs_filter_fields" class="sbbs-filter-fields"></div>
             <div class="sbbs-filter-actions">
-                <button id="sbbs_filters_clear" class="menu_button sbbs-filters-clear" type="button">Clear filters</button>
-            </div>
-            <!--
-                Intake works on any card file, not only ones found here, so the
-                picker lives with the controls rather than with the results.
-            -->
-            <!--
-                Card URLs are pasted into the search box itself and recognized
-                there; there is no separate URL form.
-            -->
-            <div class="sbbs-filter-group sbbs-intake-entry">
-                <button id="sbbs_inspect_file" class="menu_button sbbs-inspect-file" type="button">
-                    <i class="fa-solid fa-file-shield" aria-hidden="true"></i>
-                    <span>Inspect a card file</span>
-                </button>
-                <input id="sbbs_card_file" class="sbbs-visually-hidden" type="file" accept=".png,.json,image/png,application/json" tabindex="-1" aria-hidden="true">
-                <span class="sbbs-setting-note">Reports what is inside a PNG or JSON card before importing it. You can also drop one onto this dialog.</span>
+                <button id="sbbs_filters_clear" class="menu_button sbbs-filters-clear" type="button">Clear source filters</button>
             </div>
         </div>
+        <div class="sbbs-intake-entry sbbs-file-actions">
+            <button id="sbbs_inspect_file" class="menu_button sbbs-inspect-file" type="button">
+                <i class="fa-solid fa-file-shield" aria-hidden="true"></i>
+                <span>Inspect a card file</span>
+            </button>
+            <input id="sbbs_card_file" class="sbbs-visually-hidden" type="file" accept=".png,.json,image/png,application/json" tabindex="-1" aria-hidden="true">
+            <span class="sbbs-setting-note">Reports what is inside a PNG or JSON card before importing it. You can also drop one onto this dialog.</span>
+        </div>
+        <details class="sbbs-named-searches" id="sbbs_named_searches">
+            <summary>Named searches</summary>
+            <label class="checkbox_label"><input id="sbbs_named_consent" type="checkbox" aria-describedby="sbbs_named_privacy"><span id="sbbs_named_consent_label"></span></label>
+            <p id="sbbs_named_privacy" class="sbbs-setting-note"></p>
+            <div id="sbbs_named_controls" class="sbbs-named-controls" hidden>
+                <label for="sbbs_named_name">Search name</label>
+                <input id="sbbs_named_name" class="text_pole" type="text" autocomplete="off">
+                <button id="sbbs_named_save" class="menu_button" type="button">Save search</button>
+                <label for="sbbs_named_list">Named searches</label>
+                <select id="sbbs_named_list" class="text_pole"></select>
+                <button id="sbbs_named_load" class="menu_button" type="button">Load search</button>
+                <button id="sbbs_named_remove" class="menu_button" type="button">Delete search</button>
+            </div>
+            <p id="sbbs_named_status" class="sbbs-setting-note" role="status"></p>
+        </details>
       </form>
     </header>
 
@@ -87,6 +86,14 @@
         <div id="sbbs_partial" class="sbbs-partial" role="status" hidden></div>
         <!-- Offers to clear a failed source's cooldown and try it again. -->
         <div id="sbbs_reload" class="sbbs-reload" hidden></div>
+        <div id="sbbs_recovered" class="sbbs-recovered-sources" hidden></div>
+        <details class="sbbs-shortlist" id="sbbs_shortlist">
+            <summary id="sbbs_shortlist_count">Shortlist (0)</summary>
+            <p class="sbbs-setting-note">Kept across searches until you close this browser. Separate from cards selected for import.</p>
+            <ul id="sbbs_shortlist_items" class="sbbs-shortlist-items"></ul>
+            <button id="sbbs_shortlist_import" class="menu_button" type="button" disabled>Review shortlist for import</button>
+            <button id="sbbs_shortlist_clear" class="menu_button" type="button" disabled>Clear shortlist</button>
+        </details>
         <!--
             Selecting several cards for one import. Off, it is a single button;
             on, the grid's cards toggle instead of opening and this row carries

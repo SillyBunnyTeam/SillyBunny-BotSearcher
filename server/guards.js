@@ -43,10 +43,29 @@ export const SAFE_UPSTREAM_CODES = new Set(['timeout', 'too_large', 'http_error'
  */
 export function wrap(handler) {
     return function wrapped(request, response) {
+        const disconnected = new AbortController();
+        const abort = () => disconnected.abort(new UpstreamError('aborted'));
+        const close = () => {
+            if (!response.writableFinished) {
+                abort();
+            }
+        };
+        request.sbbsSignal = disconnected.signal;
+        request.once?.('aborted', abort);
+        response.once?.('close', close);
+        if (request.aborted || response.destroyed) {
+            abort();
+        }
         Promise.resolve()
-            .then(() => handler(request, response))
+            .then(() => {
+                request.sbbsSignal.throwIfAborted();
+                return handler(request, response);
+            })
             .catch((error) => {
                 try {
+                    if (request.sbbsSignal.aborted || response.destroyed) {
+                        return;
+                    }
                     if (error instanceof UpstreamError) {
                         // Log the detail, send only the classification.
                         console.warn(`[${LOG_TAG}] upstream ${error.code}:`, error.detail ?? '');
@@ -67,6 +86,10 @@ export function wrap(handler) {
                 } catch {
                     // Deliberately swallowed: rethrowing here would kill the server.
                 }
+            })
+            .finally(() => {
+                request.off?.('aborted', abort);
+                response.off?.('close', close);
             });
     };
 }
@@ -100,6 +123,20 @@ export function jsonGuardWithLimit(maxBytes) {
         const body = request.body;
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
             response.status(400).json({ error: 'bad_request' });
+            return;
+        }
+
+        // Content-Length can be absent or describe compressed bytes. The host
+        // already parsed the body, so also enforce the limit on its actual data.
+        let length;
+        try {
+            length = Buffer.byteLength(JSON.stringify(body), 'utf8');
+        } catch {
+            response.status(400).json({ error: 'bad_request' });
+            return;
+        }
+        if (length > maxBytes) {
+            response.status(413).json({ error: 'payload_too_large' });
             return;
         }
 

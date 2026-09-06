@@ -276,6 +276,41 @@ test('logout wins a race with an in-flight login and is idempotent', async () =>
     assert.equal((await store.status('profile-a')).loggedIn, false);
 });
 
+test('logout wins before a preference mutation resumes from its first await', async () => {
+    const { store, calls } = fakeStore();
+    await store.login('profile-a', 'alice', 'password');
+
+    const pending = store.setNsfw('profile-a', false);
+    store.logout('profile-a');
+
+    await assert.rejects(pending, (error) => error.code === 'botbooru_account_changed');
+    assert.equal(calls.filter((call) => call.kind === 'nsfw').length, 0, 'no stale upstream write');
+    assert.equal((await store.status('profile-a')).loggedIn, false, 'logout must not be undone');
+
+    await store.login('profile-a', 'alice', 'password');
+    assert.equal((await store.setNsfw('profile-a', false)).nsfwEnabled, false, 'the mutation lock was released');
+});
+
+test('logout during a preference write also prevents the stale local commit', async () => {
+    const started = Promise.withResolvers();
+    const finish = Promise.withResolvers();
+    const { store } = fakeStore({
+        adapter: {
+            async updateNsfw() {
+                started.resolve();
+                await finish.promise;
+            },
+        },
+    });
+    await store.login('profile-a', 'alice', 'password');
+    const pending = store.setNsfw('profile-a', false);
+    await started.promise;
+    store.logout('profile-a');
+    finish.resolve();
+    await assert.rejects(pending, (error) => error.code === 'botbooru_account_changed');
+    assert.equal((await store.status('profile-a')).loggedIn, false);
+});
+
 test('credential and profile bounds fail before calling the upstream', async () => {
     const { store, calls } = fakeStore({
         adapter: {

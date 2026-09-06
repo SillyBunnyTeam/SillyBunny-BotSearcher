@@ -45,8 +45,12 @@ export async function showDetail(container, summary, source, onBack, options = {
     // is left tabbing through a hidden view.
     back.focus();
 
-    const loading = el('div', 'sbbs-state', 'Loading card details...');
+    const loading = el('div', 'sbbs-state');
+    loading.setAttribute('role', 'status');
+    loading.setAttribute('aria-live', 'polite');
+    loading.setAttribute('aria-atomic', 'true');
     container.append(loading);
+    setText(loading, 'Loading card details...');
 
     let card;
     if (source.capabilities?.detail === false) {
@@ -69,10 +73,10 @@ export async function showDetail(container, summary, source, onBack, options = {
             if (error?.name === 'AbortError' || signal?.aborted) {
                 return;
             }
+            setText(loading, detailErrorMessage(error, source.label));
             if (source.id === 'botbooru' && noteBotbooruAccountError(error)) {
                 return;
             }
-            setText(loading, detailErrorMessage(error, source.label));
             const retry = el('button', 'menu_button', 'Try again');
             retry.type = 'button';
             retry.addEventListener('click', () => void showDetail(container, summary, source, onBack, options));
@@ -90,7 +94,8 @@ export async function showDetail(container, summary, source, onBack, options = {
         return;
     }
 
-    loading.remove();
+    loading.className = 'sbbs-visually-hidden';
+    setText(loading, `Details loaded for ${card.name || 'Untitled'}.`);
 
     const body = el('div', 'sbbs-detail-body');
 
@@ -130,7 +135,8 @@ export async function showDetail(container, summary, source, onBack, options = {
     const main = el('div', 'sbbs-detail-main');
 
     // ---- identity ----
-    main.append(el('h2', 'sbbs-detail-name', card.name || 'Untitled'));
+    const identity = el('div', 'sbbs-detail-identity');
+    identity.append(el('h2', 'sbbs-detail-name', card.name || 'Untitled'));
 
     const meta = el('div', 'sbbs-detail-meta');
     const rating = ratingOf(card);
@@ -147,13 +153,19 @@ export async function showDetail(container, summary, source, onBack, options = {
         }
     }
     if (meta.childElementCount > 0) {
-        main.append(meta);
+        identity.append(meta);
     }
+
+    const intro = card.tagline || summary.tagline;
+    if (intro) {
+        identity.append(el('p', 'sbbs-detail-intro', intro));
+    }
+    body.prepend(identity);
 
     // ---- stats ----
     const stats = sourceStatLine(source.id, card.stats);
     if (stats) {
-        main.append(el('div', 'sbbs-detail-stats', stats));
+        identity.append(el('div', 'sbbs-detail-stats', stats));
     }
 
     // ---- tags ----
@@ -165,7 +177,7 @@ export async function showDetail(container, summary, source, onBack, options = {
             && (source.capabilities?.filters ?? []).some((filter) => filter.key === 'tags');
 
         const tagRow = el('div', 'sbbs-tags');
-        for (const tag of card.tags.slice(0, 24)) {
+        for (const tag of card.tags) {
             if (!canFilter) {
                 tagRow.append(el('span', 'sbbs-tag', tag));
                 continue;
@@ -176,7 +188,13 @@ export async function showDetail(container, summary, source, onBack, options = {
             button.addEventListener('click', () => onTag(tag));
             tagRow.append(button);
         }
-        main.append(tagRow);
+        if (card.tags.length > 8) {
+            const tags = el('details', 'sbbs-detail-tags');
+            tags.append(el('summary', undefined, `Tags (${card.tags.length})`), tagRow);
+            main.append(tags);
+        } else {
+            main.append(tagRow);
+        }
     }
 
     // ---- source-reported card contents ----

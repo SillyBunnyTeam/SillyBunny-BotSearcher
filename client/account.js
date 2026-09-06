@@ -1,8 +1,8 @@
 /**
- * Retained public BotBooru account state.
+ * Retained public BotBooru and Saucepan account state.
  *
- * The bearer never crosses the server boundary. This module keeps only the
- * bounded status needed to keep the settings drawer and open browser dialogs in
+ * Credentials are sent to the account routes, never copied into retained state.
+ * Only bounded public status keeps the settings drawer and open dialogs in
  * agreement when a login, logout or account preference changes.
  */
 
@@ -72,17 +72,23 @@ export function subscribeBotbooruAccount(listener) {
     return () => listeners.delete(listener);
 }
 
+// A read cannot describe a session being replaced. Older replies, including
+// failures, return retained state rather than reaching a newer control's catch.
 export async function refreshBotbooruAccount({ signal } = {}) {
-    const expectedOperation = operation;
+    if (pendingMutations > 0) {
+        return getBotbooruAccount();
+    }
+    const expectedOperation = ++operation;
     try {
         const result = await post('/account/status', { source: SOURCE }, { signal });
         if (expectedOperation === operation) {
             publish(result);
         }
     } catch (error) {
-        if (expectedOperation === operation) {
-            publishAccountError(error);
+        if (expectedOperation !== operation) {
+            return getBotbooruAccount();
         }
+        publishAccountError(error);
         throw error;
     }
     return getBotbooruAccount();
@@ -90,8 +96,8 @@ export async function refreshBotbooruAccount({ signal } = {}) {
 
 export async function loginBotbooruAccount(username, password, { signal } = {}) {
     pendingMutations++;
+    const expectedOperation = ++operation;
     try {
-        const expectedOperation = ++operation;
         const result = await post('/account/login', {
             source: SOURCE,
             username,
@@ -101,6 +107,12 @@ export async function loginBotbooruAccount(username, password, { signal } = {}) 
             publish(result, { forceRevision: true });
         }
         return getBotbooruAccount();
+    } catch (error) {
+        if (expectedOperation !== operation) {
+            return getBotbooruAccount();
+        }
+        publishAccountError(error);
+        throw error;
     } finally {
         pendingMutations--;
     }
@@ -108,23 +120,22 @@ export async function loginBotbooruAccount(username, password, { signal } = {}) 
 
 export async function setBotbooruNsfw(enabled, { signal } = {}) {
     pendingMutations++;
+    const expectedOperation = ++operation;
     try {
-        const expectedOperation = ++operation;
-        try {
-            const result = await post('/account/nsfw', {
-                source: SOURCE,
-                enabled: enabled === true,
-            }, { signal });
-            if (expectedOperation === operation) {
-                publish(result, { forceRevision: true });
-            }
-        } catch (error) {
-            if (expectedOperation === operation) {
-                publishAccountError(error);
-            }
-            throw error;
+        const result = await post('/account/nsfw', {
+            source: SOURCE,
+            enabled: enabled === true,
+        }, { signal });
+        if (expectedOperation === operation) {
+            publish(result, { forceRevision: true });
         }
         return getBotbooruAccount();
+    } catch (error) {
+        if (expectedOperation !== operation) {
+            return getBotbooruAccount();
+        }
+        publishAccountError(error);
+        throw error;
     } finally {
         pendingMutations--;
     }
@@ -132,13 +143,19 @@ export async function setBotbooruNsfw(enabled, { signal } = {}) {
 
 export async function logoutBotbooruAccount({ signal } = {}) {
     pendingMutations++;
+    const expectedOperation = ++operation;
     try {
-        const expectedOperation = ++operation;
         const result = await post('/account/logout', { source: SOURCE }, { signal });
         if (expectedOperation === operation) {
             publish(result, { forceRevision: true });
         }
         return getBotbooruAccount();
+    } catch (error) {
+        if (expectedOperation !== operation) {
+            return getBotbooruAccount();
+        }
+        publishAccountError(error);
+        throw error;
     } finally {
         pendingMutations--;
     }
@@ -174,5 +191,102 @@ function publishAccountError(error) {
     } else {
         publish({ loggedIn: false }, { forceRevision: true, error: code });
     }
+    return true;
+}
+
+const saucepanListeners = new Set();
+let saucepanOperation = 0;
+let saucepanPendingMutations = 0;
+let saucepanState = Object.freeze({ known: false, loggedIn: false, error: null, revision: 0 });
+
+function publishSaucepan(value, { forceRevision = false, error = null } = {}) {
+    const loggedIn = value?.loggedIn === true;
+    const changed = forceRevision || !saucepanState.known
+        || saucepanState.loggedIn !== loggedIn || saucepanState.error !== error;
+    saucepanState = Object.freeze({
+        known: true, loggedIn, error,
+        revision: saucepanState.revision + (changed ? 1 : 0),
+    });
+    for (const listener of saucepanListeners) {
+        listener(saucepanState);
+    }
+    return saucepanState;
+}
+
+export function getSaucepanAccount() {
+    return saucepanState;
+}
+
+export function subscribeSaucepanAccount(listener) {
+    if (typeof listener !== 'function') {
+        return () => {};
+    }
+    saucepanListeners.add(listener);
+    listener(saucepanState);
+    return () => saucepanListeners.delete(listener);
+}
+
+export async function refreshSaucepanAccount({ signal } = {}) {
+    if (saucepanPendingMutations > 0) {
+        return getSaucepanAccount();
+    }
+    const expectedOperation = ++saucepanOperation;
+    try {
+        const result = await post('/account/status', { source: 'saucepan' }, { signal });
+        if (expectedOperation === saucepanOperation) {
+            publishSaucepan(result);
+        }
+    } catch (error) {
+        if (expectedOperation !== saucepanOperation) {
+            return getSaucepanAccount();
+        }
+        publishSaucepanError(error);
+        throw error;
+    }
+    return getSaucepanAccount();
+}
+
+export function loginSaucepanAccount(username, password, options) {
+    return mutateSaucepan('/account/login', { username, password }, options);
+}
+
+export function setSaucepanToken(token, options) {
+    return mutateSaucepan('/account/token', { token }, options);
+}
+
+export function logoutSaucepanAccount(options) {
+    return mutateSaucepan('/account/logout', {}, options);
+}
+
+async function mutateSaucepan(path, body, { signal } = {}) {
+    saucepanPendingMutations++;
+    const expectedOperation = ++saucepanOperation;
+    try {
+        const result = await post(path, { source: 'saucepan', ...body }, { signal });
+        if (expectedOperation === saucepanOperation) {
+            publishSaucepan(result, { forceRevision: true });
+        }
+        return getSaucepanAccount();
+    } catch (error) {
+        if (expectedOperation !== saucepanOperation) {
+            return getSaucepanAccount();
+        }
+        publishSaucepanError(error);
+        throw error;
+    } finally {
+        saucepanPendingMutations--;
+    }
+}
+
+export function noteSaucepanAccountError(error) {
+    return saucepanPendingMutations === 0 && publishSaucepanError(error);
+}
+
+function publishSaucepanError(error) {
+    if (!['saucepan_login_required', 'saucepan_session_expired'].includes(error?.code)) {
+        return false;
+    }
+    saucepanOperation++;
+    publishSaucepan({ loggedIn: false }, { forceRevision: true, error: error.code });
     return true;
 }

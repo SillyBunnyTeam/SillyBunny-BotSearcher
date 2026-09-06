@@ -412,9 +412,16 @@ function logUpstream(adapter, url, status, ms) {
  * Builds the per-adapter context handed to search()/getDetail().
  * @param {{ id: string, allowedHosts: readonly string[] }} adapter
  */
-export function contextFor(adapter, { bearerToken } = {}) {
+export function contextFor(adapter, { bearerToken, signal } = {}) {
+    const requestOptions = (options) => ({
+        ...(options ?? {}),
+        bearerToken,
+        signal: signal && options?.signal
+            ? AbortSignal.any([signal, options.signal])
+            : signal ?? options?.signal,
+    });
     return Object.freeze({
-        fetchJson: (url, options) => fetchJson(adapter, url, { ...(options ?? {}), bearerToken }),
-        fetchBytes: (url, options) => fetchBytes(adapter, url, { ...(options ?? {}), bearerToken }),
+        fetchJson: (url, options) => fetchJson(adapter, url, requestOptions(options)),
+        fetchBytes: (url, options) => fetchBytes(adapter, url, requestOptions(options)),
     });
 }

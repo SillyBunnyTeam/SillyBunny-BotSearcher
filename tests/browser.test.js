@@ -1960,6 +1960,8 @@ test('cards can be selected for one import and walked with the arrow keys', asyn
         cards[2].click();
         importSelected.click();
         assert.equal(root.dataset.view, 'intake');
+        assert.equal(cardRequests.length, 0, 'opening the batch must not start imports');
+        popup.content.querySelector('.sbbs-bulk-start').click();
         await waitFor(() => /Imported 0 cards\. 2 failed\./.test(popup.content.querySelector('.sbbs-intake .sbbs-state')?.textContent ?? ''), 'the batch did not finish');
         assert.deepEqual(cardRequests.map((request) => request.id), ['a', 'c'], 'exactly the selected cards, in grid order');
         assert.match(popup.content.querySelector('.sbbs-intake-title').textContent, /Import 2 cards/);

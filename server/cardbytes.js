@@ -102,7 +102,7 @@ function validateImageBudget(width, height, bitDepth, colorType, interlace) {
     if (!Number.isSafeInteger(decodedBytes) || decodedBytes > MAX_DECODED_IMAGE_BYTES) {
         throw new CardBytesError('png_malformed', 'decoded image exceeds budget');
     }
-    return { decodedBytes, passes };
+    return { decodedBytes, passes, bitDepth, colorType };
 }
 
 function imagePasses(width, height, channels, bitDepth, interlace) {
@@ -119,7 +119,7 @@ function imagePasses(width, height, channels, bitDepth, interlace) {
     });
 }
 
-function validateImageData(chunks, layout) {
+function validateImageData(chunks, layout, paletteEntries) {
     let inflated;
     try {
         inflated = inflateSync(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks), {
@@ -133,11 +133,45 @@ function validateImageData(chunks, layout) {
         throw new CardBytesError('png_malformed', 'IDAT scanline length mismatch');
     }
 
+    const checkIndices = layout.colorType === 3 && paletteEntries < 2 ** layout.bitDepth;
     let offset = 0;
     for (const pass of layout.passes) {
+        let previous = null;
         for (let row = 0; row < pass.height; row++) {
-            if (inflated[offset] > 4) {
+            const filter = inflated[offset];
+            if (filter > 4) {
                 throw new CardBytesError('png_malformed', 'invalid PNG filter type');
+            }
+            if (checkIndices) {
+                const bytes = inflated.subarray(offset + 1, offset + 1 + pass.rowBytes);
+                for (let index = 0; index < bytes.length; index++) {
+                    const left = bytes[index - 1] ?? 0;
+                    const up = previous?.[index] ?? 0;
+                    const upperLeft = previous?.[index - 1] ?? 0;
+                    let predictor = 0;
+                    if (filter === 1) {
+                        predictor = left;
+                    } else if (filter === 2) {
+                        predictor = up;
+                    } else if (filter === 3) {
+                        predictor = Math.floor((left + up) / 2);
+                    } else if (filter === 4) {
+                        const p = left + up - upperLeft;
+                        const a = Math.abs(p - left);
+                        const b = Math.abs(p - up);
+                        const c = Math.abs(p - upperLeft);
+                        predictor = a <= b && a <= c ? left : (b <= c ? up : upperLeft);
+                    }
+                    bytes[index] = (bytes[index] + predictor) & 0xFF;
+                }
+                for (let pixel = 0; pixel < pass.width; pixel++) {
+                    const bit = pixel * layout.bitDepth;
+                    const index = (bytes[bit >>> 3] >>> (8 - layout.bitDepth - (bit & 7))) & ((1 << layout.bitDepth) - 1);
+                    if (index >= paletteEntries) {
+                        throw new CardBytesError('png_malformed', 'palette index out of range');
+                    }
+                }
+                previous = bytes;
             }
             offset += pass.rowBytes + 1;
         }
@@ -169,6 +203,8 @@ function readPngTextChunks(buffer) {
     let imageDataEnded = false;
     let cardMetadataBytes = 0;
     let imageLayout = null;
+    let paletteEntries = 0;
+    const paletteChunks = new Set();
     const imageDataChunks = [];
 
     while (offset + 8 <= buffer.length) {
@@ -232,7 +268,32 @@ function readPngTextChunks(buffer) {
             throw new CardBytesError('png_malformed', 'duplicate IHDR');
         }
 
+        if (type === 'PLTE') {
+            if (paletteEntries > 0 || sawImageData || paletteChunks.size > 0
+                || imageLayout.colorType === 0 || imageLayout.colorType === 4
+                || length === 0 || length % 3 !== 0 || length > 256 * 3
+                || (imageLayout.colorType === 3 && length / 3 > 2 ** imageLayout.bitDepth)) {
+                throw new CardBytesError('png_malformed', 'invalid PLTE');
+            }
+            paletteEntries = length / 3;
+        }
+        if (type === 'tRNS' || type === 'bKGD' || type === 'hIST') {
+            if (sawImageData || paletteChunks.has(type)) {
+                throw new CardBytesError('png_malformed', 'invalid palette chunk order');
+            }
+            if ((type === 'hIST' && (paletteEntries === 0 || length !== paletteEntries * 2))
+                || (imageLayout.colorType === 3 && (paletteEntries === 0
+                    || (type === 'tRNS' && length > paletteEntries)
+                    || (type === 'bKGD' && (length !== 1 || buffer[dataStart] >= paletteEntries))))) {
+                throw new CardBytesError('png_malformed', 'invalid palette chunk');
+            }
+            paletteChunks.add(type);
+        }
+
         if (type === 'IDAT') {
+            if (imageLayout.colorType === 3 && paletteEntries === 0) {
+                throw new CardBytesError('png_malformed', 'missing PLTE');
+            }
             if (imageDataEnded) {
                 throw new CardBytesError('png_malformed', 'non-consecutive IDAT');
             }
@@ -292,7 +353,7 @@ function readPngTextChunks(buffer) {
         throw new CardBytesError('png_malformed', 'truncated: no IEND chunk');
     }
 
-    validateImageData(imageDataChunks, imageLayout);
+    validateImageData(imageDataChunks, imageLayout, paletteEntries);
 
     return found;
 }
@@ -423,6 +484,7 @@ const SCAN_LIMITS = Object.freeze({
     nodes: 10_000,
     textBytes: 512 * 1024,
     urls: 256,
+    urlHosts: 32,
     macroNames: 64,
     privateInfo: 32,
     htmlFields: 16,
@@ -445,7 +507,7 @@ const SCAN_LIMITS = Object.freeze({
 const SCRIPT_OR_IFRAME = /<\s*(?:script|iframe)(?:\s|>)/i;
 const ANY_HTML_TAG = /<\s*\/?\s*[a-z][a-z0-9-]*(?:\s[^<>]*)?\/?>/i;
 const URL_PATTERN = /https?:\/\/[^\s)"'<>]+/gi;
-const MACRO_PATTERN = /\{\{\s*([A-Za-z0-9_:.\-/#]{1,64})/g;
+const MACRO_PATTERN = /\{\{\s*[#/]?([A-Za-z_][A-Za-z0-9_]{0,63})(?=::|\s|\}\})/g;
 
 /**
  * Details an author probably did not mean to publish.
@@ -486,7 +548,8 @@ export function describeCard(parsed, buffer) {
     // thing to executable content a card can carry, so they get counted.
     const regex = own(extensions, 'regex_scripts');
 
-    const scan = scanCard(data);
+    const scan = scanCard(root, data);
+    const malformed = findMalformed(parsed, data, scan.reasons);
 
     return {
         // --- unchanged, and shared with the source-reported shape in normalize.js ---
@@ -510,13 +573,14 @@ export function describeCard(parsed, buffer) {
         tagCount: Array.isArray(own(data, 'tags')) ? own(data, 'tags').length : 0,
 
         // --- what the walk found ---
+        scan: { complete: scan.reasons.size === 0, reasons: [...scan.reasons].sort() },
         macros: scan.macros,
         html: scan.html,
         externalUrls: scan.externalUrls,
         privateInfo: scan.privateInfo,
 
         extensions: describeExtensions(extensions),
-        malformed: findMalformed(parsed, data),
+        malformed,
         promptText: promptTextOf(data),
     };
 }
@@ -552,11 +616,13 @@ function describeExtensions(extensions) {
  * outside the spec entirely. Reported, never repaired: guessing what an author
  * meant is how a reader becomes a rewriter.
  */
-function findMalformed(parsed, data) {
+function findMalformed(parsed, data, reasons) {
     const problems = [];
     const add = (field, problem) => {
         if (problems.length < 32) {
             problems.push({ field, problem });
+        } else {
+            reasons.add('finding_limit');
         }
     };
 
@@ -685,7 +751,8 @@ function lorebookTextOf(data) {
  * per finding: the input is a stranger's file, and one traversal with one set
  * of caps is far easier to reason about than five.
  */
-function scanCard(root) {
+function scanCard(root, data) {
+    const reasons = new Set();
     const urls = new Set();
     const urlHosts = new Set();
     const macroNames = new Set();
@@ -704,13 +771,24 @@ function scanCard(root) {
     // where it is rather than only that it exists somewhere.
     const stack = [{ value: root, field: null }];
 
-    while (stack.length > 0 && nodes < SCAN_LIMITS.nodes && textBytes < SCAN_LIMITS.textBytes) {
+    while (stack.length > 0 && nodes < SCAN_LIMITS.nodes) {
         const { value: current, field } = stack.pop();
         nodes++;
 
         if (typeof current === 'string') {
-            textBytes += Buffer.byteLength(current);
-            scanText(current.slice(0, SCAN_LIMITS.scanString), field ?? 'card');
+            const bytes = Buffer.from(current, 'utf8');
+            const remaining = SCAN_LIMITS.textBytes - textBytes;
+            const length = Math.min(bytes.length, SCAN_LIMITS.scanString, remaining);
+            if (bytes.length > SCAN_LIMITS.scanString) {
+                reasons.add('string_limit');
+            }
+            if (bytes.length > remaining) {
+                reasons.add('text_limit');
+            }
+            textBytes += length;
+            if (length > 0) {
+                scanText(bytes.subarray(0, length).toString('utf8'), field ?? 'card');
+            }
             continue;
         }
         if (!current || typeof current !== 'object' || seen.has(current)) {
@@ -719,6 +797,9 @@ function scanCard(root) {
         seen.add(current);
 
         if (Array.isArray(current)) {
+            if (current.length > SCAN_LIMITS.children) {
+                reasons.add('child_limit');
+            }
             for (let index = 0; index < current.length && index < SCAN_LIMITS.children; index++) {
                 stack.push({ value: current[index], field });
             }
@@ -728,24 +809,34 @@ function scanCard(root) {
         let keys = 0;
         for (const key of Object.getOwnPropertyNames(current)) {
             if (keys++ >= SCAN_LIMITS.children) {
+                reasons.add('child_limit');
                 break;
             }
             // Top level names the field; deeper nodes inherit it, so a URL in a
             // lorebook entry is still reported as being in the lorebook.
-            stack.push({ value: current[key], field: field ?? key });
+            stack.push({ value: current[key], field: current === root && root !== data && key === 'data' ? null : field ?? key });
         }
+    }
+    if (stack.length > 0) {
+        reasons.add('node_limit');
     }
 
     function scanText(text, field) {
-        if (urls.size < SCAN_LIMITS.urls) {
-            for (const match of text.match(URL_PATTERN) ?? []) {
-                urls.add(match);
-                const host = hostOf(match);
-                if (host) {
+        for (const match of text.match(URL_PATTERN) ?? []) {
+            if (urls.has(match)) {
+                continue;
+            }
+            if (urls.size >= SCAN_LIMITS.urls) {
+                reasons.add('finding_limit');
+                break;
+            }
+            urls.add(match);
+            const host = hostOf(match);
+            if (host && !urlHosts.has(host)) {
+                if (urlHosts.size < SCAN_LIMITS.urlHosts) {
                     urlHosts.add(host);
-                }
-                if (urls.size >= SCAN_LIMITS.urls) {
-                    break;
+                } else {
+                    reasons.add('finding_limit');
                 }
             }
         }
@@ -756,6 +847,8 @@ function scanCard(root) {
             macroCount++;
             if (macroNames.size < SCAN_LIMITS.macroNames) {
                 macroNames.add(macro[1].toLowerCase());
+            } else if (!macroNames.has(macro[1].toLowerCase())) {
+                reasons.add('finding_limit');
             }
         }
 
@@ -763,6 +856,8 @@ function scanCard(root) {
             htmlCount++;
             if (htmlFields.size < SCAN_LIMITS.htmlFields) {
                 htmlFields.add(field);
+            } else if (!htmlFields.has(field)) {
+                reasons.add('finding_limit');
             }
         }
         if (!hasScriptOrIframe && SCRIPT_OR_IFRAME.test(text)) {
@@ -770,15 +865,16 @@ function scanCard(root) {
         }
 
         for (const [kind, pattern] of PRIVATE_PATTERNS) {
-            if (privateInfo.length >= SCAN_LIMITS.privateInfo) {
-                break;
-            }
             pattern.lastIndex = 0;
             let hit;
-            while ((hit = pattern.exec(text)) !== null && privateInfo.length < SCAN_LIMITS.privateInfo) {
+            while ((hit = pattern.exec(text)) !== null) {
                 const key = `${kind}:${field}:${hit[0]}`;
                 if (privateSeen.has(key)) {
                     continue;
+                }
+                if (privateInfo.length >= SCAN_LIMITS.privateInfo) {
+                    reasons.add('finding_limit');
+                    break;
                 }
                 privateSeen.add(key);
                 privateInfo.push({ kind, field, redacted: redact(hit[0]) });
@@ -787,7 +883,8 @@ function scanCard(root) {
     }
 
     return {
-        externalUrls: { count: urls.size, hosts: [...urlHosts].slice(0, 32) },
+        reasons,
+        externalUrls: { count: urls.size, hosts: [...urlHosts] },
         macros: { count: macroCount, names: [...macroNames].sort() },
         html: { count: htmlCount, fields: [...htmlFields], hasScriptOrIframe },
         privateInfo,

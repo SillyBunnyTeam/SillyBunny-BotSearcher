@@ -125,7 +125,7 @@ function stripCard(parsed) {
         }
     }
 
-    const redactions = redactStrings(data);
+    const redactions = redactStrings(card);
     for (const kind of redactions) {
         note('privateInfo', kind);
     }
@@ -158,7 +158,10 @@ function redactStrings(root) {
 
         const keys = Array.isArray(current)
             ? current.keys()
-            : Object.getOwnPropertyNames(current).slice(0, MAX_CHILDREN);
+            : Object.getOwnPropertyNames(current);
+        if (!Array.isArray(current) && keys.length > MAX_CHILDREN) {
+            throw new CardBytesError('clean_incomplete', 'child_limit');
+        }
 
         for (const key of keys) {
             const value = current[key];
@@ -182,6 +185,10 @@ function redactStrings(root) {
         }
     }
 
+    // A bounded clean must refuse unfinished work, never return partially redacted bytes.
+    if (stack.length > 0) {
+        throw new CardBytesError('clean_incomplete', 'node_limit');
+    }
     return kinds;
 }
 
@@ -229,4 +236,3 @@ function decodeChunkPayload(chunk, buffer) {
     const text = buffer.toString('latin1', chunk.dataStart + separator + 1, chunk.dataEnd);
     return Buffer.from(text.replace(/[\r\n]/g, ''), 'base64');
 }
-

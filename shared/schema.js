@@ -10,8 +10,8 @@
  * that reports a different one.
  */
 
-/** Bumped only when the request/response contract changes incompatibly. */
-export const PROTOCOL_VERSION = 7;
+/** Protocol 8 adds inside.scan={complete,reasons} and changes merged-search cursors. */
+export const PROTOCOL_VERSION = 8;
 
 /**
  * How many sources one search may fan out to.
