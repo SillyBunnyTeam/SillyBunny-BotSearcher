@@ -489,6 +489,18 @@ test('isolated browser layouts, live detail states, keyboard focus and intake pr
                 await fit();
                 const source = await page.locator('#sbbs_source').boundingBox();
                 assert.ok(source.width >= 100, `source picker stays legible: ${source.width}px`);
+                const header = await page.locator('.sbbs-root > header').evaluate((node) => {
+                    const style = getComputedStyle(node);
+                    return { overflowY: style.overflowY,
+                        scrollable: node.scrollHeight > node.clientHeight + 1 };
+                });
+                assert.equal(header.overflowY, 'visible', 'search header is never its own scroll box');
+                assert.equal(header.scrollable, false, 'search header is fully exposed, not clipped');
+                const queryBox = await page.locator('#sbbs_query').boundingBox();
+                const headerBox = await page.locator('.sbbs-root > header').boundingBox();
+                assert.ok(queryBox && headerBox && queryBox.y >= headerBox.y - 1
+                    && queryBox.y + queryBox.height <= headerBox.y + headerBox.height + 1,
+                'search field is fully visible inside the header');
                 const resultsHeight = await page.locator('.sbbs-body').evaluate((node) => node.clientHeight);
                 assert.ok(resultsHeight > 50, `toolbar leaves space for results: ${resultsHeight}px`);
                 await tabTo('#sbbs_inspect_file');

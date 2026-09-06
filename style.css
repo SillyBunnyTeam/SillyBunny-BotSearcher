@@ -44,6 +44,13 @@
     min-width: 0;
     position: relative;
     line-height: 1.5;
+    /*
+     * Fallback scroller for viewports shorter than the exposed header plus a
+     * usable results floor. It only ever scrolls the whole dialog; the header
+     * itself is never a scroll box (see below).
+     */
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .sbbs-visually-hidden {
@@ -71,10 +78,12 @@
 /* ---- search bar ---- */
 
 .sbbs-root > header:has(.sbbs-bar) {
+    /* The search controls stay fully exposed above the results. They are
+       never their own scroll box; .sbbs-body is the only column that scrolls. */
+    flex: 0 0 auto;
     min-height: 0;
-    max-height: 65%;
-    overflow-y: auto;
-    flex: 0 1 auto;
+    max-height: none;
+    overflow: visible;
 }
 
 .sbbs-bar {
@@ -368,7 +377,13 @@
 
 .sbbs-body {
     flex: 1 1 auto;
-    min-height: 0;
+    /*
+     * The header is fully exposed and takes whatever height it needs, so the
+     * results keep a viewport-relative floor instead of collapsing to nothing
+     * on short screens. Past that floor this column is the scroller; anything
+     * still too tall falls back to the root scroller above, never the header.
+     */
+    min-height: 25dvh;
     overflow-y: auto;
     overflow-x: hidden;
     display: flex;
@@ -1321,14 +1336,9 @@
         opacity: 1;
     }
 
-    /* Row 1 is the search field; row 2 shares out source, sort and Filters. */
-    .sbbs-bar {
-        position: -webkit-sticky;
-        position: sticky;
-        top: 0;
-        z-index: 1;
-        background: var(--sb-shell-surface, transparent);
-    }
+    /* The bar sits above the scrolling results, so it needs no sticky
+       positioning of its own. Sticky here only painted a floating strip over
+       the controls while the header scrolled beneath it. */
 
     /* .text_pole's own 5px block margins add ~20px across two rows. */
     .sbbs-source,
