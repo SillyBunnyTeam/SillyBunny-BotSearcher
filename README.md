@@ -67,7 +67,7 @@ Stop SillyBunny completely, then run the complete block in Git Bash (including o
 ```bash
 set -eu
 PLUGIN=plugins/SillyBunny-BotSearcher
-RELEASE=v0.8.0
+RELEASE=v0.9.0
 REPO=https://github.com/SillyBunnyTeam/SillyBunny-BotSearcher.git
 test ! -L "$PLUGIN"
 PLUGIN_ROOT="$(cd "$PLUGIN" && pwd -P)"
@@ -432,7 +432,7 @@ Change only the remote. If the checkout also has tracked local changes, or is a 
 
 The frontend extension and server plugin are one protocol release and must be updated together. If the server is older, use **Update server plugin and restart** or the displayed matching-tag commands. If the server is newer, update the frontend instead; BotSearcher does not offer server downgrades.
 
-Protocol 8 adds the inspection coverage contract, `inside.scan = { complete, reasons }`, and changes the merged-search cursor format. Both components must use protocol 8; older cursors cannot be continued, so start the search again after updating. This protocol change does not change the `0.8.0` release version or create a release tag. If both components show the same release number but different protocols, install both from the same verified commit.
+Release `0.9.0` uses protocol 8, which adds the inspection coverage contract, `inside.scan = { complete, reasons }`, and changes the merged-search cursor format. Update both components to `v0.9.0` together. Older cursors cannot be continued, so start the search again after updating.
 
 ### A source is unavailable
 
