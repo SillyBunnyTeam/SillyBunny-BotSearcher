@@ -527,7 +527,7 @@ function nativeRecovery(request, error) {
     const instructions = el(
         'p',
         undefined,
-        'Download the card from JannyAI, then return to the browse dialog and choose “Inspect a card file”.',
+        'Download the card from JannyAI, then return to the browse dialog, open “Inspect a card file” and choose a file.',
     );
     const pageUrl = request.card?.pageUrl;
     if (typeof pageUrl === 'string' && pageUrl !== '') {

@@ -143,12 +143,19 @@
     outline-offset: -2px;
 }
 
-.sbbs-file-actions,
 .sbbs-named-controls {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: var(--spacing-xs, 4px);
+}
+
+/*
+ * One collapsed line like Named searches. Plain block layout, not flex: flex
+ * on a details element hides the disclosure triangle in some browsers.
+ */
+.sbbs-file-actions[open] > summary {
+    margin-bottom: var(--spacing-xs, 4px);
 }
 
 .sbbs-named-controls .text_pole {

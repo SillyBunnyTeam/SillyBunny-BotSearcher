@@ -504,6 +504,15 @@ test('isolated browser layouts, live detail states, keyboard focus and intake pr
                 const resultsHeight = await page.locator('.sbbs-body').evaluate((node) => node.clientHeight);
                 assert.ok(resultsHeight > 50, `toolbar leaves space for results: ${resultsHeight}px`);
                 await tabTo('#sbbs_inspect_file');
+                await tabTo('#sbbs_file_actions > summary');
+                await page.keyboard.press('Enter');
+                assert.equal(await page.locator('#sbbs_inspect_file').isVisible(), false,
+                    'file inspection collapses to one line');
+                await capture(`file-actions-collapsed-${size}`);
+                await fit();
+                await page.keyboard.press('Enter');
+                assert.equal(await page.locator('#sbbs_inspect_file').isVisible(), true,
+                    'file inspection expands again');
             });
             await t.test(`${size}: named searches`, async () => {
                 await tabTo('#sbbs_named_searches > summary');

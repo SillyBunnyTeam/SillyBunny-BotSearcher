@@ -47,14 +47,15 @@
                 <button id="sbbs_filters_clear" class="menu_button sbbs-filters-clear" type="button">Clear source filters</button>
             </div>
         </div>
-        <div class="sbbs-intake-entry sbbs-file-actions">
+        <details class="sbbs-intake-entry sbbs-file-actions" id="sbbs_file_actions" open>
+            <summary>Inspect a card file</summary>
             <button id="sbbs_inspect_file" class="menu_button sbbs-inspect-file" type="button">
                 <i class="fa-solid fa-file-shield" aria-hidden="true"></i>
-                <span>Inspect a card file</span>
+                <span>Choose file</span>
             </button>
             <input id="sbbs_card_file" class="sbbs-visually-hidden" type="file" accept=".png,.json,image/png,application/json" tabindex="-1" aria-hidden="true">
             <span class="sbbs-setting-note">Reports what is inside a PNG or JSON card before importing it. You can also drop one onto this dialog.</span>
-        </div>
+        </details>
         <details class="sbbs-named-searches" id="sbbs_named_searches">
             <summary>Named searches</summary>
             <label class="checkbox_label"><input id="sbbs_named_consent" type="checkbox" aria-describedby="sbbs_named_privacy"><span id="sbbs_named_consent_label"></span></label>
