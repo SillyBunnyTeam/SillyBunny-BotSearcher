@@ -31,14 +31,20 @@
                 <span>Filters</span>
                 <span id="sbbs_filters_badge" class="sbbs-filters-badge" hidden></span>
             </button>
-            <button id="sbbs_refresh" class="menu_button sbbs-refresh" type="button">Refresh results</button>
+        </div>
         </div>
         <!--
+            Refresh and selection scroll with the page, directly under the
+            sticky search rows: Select cards sits beside Refresh results, and
+            the count with Select all and Import selected joins them in this
+            row while selecting.
+        -->
+        <div class="sbbs-bar-row sbbs-bar-row-actions">
+        <button id="sbbs_refresh" class="menu_button sbbs-refresh" type="button">Refresh results</button>
+        <!--
             Selecting several cards for one import. Off, it is a single button;
-            on, the grid's cards toggle instead of opening and this row carries
-            the count and the actions. It lives in the sticky header rather
-            than above the grid, so Import selected stays in reach on a long
-            grid that now scrolls with the whole page.
+            on, the grid's cards toggle instead of opening and the count and
+            the actions join it in this row.
         -->
         <div id="sbbs_selection" class="sbbs-selection" hidden>
             <button id="sbbs_select_toggle" class="menu_button sbbs-select-toggle" type="button" aria-pressed="false">

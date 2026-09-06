@@ -536,6 +536,31 @@ test('isolated browser layouts, live detail states, keyboard focus and intake pr
                 });
                 assert.equal(sideways.clipped, true, 'header and results clip sideways overflow');
                 assert.equal(sideways.left, 0, 'focusing the search field did not shift the page sideways');
+                // Select cards must sit beside Refresh results: compare the whole
+                // selection group, not the toggle alone, because a tall group
+                // vertically centres Refresh beside it.
+                const placement = await page.evaluate(() => {
+                    const selection = document.querySelector('#sbbs_selection');
+                    selection.hidden = false;
+                    const refresh = document.querySelector('#sbbs_refresh').getBoundingClientRect();
+                    const group = document.querySelector('#sbbs_selection').getBoundingClientRect();
+                    const toggle = document.querySelector('#sbbs_select_toggle').getBoundingClientRect();
+                    const sameRow = group.top < refresh.bottom - 1 && refresh.top < group.bottom - 1;
+                    const ordered = sameRow
+                        ? group.left >= refresh.right - 1
+                        : group.top >= refresh.bottom - 1 || refresh.top >= group.bottom - 1;
+                    const toggleInside = toggle.left >= group.left - 1 && toggle.right <= group.right + 1;
+                    selection.hidden = true;
+                    if (!toggleInside) { return 'toggle escapes its group'; }
+                    if (!ordered) { return 'selection overlaps Refresh results'; }
+                    return sameRow ? 'beside' : 'wrapped';
+                });
+                assert.ok(placement === 'beside' || placement === 'wrapped',
+                    `Select cards sits beside Refresh results: ${placement}`);
+                if (width >= 1280) {
+                    assert.equal(placement, 'beside',
+                        'wide dialogs keep Select cards beside Refresh results');
+                }
                 await tabTo('#sbbs_inspect_file');
                 await tabTo('#sbbs_file_actions > summary');
                 await page.keyboard.press('Enter');

@@ -756,11 +756,13 @@
 /* ---- selecting cards ---- */
 
 /*
- * One row under source and sort, inside the sticky header: the mode toggle
- * alone when off, the count and the actions beside it when on. The sticky
- * wrapper keeps it in reach, so it needs no positioning of its own.
+ * Beside Refresh results, under the sticky search rows: the mode toggle
+ * alone when off, the count and the actions beside it when on. Zero basis
+ * with growth, so the toggle shares Refresh's line and only the overflow
+ * wraps inside this group rather than pushing the whole group down.
  */
 .sbbs-selection {
+    flex: 1 1 0;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
