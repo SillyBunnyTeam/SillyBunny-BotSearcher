@@ -489,7 +489,8 @@ test('browser controls and shortlist remain usable at desktop and narrow mobile 
                         height: 90vh; max-width: 90vw; padding: 20px; }
                     .popup-content, .popup-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
                     button, input, select { font: inherit; }
-                    .menu_button { display: flex; width: fit-content; padding: 6px 10px; white-space: nowrap; }
+                    .menu_button { display: flex; width: min-content; padding: 6px 16px; white-space: nowrap;
+                        min-width: 38px; min-height: 38px; }
                     .text_pole { width: 100%; min-height: 36px; }
                     .checkbox_label { display: flex; align-items: center; gap: 8px; }
                 </style><link rel="stylesheet" href="/style.css"></head><body></body></html>` });
@@ -512,18 +513,18 @@ test('browser controls and shortlist remain usable at desktop and narrow mobile 
         class Popup {
             constructor(template, _type, _title, options) {
                 this.options = options;
-                this.dlg = document.createElement('div');
+                this.dlg = document.createElement('dialog');
                 this.dlg.className = 'popup';
                 const wrapper = document.createElement('div');
-                wrapper.className = 'popup-content';
+                wrapper.className = 'popup-body';
                 this.content = document.createElement('div');
-                this.content.className = 'popup-body';
+                this.content.className = 'popup-content';
                 this.content.innerHTML = template;
                 wrapper.append(this.content);
                 this.dlg.append(wrapper);
                 document.body.append(this.dlg);
             }
-            show() { return new Promise(() => {}); }
+            show() { this.dlg.showModal(); return new Promise(() => {}); }
         }
         globalThis.SillyTavern = { getContext: () => ({
             extensionSettings, saveSettingsDebounced() {}, Popup,
@@ -536,6 +537,15 @@ test('browser controls and shortlist remain usable at desktop and narrow mobile 
     await page.locator('.sbbs-card-open').waitFor();
     for (const [width, height] of [[1440, 900], [360, 640], [320, 400]]) {
         await page.setViewportSize({ width, height });
+        for (const selector of ['#sbbs_select_toggle', '.sbbs-shortlist-toggle', '#sbbs_refresh']) {
+            const label = await page.locator(selector).first().evaluate((button) => {
+                const range = document.createRange();
+                range.selectNodeContents(button.querySelector('span') ?? button);
+                return { text: button.textContent, lines: new Set([...range.getClientRects()]
+                    .filter((rect) => rect.height && rect.width).map((rect) => Math.round(rect.top))).size };
+            });
+            assert.equal(label.lines, 1, `${width}px: ${label.text} stays on one line`);
+        }
         await page.locator('#sbbs_named_searches > summary').click();
         await page.locator('#sbbs_named_consent').check();
         await page.locator('#sbbs_named_name').fill('Mobile search');
