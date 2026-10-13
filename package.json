@@ -13,7 +13,7 @@
     },
     "dependencies": {
         "node-fetch": "^3.3.2",
-        "playwright": "^1.62.1",
+        "playwright": "^1.64.0",
         "rate-limiter-flexible": "^11.2.0"
     },
     "devDependencies": {
