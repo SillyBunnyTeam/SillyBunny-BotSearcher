@@ -14,7 +14,7 @@
     "dependencies": {
         "node-fetch": "^3.3.2",
         "playwright": "^1.62.1",
-        "rate-limiter-flexible": "^11.2.0"
+        "rate-limiter-flexible": "^11.2.2"
     },
     "devDependencies": {
         "eslint": "^9.39.5",
